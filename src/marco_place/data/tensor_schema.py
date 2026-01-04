@@ -147,6 +147,11 @@ class CircuitTensorData:
         return self.metadata['num_macros']
 
     @property
+    def num_stdcells(self) -> int:
+        """Number of standard cells (clustered) in the design."""
+        return self.metadata.get('num_stdcells', 0)
+
+    @property
     def num_nets(self) -> int:
         """Number of nets in the design."""
         return len(self.net_to_nodes)
@@ -277,8 +282,14 @@ class CircuitTensorData:
         return cls.from_dict(data)
 
     def __repr__(self) -> str:
-        return (
-            f"CircuitTensorData(design='{self.design_name}', "
-            f"num_macros={self.num_macros}, num_nets={self.num_nets}, "
-            f"canvas={self.canvas_width:.1f}x{self.canvas_height:.1f}um)"
-        )
+        parts = [
+            f"design='{self.design_name}'",
+            f"num_macros={self.num_macros}",
+        ]
+        if self.num_stdcells > 0:
+            parts.append(f"num_stdcells={self.num_stdcells}")
+        parts.extend([
+            f"num_nets={self.num_nets}",
+            f"canvas={self.canvas_width:.1f}x{self.canvas_height:.1f}um"
+        ])
+        return f"CircuitTensorData({', '.join(parts)})"

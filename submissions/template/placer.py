@@ -19,6 +19,7 @@ class BasePlacerInterface(ABC):
     Base interface for macro placement algorithms.
 
     All submissions must inherit from this class and implement the place() method.
+    Optionally, implement place_cells() for two-stage placement (macros + standard cells).
 
     Your placer will be evaluated on:
     1. Placement legality (no overlaps, within boundaries)
@@ -81,6 +82,49 @@ class BasePlacerInterface(ABC):
             >>>     return placement  # [num_macros, 2] tensor
         """
         pass
+
+    def place_cells(
+        self,
+        circuit_data: CircuitTensorData,
+        macro_placement: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute standard cell placement given fixed macro positions (OPTIONAL).
+
+        This method is optional. If not implemented, only macros will be placed.
+        For two-stage placement, implement this method to place standard cells
+        after macros have been fixed.
+
+        Args:
+            circuit_data: CircuitTensorData object with design information
+            macro_placement: [num_macros, 2] tensor of fixed macro positions
+
+        Returns:
+            cell_placement: torch.Tensor of shape [num_stdcells, 2]
+                          containing (x, y) coordinates of cell centers in microns
+
+        Constraints:
+        - Same constraints as macro placement (no overlaps, within boundaries)
+        - Cells must not overlap with fixed macros
+        - Runtime is included in the total 1-hour timeout
+
+        Notes:
+        - Standard cells are typically clustered (800-1000 clusters per design)
+        - You can use coarse placement (cells don't need detailed legalization)
+        - If not implemented, cells will keep their initial positions
+
+        Example:
+            >>> def place_cells(self, circuit_data, macro_placement):
+            >>>     num_cells = circuit_data.num_stdcells
+            >>>     # Place cells in remaining space
+            >>>     cell_placement = your_cell_placement_algorithm(
+            >>>         circuit_data, macro_placement
+            >>>     )
+            >>>     return cell_placement  # [num_stdcells, 2] tensor
+        """
+        # Default: return None to indicate cells are not placed
+        # Evaluation will use initial cell positions if None is returned
+        return None
 
 
 class TemplatePlacer(BasePlacerInterface):

@@ -65,6 +65,7 @@ class ProtobufParser:
 
         # Build tensors
         num_macros = len(self.hard_macros)
+        num_stdcells = len(self.soft_macros)
 
         # Macro positions and sizes
         macro_positions = torch.zeros(num_macros, 2)
@@ -75,6 +76,19 @@ class ProtobufParser:
             macro_positions[i, 1] = float(y)
             macro_sizes[i, 0] = float(w)
             macro_sizes[i, 1] = float(h)
+
+        # Standard cell (soft macro) positions and sizes
+        stdcell_positions = None
+        stdcell_sizes = None
+        if num_stdcells > 0:
+            stdcell_positions = torch.zeros(num_stdcells, 2)
+            stdcell_sizes = torch.zeros(num_stdcells, 2)
+
+            for i, (name, x, y, w, h) in enumerate(self.soft_macros):
+                stdcell_positions[i, 0] = float(x)
+                stdcell_positions[i, 1] = float(y)
+                stdcell_sizes[i, 0] = float(w)
+                stdcell_sizes[i, 1] = float(h)
 
         # Build net connectivity
         # Convert nets dict to list of node index tensors
@@ -91,11 +105,12 @@ class ProtobufParser:
         metadata = {
             'design_name': design_name,
             'num_macros': num_macros,
+            'num_stdcells': num_stdcells,
             'canvas_width': canvas_width,
             'canvas_height': canvas_height,
             'target_density': target_density,
             'num_ports': len(self.ports),
-            'num_soft_macros': len(self.soft_macros),
+            'num_soft_macros': len(self.soft_macros),  # Deprecated, use num_stdcells
         }
 
         # Create CircuitTensorData
@@ -103,13 +118,15 @@ class ProtobufParser:
             metadata=metadata,
             macro_positions=macro_positions,
             macro_sizes=macro_sizes,
+            stdcell_positions=stdcell_positions,
+            stdcell_sizes=stdcell_sizes,
             net_to_nodes=net_to_nodes,
             net_weights=net_weights,
         )
 
         print(f"Parsed {design_name}:")
         print(f"  Hard macros: {num_macros}")
-        print(f"  Soft macros: {len(self.soft_macros)}")
+        print(f"  Standard cells (clustered): {num_stdcells}")
         print(f"  Ports: {len(self.ports)}")
         print(f"  Nets: {len(net_to_nodes)}")
         print(f"  Canvas: {canvas_width:.1f} x {canvas_height:.1f} um")
