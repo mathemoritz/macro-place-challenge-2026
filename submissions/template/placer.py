@@ -33,7 +33,7 @@ class BasePlacerInterface(ABC):
     """
 
     @abstractmethod
-    def place(self, circuit_data: CircuitTensorData):
+    def place(self, circuit_data: CircuitTensorData) -> torch.Tensor:
         """
         Compute placement for the given circuit.
 
@@ -41,51 +41,48 @@ class BasePlacerInterface(ABC):
             circuit_data: CircuitTensorData object containing:
                 - metadata: dict with design_name, num_macros, num_stdcells, canvas dimensions
                 - macro_sizes: [num_macros, 2] tensor of (width, height)
-                - stdcell_sizes: [num_stdcells, 2] tensor of (width, height) [OPTIONAL]
+                - stdcell_sizes: [num_stdcells, 2] tensor of (width, height)
                 - net_to_nodes: list of tensors containing node indices for each net
                 - net_weights: [num_nets] tensor of net weights
                 - Other optional fields (see tensor_schema.py for full specification)
 
         Returns:
-            One of:
-            1. macro_placement: torch.Tensor [num_macros, 2] - if only placing macros
-            2. (macro_placement, cell_placement): tuple of tensors - if placing both
-               - macro_placement: [num_macros, 2]
-               - cell_placement: [num_stdcells, 2] or None
+            placement: torch.Tensor [num_macros + num_stdcells, 2]
+                - First num_macros rows: macro positions (x, y)
+                - Next num_stdcells rows: standard cell positions (x, y)
+                - If you don't want to place cells, return their initial positions
 
         Constraints:
-        - Placements must be within canvas boundaries
+        - All positions must be within canvas boundaries
         - No overlaps between macros
         - No overlaps between macros and cells
         - Runtime limit: 1 hour (3600 seconds) per benchmark
 
         Notes:
-        - You can place only macros (return single tensor)
-        - Or place both macros and cells (return tuple)
-        - If you don't place cells, they keep initial positions
+        - How you compute the placement is up to you (single-stage, two-stage, etc.)
+        - You can place only macros and keep cells at initial positions
         - Standard cells are pre-clustered (typically 800-1000 clusters per design)
 
         Examples:
-            >>> # Option 1: Macro-only placement
+            >>> # Example 1: Macro-only placement (keep cells at initial positions)
             >>> def place(self, circuit_data):
             >>>     macro_placement = your_macro_algorithm(circuit_data)
-            >>>     return macro_placement  # [num_macros, 2]
+            >>>     # Keep cells at initial positions
+            >>>     return torch.cat([macro_placement, circuit_data.stdcell_positions], dim=0)
 
-            >>> # Option 2: Place both (single-stage)
+            >>> # Example 2: Joint placement (single-stage algorithm)
             >>> def place(self, circuit_data):
-            >>>     macro_placement, cell_placement = your_joint_algorithm(circuit_data)
-            >>>     return macro_placement, cell_placement
+            >>>     all_positions = your_joint_algorithm(circuit_data)
+            >>>     return all_positions  # [num_macros + num_stdcells, 2]
 
-            >>> # Option 3: Place both (two-stage internally)
+            >>> # Example 3: Two-stage placement (internal implementation detail)
             >>> def place(self, circuit_data):
+            >>>     # Stage 1: Place macros
             >>>     macro_placement = place_macros_first(circuit_data)
-            >>>     cell_placement = place_cells_around_macros(circuit_data, macro_placement)
-            >>>     return macro_placement, cell_placement
-
-            >>> # Option 4: Macro-only (explicit)
-            >>> def place(self, circuit_data):
-            >>>     macro_placement = your_macro_algorithm(circuit_data)
-            >>>     return macro_placement, None  # None = don't place cells
+            >>>     # Stage 2: Place cells around macros
+            >>>     cell_placement = place_cells_given_macros(circuit_data, macro_placement)
+            >>>     # Return concatenated result
+            >>>     return torch.cat([macro_placement, cell_placement], dim=0)
         """
         pass
 
@@ -117,10 +114,11 @@ class TemplatePlacer(BasePlacerInterface):
         torch.manual_seed(self.seed)
 
         num_macros = circuit_data.num_macros
+        num_stdcells = circuit_data.num_stdcells
         canvas_width = circuit_data.canvas_width
         canvas_height = circuit_data.canvas_height
 
-        # Create grid
+        # Create grid for macros
         cols = int(torch.ceil(torch.sqrt(torch.tensor(num_macros, dtype=torch.float32))))
         rows = int(torch.ceil(torch.tensor(num_macros, dtype=torch.float32) / cols))
 
@@ -128,17 +126,21 @@ class TemplatePlacer(BasePlacerInterface):
         cell_height = canvas_height / rows
 
         # Place macros in grid
-        placement = torch.zeros(num_macros, 2)
+        macro_placement = torch.zeros(num_macros, 2)
 
         for i in range(num_macros):
             row = i // cols
             col = i % cols
 
             # Center of grid cell
-            placement[i, 0] = (col + 0.5) * cell_width
-            placement[i, 1] = (row + 0.5) * cell_height
+            macro_placement[i, 0] = (col + 0.5) * cell_width
+            macro_placement[i, 1] = (row + 0.5) * cell_height
 
-        return placement
+        # Keep standard cells at initial positions (macro-only placement)
+        if num_stdcells > 0:
+            return torch.cat([macro_placement, circuit_data.stdcell_positions], dim=0)
+        else:
+            return macro_placement
 
 
 if __name__ == "__main__":

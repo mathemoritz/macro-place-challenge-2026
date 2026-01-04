@@ -178,26 +178,14 @@ class EvaluationHarness:
             signal.alarm(self.timeout_seconds)
 
             try:
-                result_placement = placer.place(circuit_data)
+                placement = placer.place(circuit_data)
                 runtime = time.time() - start_time
 
                 # Cancel alarm
                 signal.alarm(0)
 
-                # Handle flexible return type
-                # placer.place() can return either:
-                #   - single tensor: macro_placement only
-                #   - tuple: (macro_placement, cell_placement)
-                if isinstance(result_placement, tuple):
-                    macro_placement, cell_placement = result_placement
-                    if verbose:
-                        has_cells = cell_placement is not None
-                        print(f"✓ Completed in {runtime:.2f}s (placed {'macros + cells' if has_cells else 'macros only'})")
-                else:
-                    macro_placement = result_placement
-                    cell_placement = None
-                    if verbose:
-                        print(f"✓ Completed in {runtime:.2f}s (placed macros only)")
+                if verbose:
+                    print(f"✓ Completed in {runtime:.2f}s")
 
             except TimeoutException:
                 if verbose:
@@ -207,7 +195,19 @@ class EvaluationHarness:
                 return result
 
             result['runtime'] = runtime
-            result['placed_cells'] = cell_placement is not None
+
+            # Extract macro and cell positions from placement tensor
+            # Format: [num_macros + num_stdcells, 2]
+            # First num_macros rows: macro positions
+            # Next num_stdcells rows: cell positions
+            num_macros = circuit_data.num_macros
+            num_stdcells = circuit_data.num_stdcells
+
+            macro_placement = placement[:num_macros]
+            if num_stdcells > 0 and placement.shape[0] > num_macros:
+                cell_placement = placement[num_macros:num_macros + num_stdcells]
+            else:
+                cell_placement = None
 
             # Validate placement (macro placement is primary validation target)
             if verbose:

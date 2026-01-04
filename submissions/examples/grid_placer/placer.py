@@ -1,9 +1,9 @@
 """
-Example grid-based placer demonstrating flexible placement interface.
+Example grid-based placer demonstrating placement interface.
 
-This placer demonstrates both:
-1. Macro-only placement (default)
-2. Joint macro + cell placement (when place_cells=True)
+This placer demonstrates:
+1. Macro-only placement (place_cells=False): Places macros, keeps cells at initial positions
+2. Joint placement (place_cells=True): Places both macros and cells
 """
 
 import torch
@@ -28,31 +28,38 @@ class GridPlacer:
 
         Args:
             seed: Random seed for reproducibility
-            place_cells: If True, also place standard cells; if False, macro-only
+            place_cells: If True, also place standard cells; if False, keep at initial positions
         """
         self.seed = seed
         self.place_cells = place_cells
 
-    def place(self, circuit_data: CircuitTensorData):
+    def place(self, circuit_data: CircuitTensorData) -> torch.Tensor:
         """
         Place macros (and optionally cells) in a grid pattern.
 
         Returns:
-            - If place_cells=False: macro_placement tensor [num_macros, 2]
-            - If place_cells=True: (macro_placement, cell_placement) tuple
+            placement: torch.Tensor [num_macros + num_stdcells, 2]
+                First num_macros rows: macro positions
+                Next num_stdcells rows: cell positions
         """
         torch.manual_seed(self.seed)
 
         # Place macros
         macro_placement = self._place_macros(circuit_data)
 
-        if not self.place_cells or circuit_data.num_stdcells == 0:
-            # Macro-only placement
+        # Handle standard cells
+        num_stdcells = circuit_data.num_stdcells
+        if num_stdcells == 0:
+            # No cells to place
             return macro_placement
+
+        if not self.place_cells:
+            # Keep cells at initial positions (macro-only placement)
+            return torch.cat([macro_placement, circuit_data.stdcell_positions], dim=0)
 
         # Joint placement: also place cells
         cell_placement = self._place_cells(circuit_data, macro_placement)
-        return macro_placement, cell_placement
+        return torch.cat([macro_placement, cell_placement], dim=0)
 
     def _place_macros(self, circuit_data: CircuitTensorData) -> torch.Tensor:
         """
@@ -173,28 +180,26 @@ if __name__ == "__main__":
         stdcell_sizes=stdcell_sizes,
     )
 
-    # Test 1: Macro-only placement
+    # Test 1: Macro-only placement (keeps cells at initial positions)
     print("\n--- Test 1: Macro-only placement ---")
     placer_macro_only = GridPlacer(place_cells=False)
-    result = placer_macro_only.place(circuit_data)
+    placement = placer_macro_only.place(circuit_data)
 
-    if isinstance(result, tuple):
-        print(f"ERROR: Expected single tensor, got tuple")
-    else:
-        print(f"✓ Returned macro placement: {result.shape}")
-        print(f"  {result}")
+    print(f"✓ Returned placement tensor: {placement.shape}")
+    print(f"  Expected: [{4 + 10}, 2]")
+    assert placement.shape == (14, 2), f"Shape mismatch: expected (14, 2), got {placement.shape}"
+    print(f"  Macro positions (first 4 rows):\n{placement[:4]}")
+    print(f"  Cell positions (last 10 rows, should be initial positions):\n{placement[4:]}")
 
     # Test 2: Joint placement
     print("\n--- Test 2: Joint macro + cell placement ---")
     placer_joint = GridPlacer(place_cells=True)
-    result = placer_joint.place(circuit_data)
+    placement = placer_joint.place(circuit_data)
 
-    if isinstance(result, tuple):
-        macro_placement, cell_placement = result
-        print(f"✓ Returned tuple:")
-        print(f"  Macro placement: {macro_placement.shape}")
-        print(f"  Cell placement: {cell_placement.shape}")
-    else:
-        print(f"ERROR: Expected tuple, got single tensor")
+    print(f"✓ Returned placement tensor: {placement.shape}")
+    print(f"  Expected: [{4 + 10}, 2]")
+    assert placement.shape == (14, 2), f"Shape mismatch: expected (14, 2), got {placement.shape}"
+    print(f"  Macro positions (first 4 rows):\n{placement[:4]}")
+    print(f"  Cell positions (last 10 rows, should be placed):\n{placement[4:]}")
 
     print("\n✓ GridPlacer tests passed!")
