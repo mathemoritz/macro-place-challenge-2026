@@ -43,11 +43,15 @@ htmlcov/
 
 # Data and results
 benchmarks/raw/
-benchmarks/processed/
 results/
 *.pt
 *.pth
 *.ckpt
+
+# Exception: Allow processed public benchmarks (so users can clone and use immediately)
+!benchmarks/processed/
+!benchmarks/processed/public/
+!benchmarks/processed/public/*.pt
 
 # Logs
 *.log
