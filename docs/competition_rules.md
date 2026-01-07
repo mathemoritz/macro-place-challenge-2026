@@ -33,14 +33,23 @@ The Macro Placement Challenge is a competition to develop better algorithms for 
 
 **$20,000 USD** (Twenty Thousand US Dollars)
 
+### Winner-Takes-All Format
+
+⚠️ **THE ENTIRE PRIZE GOES TO THE SINGLE TEAM THAT BEATS THE BASELINE BY THE MOST**
+
+Key Points:
+- **Only ONE team wins** - the team with the highest aggregate score
+- Winner must achieve an **aggregate score > 0** (beat Circuit Training baseline)
+- The full $20,000 goes to the winning team (split equally among team members)
+- **If no submission beats the baseline, NO PRIZE WILL BE AWARDED**
+- Second place and beyond receive no monetary prize (but will be recognized on the leaderboard)
+
 ### Critical Prize Eligibility Requirement
 
-⚠️ **THE PRIZE IS ONLY AWARDED IF YOU BEAT THE CIRCUIT TRAINING BASELINE**
-
-Specifically:
-- Your submission must achieve an **aggregate score > 0**
+To be eligible for the prize, your submission must:
+- Achieve an **aggregate score > 0** (positive improvement over Circuit Training)
 - The aggregate score measures improvement over Circuit Training (Google's RL-based method)
-- If no submission beats the baseline, **NO PRIZE WILL BE AWARDED**
+- Have the **highest aggregate score** among all eligible submissions
 
 ### What is the Circuit Training Baseline?
 
@@ -337,13 +346,17 @@ For final evaluation, we will use 3-5 **hidden benchmarks** that are:
 
 ### Selection Criteria
 
+**Only ONE team wins the $20,000 prize.**
+
 The winner is the submission with the **highest aggregate score** that:
 
-1. ✅ Achieves aggregate score > 0 (beats Circuit Training)
+1. ✅ Achieves aggregate score > 0 (beats Circuit Training baseline)
 2. ✅ Produces valid placements on all benchmarks
 3. ✅ Completes within timeout on all benchmarks
 4. ✅ Passes reproducibility verification
 5. ✅ Complies with all rules
+
+The winning team receives the **full $20,000** (split equally among team members if a team). All other submissions receive no monetary prize, regardless of performance.
 
 ### Verification Process
 
@@ -373,13 +386,13 @@ If **no submission achieves aggregate score > 0**:
 
 ### Ties
 
-In case of a tie (same aggregate score to 4 decimal places):
+In the unlikely event of a tie (same aggregate score to 4 decimal places), we will use the following tiebreakers:
 
 1. **Tiebreaker 1**: Highest minimum benchmark improvement (best worst-case performance)
 2. **Tiebreaker 2**: Lowest total runtime across all benchmarks
 3. **Tiebreaker 3**: First submission timestamp
 
-If still tied, prize will be split equally.
+If teams are still tied after all tiebreakers, the $20,000 prize will be split equally between the tied teams.
 
 ---
 
@@ -439,7 +452,9 @@ Participants must:
 
 🎯 **Goal**: Beat Circuit Training baseline on aggregate
 
-💰 **Prize**: $20,000 USD (only if you beat the baseline)
+💰 **Prize**: $20,000 USD to the single best team (winner-takes-all)
+
+🏆 **Winner**: ONE team with highest aggregate score > 0
 
 📊 **Scoring**: Geometric mean of improvements across all benchmarks
 
@@ -449,7 +464,7 @@ Participants must:
 
 🚫 **Not Allowed**: Hardcoding, external APIs, cheating
 
-🏆 **Winner**: Highest aggregate score > 0, with valid placements
+⚠️ **Important**: Only first place wins prize; second place and beyond get no money
 
 ---
 

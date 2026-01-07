@@ -6,9 +6,11 @@ This competition challenges you to develop better algorithms for macro placement
 
 ## 🎯 Prize Details
 
-- **Prize Amount**: $20,000
+- **Prize Amount**: $20,000 (winner-takes-all)
+- **Winner**: The SINGLE team with the highest aggregate score
 - **Eligibility**: Prize is awarded ONLY if your submission beats the **Circuit Training baseline** (best performing method in Kahng's paper) on aggregate across all benchmarks
 - **If no submission beats the baseline**: No prize will be awarded
+- **Second place and beyond**: No monetary prize (but recognized on leaderboard)
 
 ## 📊 The Challenge
 
