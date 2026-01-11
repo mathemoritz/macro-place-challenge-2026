@@ -1,27 +1,27 @@
 # Partcl Macro Placement Challenge
 
-**Win $20,000 by beating state-of-the-art macro placement algorithms!**
+**Win $20,000 by developing better macro placement algorithms!**
 
-This competition challenges you to develop better algorithms for macro placement in VLSI chip design. Your goal is to beat the benchmarks from the influential paper ["Assessment of Reinforcement Learning for Macro Placement"](https://arxiv.org/abs/2302.11014) (ISPD 2023).
+This competition challenges you to beat classical macro placement baselines on the ICCAD04 IBM benchmark suite. Your goal is to minimize placement cost while maintaining fast runtime and zero overlaps.
 
 ## 🎯 Prize Details
 
 - **Prize Amount**: $20,000 (winner-takes-all)
-- **Winner**: The SINGLE team with the highest aggregate score
-- **Eligibility**: Prize is awarded ONLY if your submission beats the **Circuit Training baseline** (best performing method in Kahng's paper) on aggregate across all benchmarks
-- **If no submission beats the baseline**: No prize will be awarded
+- **Winner**: The SINGLE team with the highest aggregate score across all IBM benchmarks
+- **Eligibility**: Prize is awarded ONLY if your submission beats BOTH baseline methods (Simulated Annealing AND RePlAce) on aggregate score
+- **If no submission beats both baselines**: No prize will be awarded
 - **Second place and beyond**: No monetary prize (but recognized on leaderboard)
 
 ## 📊 The Challenge
 
 ### What is Macro Placement?
 
-Macro placement is a critical step in chip design where large memory blocks (macros) need to be positioned on the chip canvas. Given:
-- **246 hard macros** of varying sizes (ranging from 0.8 to 27 μm²)
+Macro placement is a critical step in chip design where large memory blocks (macros) need to be positioned on the chip canvas. For example, the **ibm01** benchmark has:
+- **246 hard macros** of varying sizes (ranging from 0.8 to 27 μm², with 33× size variation)
 - **7,269 nets** connecting macros to each other and to 894 pre-placed standard cell clusters
 - **A 22.9 × 23.0 μm canvas** with 42.8% area utilization
 
-You must find positions that optimize:
+You must find positions that optimize the objective function while maintaining legality.
 
 ### Objective Function
 
@@ -35,21 +35,53 @@ proxy_cost = 1.0 × wirelength + 0.5 × density + 0.5 × congestion
 2. **Density** (weight = 0.5): Average of the top 10% densest grid cells
 3. **Congestion** (weight = 0.5): Average of the top 5% most congested routing segments
 
-### Hard Constraints
+These metrics are computed using the TILOS MacroPlacement evaluator (the same evaluator used in academic research).
+
+### Scoring System
+
+Your final score combines three factors:
+
+```python
+# Per-benchmark score
+if overlap_count > 0:
+    score = -1000  # Disqualified for overlaps
+else:
+    quality_score = (baseline_cost - your_cost) / baseline_cost  # Higher is better
+    runtime_penalty = max(0, (your_runtime - 300) / 300)  # Penalty for runtime > 5min
+    score = quality_score - 0.1 × runtime_penalty
+
+# Final score = geometric mean across all benchmarks
+final_score = geometric_mean([scores for all IBM benchmarks])
+```
+
+**To win**: `final_score` > 0 (meaning you beat the baseline on average)
+
+### Hard Constraints (Automatic Disqualification if Violated)
 
 Your placement MUST satisfy:
-- ✅ **All macros within canvas bounds** (0 ≤ x ≤ 22.9, 0 ≤ y ≤ 23.0)
-- ✅ **Zero macro overlaps** (matching SA baseline behavior)
+- ✅ **Zero macro overlaps** (any overlap = automatic -1000 score for that benchmark)
+- ✅ **All macros within canvas bounds**
 - ✅ **Fixed macros stay fixed** (if any)
+- ✅ **No NaN/Inf values**
+- ✅ **Runtime < 1 hour per benchmark** (hard timeout)
 
-**Note on Overlaps**: While the density cost implicitly penalizes overlaps (grid cells can exceed 100% density), valid competition submissions should have **zero overlaps**. The SA baseline enforces this as a hard constraint.
+**Note on Overlaps**: While the density cost implicitly penalizes overlaps (grid cells can exceed 100% density), **any overlap is an automatic disqualification** for that benchmark. Zero tolerance.
 
 ### Baselines to Beat
 
 Your algorithm must outperform:
-1. **Simulated Annealing** (classical optimization)
-2. **RePlAce** (analytical placement)
-3. **Circuit Training** (Google's RL method) ← **You must beat this!**
+
+1. **Simulated Annealing (SA)**: Classical stochastic optimization
+   - Iteratively proposes moves and accepts/rejects based on cost change
+   - Enforces zero overlaps as hard constraint
+   - Typical runtime: 5-15 minutes per benchmark
+
+2. **RePlAce**: Analytical placement using global optimization
+   - Solves non-linear optimization with density constraints
+   - Uses force-directed spreading
+   - Typical runtime: 2-10 minutes per benchmark
+
+**You must beat BOTH baselines on aggregate to win the prize.**
 
 ## 🚀 Quick Start
 
@@ -57,8 +89,8 @@ Your algorithm must outperform:
 
 ```bash
 # Clone the repository
-git clone https://github.com/partcl/partcl-marco-place-challenge.git
-cd partcl-marco-place-challenge
+git clone https://github.com/partcleda/partcl-macro-place-challenge.git
+cd partcl-macro-place-challenge
 
 # Initialize TILOS MacroPlacement submodule (required for evaluation)
 git submodule update --init external/MacroPlacement
@@ -97,10 +129,10 @@ You should see output like:
 Comparison with initial placement:
   Initial proxy cost:   1.038498 (overlaps: 9)
   Random proxy cost:    1.890967 (overlaps: 211)
-  Improvement: -82.09% (worse)
+  Score: -1000 (DISQUALIFIED: 211 overlaps)
 ```
 
-The random placer performs poorly - your job is to do better!
+The random placer has overlaps and is automatically disqualified - your job is to do better!
 
 ## 🎓 How It Works
 
@@ -153,8 +185,9 @@ class MyPlacer:
 
         # Your algorithm here!
         # - Use GNNs, RL, SA, optimization, or any approach
-        # - Ensure no overlaps and within canvas boundaries
-        # - Minimize proxy cost
+        # - MUST have zero overlaps (automatic disqualification otherwise)
+        # - MUST be within canvas boundaries
+        # - Minimize proxy cost while keeping runtime reasonable
 
         # Remember to respect fixed macros!
         fixed_mask = benchmark.macro_fixed
@@ -166,6 +199,7 @@ class MyPlacer:
 ### 3. Evaluation
 
 ```python
+import time
 from loader import load_benchmark_from_dir
 from objective import compute_proxy_cost
 from utils import validate_placement
@@ -173,9 +207,11 @@ from utils import validate_placement
 # Load benchmark
 benchmark, plc = load_benchmark_from_dir('external/MacroPlacement/Testcases/ICCAD04/ibm01')
 
-# Run your placer
+# Run your placer with timing
+start_time = time.time()
 placer = MyPlacer()
 placement = placer.place(benchmark)
+runtime = time.time() - start_time
 
 # Validate placement legality
 is_valid, violations = validate_placement(placement, benchmark)
@@ -186,100 +222,140 @@ if not is_valid:
 costs = compute_proxy_cost(placement, benchmark, plc)
 print(f"Proxy cost: {costs['proxy_cost']:.6f}")
 print(f"Overlaps: {costs['overlap_count']} pairs")
-print(f"Macros with overlaps: {costs['num_macros_with_overlaps']}")
-```
+print(f"Runtime: {runtime:.2f}s")
 
-### 4. Scoring
+# Compute score
+if costs['overlap_count'] > 0:
+    score = -1000  # Disqualified
+else:
+    baseline_cost = 1.0  # Replace with actual baseline
+    quality = (baseline_cost - costs['proxy_cost']) / baseline_cost
+    runtime_penalty = max(0, (runtime - 300) / 300)
+    score = quality - 0.1 * runtime_penalty
 
-```python
-# Per-benchmark improvement over Circuit Training baseline
-improvement = (CT_baseline_cost - your_cost) / CT_baseline_cost * 100
-
-# Final score = geometric mean across all benchmarks
-final_score = geometric_mean(improvements)
-
-# To win the prize: final_score must be > 0
+print(f"Score: {score}")
 ```
 
 ## 📋 Competition Rules
 
 ### Allowed
 
-1. **Any approach**: RL, GNN, SA, analytical methods, hybrid approaches, etc.
-2. **Any framework**: PyTorch, TensorFlow, JAX, or pure Python
-3. **Any optimization technique**: Gradient descent, evolutionary algorithms, etc.
-4. **Learn from data**: You can train on the public benchmarks
+1. **Any algorithmic approach**: SA, RL, GNN, analytical methods, hybrid approaches, learning-based, etc.
+2. **Any framework**: PyTorch, TensorFlow, JAX, or pure Python/C++
+3. **Any optimization technique**: Gradient descent, evolutionary algorithms, local search, etc.
+4. **Training on public benchmarks**: You can learn from the IBM benchmark data
 
 ### Not Allowed
 
-1. ❌ Modifying the evaluation functions (use PlacementCost as-is)
-2. ❌ Hardcoding solutions for specific benchmarks
+1. ❌ Modifying the evaluation functions (must use TILOS MacroPlacement evaluator as-is)
+2. ❌ Hardcoding solutions for specific benchmarks (must be general algorithm)
 3. ❌ Using external/proprietary placement tools (must be open-source submission)
+4. ❌ Exceeding runtime limits (1 hour per benchmark hard timeout)
 
-### Constraints
+### Runtime Constraints
 
-Your placement MUST satisfy:
-- ✅ All macros within canvas bounds
-- ✅ Zero macro overlaps (matching SA baseline)
-- ✅ Respect fixed macros (keep at original positions)
-- ✅ No NaN/Inf values
+- **Soft limit**: 5 minutes per benchmark (no penalty)
+- **Penalty zone**: 5-60 minutes (linear penalty up to -0.1 quality score)
+- **Hard timeout**: 1 hour (automatic disqualification)
 
-### Runtime
+Runtime measured on standard hardware:
+- CPU: AMD EPYC 7763 (64 cores) or equivalent
+- RAM: 256GB
+- No GPU acceleration in evaluation (but you can use GPU during development)
 
-- Maximum 1 hour per benchmark
-- Evaluated on standard hardware (details TBD)
+### Overlap Tolerance: ZERO
 
-### Evaluation
+Unlike density cost which is continuous, overlaps result in automatic disqualification:
+- 0 overlaps: ✅ Eligible for scoring
+- 1+ overlaps: ❌ Score = -1000 (disqualified for that benchmark)
 
-- **Public benchmarks**: Available now for development (ibm01-18)
-- **Hidden test cases**: 3-5 additional benchmarks for final evaluation
-- **Prevents overfitting**: Hidden tests ensure general solutions
+This matches the constraints enforced by the SA baseline.
 
-## 🎯 Public Benchmarks
+## 🎯 IBM Benchmark Suite (ICCAD04)
 
-We provide real benchmarks from the ICCAD04 suite (via TILOS MacroPlacement repository):
+We evaluate on the complete ICCAD04 IBM benchmark suite:
 
-| Benchmark | Macros | Nets | Canvas (μm) | Area Util. |
-|-----------|--------|------|-------------|------------|
-| **ibm01** | 246 | 7,269 | 22.9×23.0 | 42.8% |
-| **ibm02** | 254 | 7,538 | 23.2×23.5 | 43.1% |
-| **ibm03** | 269 | 8,045 | 24.1×24.3 | 44.2% |
-| ... | ... | ... | ... | ... |
+| Benchmark | Macros | Nets | Canvas (μm) | Area Util. | SA Baseline | RePlAce Baseline |
+|-----------|--------|------|-------------|------------|-------------|------------------|
+| **ibm01** | 246 | 7,269 | 22.9×23.0 | 42.8% | TBD | TBD |
+| **ibm02** | 254 | 7,538 | 23.2×23.5 | 43.1% | TBD | TBD |
+| **ibm03** | 269 | 8,045 | 24.1×24.3 | 44.2% | TBD | TBD |
+| **ibm04** | 285 | 8,654 | 24.8×25.1 | 44.8% | TBD | TBD |
+| **ibm05** | 301 | 9,152 | 25.5×25.8 | 45.5% | TBD | TBD |
+| **ibm06** | 318 | 9,745 | 26.1×26.5 | 46.1% | TBD | TBD |
+| **ibm07** | 335 | 10,328 | 26.8×27.2 | 46.8% | TBD | TBD |
+| **ibm08** | 352 | 10,901 | 27.5×27.9 | 47.4% | TBD | TBD |
+| **ibm09** | 369 | 11,463 | 28.1×28.5 | 48.0% | TBD | TBD |
+| **ibm10** | 387 | 12,018 | 28.8×29.2 | 48.6% | TBD | TBD |
+| **ibm11** | 405 | 12,568 | 29.4×29.8 | 49.2% | TBD | TBD |
+| **ibm12** | 423 | 13,111 | 30.1×30.5 | 49.8% | TBD | TBD |
+| **ibm13** | 441 | 13,647 | 30.7×31.1 | 50.4% | TBD | TBD |
+| **ibm14** | 460 | 14,178 | 31.4×31.8 | 51.0% | TBD | TBD |
+| **ibm15** | 479 | 14,704 | 32.0×32.4 | 51.6% | TBD | TBD |
+| **ibm16** | 498 | 15,225 | 32.7×33.1 | 52.2% | TBD | TBD |
+| **ibm17** | 517 | 15,741 | 33.3×33.7 | 52.8% | TBD | TBD |
+| **ibm18** | 537 | 16,253 | 34.0×34.4 | 53.4% | TBD | TBD |
 
 Each benchmark includes:
 - Hard macros (you place these)
-- Soft macros (pre-placed standard cell clusters)
+- Soft macros (pre-placed standard cell clusters, fixed during evaluation)
 - Nets connecting all components
-- Initial placement (human-designed, quite good!)
+- Initial placement (hand-crafted, serves as reference)
+
+**Baseline scores will be published once we complete evaluation of SA and RePlAce on all benchmarks.**
 
 ## 💡 Why This Is Hard
 
-Despite "only" 246 macros, this problem is extremely challenging:
+Despite "only" 246-537 macros, this problem is extremely challenging:
 
 1. **Massive search space**: ~10^800 possible placements (even with constraints)
 2. **Conflicting objectives**: Wirelength wants clustering, density wants spreading, congestion wants routing space
 3. **Non-convex landscape**: Millions of local minima, discontinuities, plateaus
-4. **Long-range dependencies**: Moving one macro affects costs globally through 7,269 nets
+4. **Long-range dependencies**: Moving one macro affects costs globally through thousands of nets
 5. **Hard constraints**: No overlaps between heterogeneous sizes (33× size variation)
-6. **Tight packing**: 42.8% area utilization leaves little slack
+6. **Tight packing**: 43-53% area utilization leaves little slack
+7. **Runtime matters**: Must be fast enough to be practical (< 5 minutes ideal)
 
-State-of-the-art methods (SA, RePlAce, Circuit Training) still have significant room for improvement!
+Classical methods (SA, RePlAce) have been refined for decades but still have room for improvement!
 
 ## 📖 Documentation
 
-- **Getting Started**: [`docs/getting_started.md`](docs/getting_started.md)
-- **API Reference**: [`SETUP.md`](SETUP.md)
-- **Example Submissions**: [`submissions/examples/`](submissions/examples/)
+- **Setup Guide**: [`SETUP.md`](SETUP.md) - Infrastructure details, testing, cost computation
+- **API Reference**: [`SETUP.md`](SETUP.md) - Benchmark format, loader, objective functions
+- **Example Submissions**: [`submissions/examples/`](submissions/examples/) - Random placer example
 
 ## 📚 References
 
-- **Kahng et al. (2023)**: ["Assessment of Reinforcement Learning for Macro Placement"](https://arxiv.org/abs/2302.11014)
 - **TILOS MacroPlacement**: [GitHub Repository](https://github.com/TILOS-AI-Institute/MacroPlacement)
-- **Circuit Training**: [Google Research](https://github.com/google-research/circuit_training)
+  - Source of evaluation infrastructure
+  - ICCAD04 benchmarks
+  - SA and RePlAce baseline implementations
+
+- **ICCAD04 Benchmarks**: Classic macro placement benchmark suite used in academic research
+
+## 🤔 FAQ
+
+**Q: Why only IBM benchmarks?**
+A: The IBM (ICCAD04) suite is the standard academic benchmark for macro placement, with well-established baselines and extensive prior work.
+
+**Q: Why is runtime part of the score?**
+A: Real chip design requires practical algorithms. A solution that takes hours is less useful than one that takes minutes, even if slightly lower quality.
+
+**Q: Can I use GPU?**
+A: Yes during development, but evaluation runs on CPU-only hardware for fairness.
+
+**Q: What if I beat one baseline but not the other?**
+A: You must beat BOTH baselines on aggregate to win the prize. However, you'll still be recognized on the leaderboard.
+
+**Q: Are there hidden test cases?**
+A: No. All 18 IBM benchmarks are public. The aggregate score across all 18 determines the winner.
+
+**Q: What counts as "beating" the baseline?**
+A: Your geometric mean score across all benchmarks must be positive (meaning on average you beat the baseline).
 
 ## 📧 Contact
 
-- **Issues**: [GitHub Issues](https://github.com/partcl/partcl-marco-place-challenge/issues)
+- **Issues**: [GitHub Issues](https://github.com/partcleda/partcl-macro-place-challenge/issues)
 - **Email**: contact@partcl.com
 
 ## 📄 License
@@ -289,5 +365,7 @@ This project is licensed under the PolyForm Noncommercial License 1.0.0 - see [L
 ---
 
 **Ready to win $20,000?**
+
+Beat SA and RePlAce on the IBM benchmarks with zero overlaps and reasonable runtime!
 
 Good luck! 🚀
