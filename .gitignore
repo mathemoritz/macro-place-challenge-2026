@@ -69,3 +69,10 @@ checkpoints/
 tmp/
 temp/
 *.tmp
+# MacroPlacement evaluator (submodule)
+# Keep the submodule but ignore unnecessary files
+external/MacroPlacement/Testcases/
+external/MacroPlacement/ExperimentalData/
+external/MacroPlacement/Docs/OurProgress/
+external/MacroPlacement/Flows/
+external/MacroPlacement/.git/

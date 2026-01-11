@@ -1,0 +1,3 @@
+[submodule "external/MacroPlacement"]
+	path = external/MacroPlacement
+	url = https://github.com/TILOS-AI-Institute/MacroPlacement.git

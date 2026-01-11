@@ -1,0 +1,9 @@
+# Core dependencies
+torch>=2.0.0
+absl-py>=1.0.0
+matplotlib>=3.3.0
+numpy>=1.19.0
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0

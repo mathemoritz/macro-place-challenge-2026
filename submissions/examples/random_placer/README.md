@@ -43,7 +43,7 @@ python scripts/evaluate_submission.py \
 python scripts/evaluate_submission.py \
     --submission submissions/examples/random_placer/placer.py \
     --name "RandomPlacer" \
-    --benchmarks ariane133 nvdla_asap7
+    --benchmarks ariane133_ng45 blackparrot_ng45
 ```
 
 ### Generate Leaderboard
