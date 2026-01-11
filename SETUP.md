@@ -56,6 +56,35 @@ python test/debug_congestion.py
 python test/check_nets.py
 ```
 
+## Exporting to DEF Format
+
+You can export placement results to industry-standard DEF (Design Exchange Format):
+
+```python
+from loader import load_benchmark_from_dir
+from def_writer import write_def
+
+# Load benchmark
+benchmark, plc = load_benchmark_from_dir('external/MacroPlacement/Testcases/ICCAD04/ibm01')
+
+# ... run your placer and update positions in plc ...
+
+# Export to DEF
+write_def(plc, 'output.def', design_name='ibm01')
+```
+
+The DEF file includes:
+- Die area
+- Row definitions (for standard cells)
+- Component positions (macros and standard cells)
+- I/O pins
+- Net connectivity
+
+This allows you to:
+- Import results into commercial EDA tools (Innovus, ICC2)
+- Visualize with OpenROAD
+- Run detailed routing and analysis
+
 ## Next Steps
 
 1. ~~Implement congestion computation~~ ✅ Done!
