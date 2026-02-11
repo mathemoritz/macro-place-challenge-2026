@@ -4,10 +4,6 @@
 
 Partcl and Hudson River Trading are excited to co-host a competition to solve the problem of Macro Placement. 
 
-## About HRT Hardware
-
-<HRT GIVES BLURB HERE>
-
 ## About Macro Placement
 
 Macro placement is the problem of positioning large fixed-size blocks (SRAMs, IPs, analog macros, etc.) on a chip floorplan so that routing congestion, timing, power delivery, and area constraints are balanced. Unlike standard-cell placement, macros have strong geometric and connectivity constraints, so the challenge is to explore a highly discrete design space while minimizing wirelength, avoiding blockages, and preserving downstream routability and timing quality.
@@ -17,7 +13,11 @@ For example, the **ibm01** benchmark has:
 - **7,269 nets** connecting macros to each other and to 894 pre-placed standard cell clusters
 - **A 22.9 × 23.0 μm canvas** with 42.8% area utilization
 
-### Background Papers
+## About HRT Hardware
+
+<HRT GIVES BLURB HERE>
+
+## Background Papers
 [An Updated Assessment of Reinforcement Learning
 for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)
 
@@ -27,77 +27,20 @@ for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11
 
 ## 🏆 Prizes
 
-- **$20,000 — First Place:** Awarded to the top submission that surpasses the Simulated Annealing (SA) and RePlAce baselines reported in [arXiv:2302.11014](https://arxiv.org/pdf/2302.11014).  
+- **$20,000 — First Place:** Awarded to the top submission that surpasses the Simulated Annealing (SA) and RePlAce baselines reported in [An Updated Assessment of Reinforcement Learning
+for Macro Placement]([https://arxiv.org/pdf/2302.11014](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)).  
 - **$10,000 — First Place (Alternate):** Awarded if the winning submission ranks first overall but does **not** exceed the SA and RePlAce benchmark results.  
 - **$5,000 — Second Place:** Awarded to the runner-up based on final competition rankings.  
 - **$4,000 — Innovation Award:** Granted to the most creative or technically innovative approach among the top entries, as determined by the judging panel.
 
-## 📊 The Challenge
+## Submission Format
 
-### What is Macro Placement?
+- All submissions will be via google form. Submissions may be made public or private before the end of judging.
+- Private submissions will be required to share repository with judges so they may clone/evaluate the method.
+- Teams may be up to 5 individuals.
+- The deadline for submissions is 10 weeks from the posting of the competition at 11:59PM PT WILL INSERT DEADLINE DATE.
+- **All winning implementations must be made open-source under Apache 2.0 or GPL**
 
-
-
-You must find positions that optimize the objective function while maintaining legality.
-
-### Objective Function
-
-```
-proxy_cost = 1.0 × wirelength + 0.5 × density + 0.5 × congestion
-```
-
-**Lower is better!** Each component is normalized:
-
-1. **Wirelength** (weight = 1.0): Half-perimeter wirelength (HPWL) of all nets, normalized by total wire capacity
-2. **Density** (weight = 0.5): Average of the top 10% densest grid cells
-3. **Congestion** (weight = 0.5): Average of the top 5% most congested routing segments
-
-These metrics are computed using the TILOS MacroPlacement evaluator (the same evaluator used in academic research).
-
-### Scoring System
-
-Your final score combines three factors:
-
-```python
-# Per-benchmark score
-if overlap_count > 0:
-    score = -1000  # Disqualified for overlaps
-else:
-    quality_score = (baseline_cost - your_cost) / baseline_cost  # Higher is better
-    runtime_penalty = max(0, (your_runtime - 300) / 300)  # Penalty for runtime > 5min
-    score = quality_score - 0.1 × runtime_penalty
-
-# Final score = geometric mean across all benchmarks
-final_score = geometric_mean([scores for all IBM benchmarks])
-```
-
-**To win**: `final_score` > 0 (meaning you beat the baseline on average)
-
-### Hard Constraints (Automatic Disqualification if Violated)
-
-Your placement MUST satisfy:
-- ✅ **Zero macro overlaps** (any overlap = automatic -1000 score for that benchmark)
-- ✅ **All macros within canvas bounds**
-- ✅ **Fixed macros stay fixed** (if any)
-- ✅ **No NaN/Inf values**
-- ✅ **Runtime < 1 hour per benchmark** (hard timeout)
-
-**Note on Overlaps**: While the density cost implicitly penalizes overlaps (grid cells can exceed 100% density), **any overlap is an automatic disqualification** for that benchmark. Zero tolerance.
-
-### Baselines to Beat
-
-Your algorithm must outperform:
-
-1. **Simulated Annealing (SA)**: Classical stochastic optimization
-   - Iteratively proposes moves and accepts/rejects based on cost change
-   - Enforces zero overlaps as hard constraint
-
-
-2. **RePlAce**: Analytical placement using global optimization
-   - Solves non-linear optimization with density constraints
-   - Uses force-directed spreading
-
-**You must beat BOTH baselines on aggregate to win the prize.**
 
 ## 🚀 Quick Start
 
@@ -361,7 +304,7 @@ A: The IBM (ICCAD04) suite is the standard academic benchmark for macro placemen
 A: Real chip design requires practical algorithms. A solution that takes hours is less useful than one that takes minutes, even if slightly lower quality.
 
 **Q: Can I use GPU?**
-A: Yes during development, but evaluation runs on CPU-only hardware for fairness.
+A: GPU use is encouraged. We will evaluate implementations with a GPU >40GB VRAM and 100GB of RAM.
 
 **Q: What if I beat one baseline but not the other?**
 A: You must beat BOTH baselines on aggregate to win the prize. However, you'll still be recognized on the leaderboard.
