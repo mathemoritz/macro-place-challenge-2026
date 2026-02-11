@@ -1,25 +1,40 @@
-# Partcl Macro Placement Challenge
+# Partcl/HRT Macro Placement Challenge
 
 **Win $20,000 by developing better macro placement algorithms!**
 
-This competition challenges you to beat classical macro placement baselines on the ICCAD04 IBM benchmark suite. Your goal is to minimize placement cost while maintaining fast runtime and zero overlaps.
+Partcl and Hudson River Trading are excited to co-host a competition to solve the problem of Macro Placement. 
 
-## 🎯 Prize Details
+## About HRT Hardware
 
-- **Prize Amount**: $20,000 (winner-takes-all)
-- **Winner**: The SINGLE team with the highest aggregate score across all IBM benchmarks
-- **Eligibility**: Prize is awarded ONLY if your submission beats BOTH baseline methods (Simulated Annealing AND RePlAce) on aggregate score
-- **If no submission beats both baselines**: No prize will be awarded
-- **Second place and beyond**: No monetary prize (but recognized on leaderboard)
+<HRT GIVES BLURB HERE>
+
+## About Macro Placement
+
+Macro placement is the problem of positioning large fixed-size blocks (SRAMs, IPs, analog macros, etc.) on a chip floorplan so that routing congestion, timing, power delivery, and area constraints are balanced. Unlike standard-cell placement, macros have strong geometric and connectivity constraints, so the challenge is to explore a highly discrete design space while minimizing wirelength, avoiding blockages, and preserving downstream routability and timing quality.
+
+For example, the **ibm01** benchmark has:
+- **246 hard macros** of varying sizes (ranging from 0.8 to 27 μm², with 33× size variation)
+- **7,269 nets** connecting macros to each other and to 894 pre-placed standard cell clusters
+- **A 22.9 × 23.0 μm canvas** with 42.8% area utilization
+
+### Background Papers
+[An Updated Assessment of Reinforcement Learning
+for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)
+[Assessment of Reinforcement Learning for Macro Placement]([Assessment of Reinforcement Learning for Macro Placement](https://vlsicad.ucsd.edu/Publications/Conferences/396/c396.pdf))
+[A graph placement methodology for fast chip design](https://www.nature.com/articles/s41586-021-03544-w.epdf?sharing_token=tYaxh2mR5EozfsSL0WHZLdRgN0jAjWel9jnR3ZoTv0PW0K0NmVrRsFPaMa9Y5We9O4Hqf_liatg-lvhiVcYpHL_YQpqkurA31sxqtmA-E1yNUWVMMVSBxWSp7ZFFIWawYQYnEXoBE4esRDSWqubhDFWUPyI5wK_5B_YIO-D_kS8%3D)
+
+## 🏆 Prizes
+
+- **$20,000 — First Place:** Awarded to the top submission that surpasses the Simulated Annealing (SA) and RePlAce baselines reported in [arXiv:2302.11014](https://arxiv.org/pdf/2302.11014).  
+- **$10,000 — First Place (Alternate):** Awarded if the winning submission ranks first overall but does **not** exceed the SA and RePlAce benchmark results.  
+- **$5,000 — Second Place:** Awarded to the runner-up based on final competition rankings.  
+- **$4,000 — Innovation Award:** Granted to the most creative or technically innovative approach among the top entries, as determined by the judging panel.
 
 ## 📊 The Challenge
 
 ### What is Macro Placement?
 
-Macro placement is a critical step in chip design where large memory blocks (macros) need to be positioned on the chip canvas. For example, the **ibm01** benchmark has:
-- **246 hard macros** of varying sizes (ranging from 0.8 to 27 μm², with 33× size variation)
-- **7,269 nets** connecting macros to each other and to 894 pre-placed standard cell clusters
-- **A 22.9 × 23.0 μm canvas** with 42.8% area utilization
+
 
 You must find positions that optimize the objective function while maintaining legality.
 
