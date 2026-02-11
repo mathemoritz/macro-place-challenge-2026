@@ -2,7 +2,7 @@
 
 **Win $20,000 by developing better macro placement algorithms!**
 
-Partcl and Hudson River Trading are excited to co-host a competition to solve the problem of Macro Placement. 
+Partcl and Hudson River Trading are excited to co-host a competition to solve the macro placement problem. 
 
 ## About Macro Placement
 
