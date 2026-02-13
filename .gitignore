@@ -76,3 +76,18 @@ external/MacroPlacement/ExperimentalData/
 external/MacroPlacement/Docs/OurProgress/
 external/MacroPlacement/Flows/
 external/MacroPlacement/.git/
+
+# Internal dev tooling (not for participants)
+scripts/evaluate_with_orfs.py
+scripts/generate_macro_placement_tcl.py
+scripts/convert_*_benchmarks.py
+scripts/test_*.py
+scripts/run_openroad_flow.tcl
+scripts/test_macro_placement.tcl
+scripts/test_random_placement_orfs.py
+scripts/view_placement_openroad.tcl
+src/orfs_integration/
+docs/
+output/
+BENCHMARK_EVALUATION_RESULTS.md
+NETLIST_CLEANING_SUMMARY.md

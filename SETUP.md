@@ -65,12 +65,13 @@ from loader import load_benchmark_from_dir
 from def_writer import write_def
 
 # Load benchmark
-benchmark, plc = load_benchmark_from_dir('external/MacroPlacement/Testcases/ICCAD04/ibm01')
+flows_dir = 'external/MacroPlacement/Flows/NanGate45/ariane133/netlist/output_CT_Grouping'
+benchmark, plc = load_benchmark_from_dir(flows_dir)
 
 # ... run your placer and update positions in plc ...
 
 # Export to DEF
-write_def(plc, 'output.def', design_name='ibm01')
+write_def(plc, 'output.def', design_name='ariane133')
 ```
 
 The DEF file includes:
@@ -85,9 +86,19 @@ This allows you to:
 - Visualize with OpenROAD
 - Run detailed routing and analysis
 
-## Next Steps
+## Modern Benchmarks
 
-1. ~~Implement congestion computation~~ ✅ Done!
-2. Create batch conversion script for ICCAD04 benchmarks
-3. Create example placer algorithms
-4. Optional: Extract net connectivity into PyTorch tensors for participant algorithms
+The competition uses modern chip designs from the TILOS MacroPlacement repository:
+
+- **ariane133/136**: RISC-V processor cores
+- **nvdla**: NVIDIA Deep Learning Accelerator
+- **mempool_tile**: Memory pooling architecture
+
+These benchmarks are already converted to PyTorch tensor format in `benchmarks/processed/public/`.
+
+To regenerate:
+
+```bash
+python scripts/convert_modern_benchmarks.py
+python scripts/compute_initial_baselines.py
+```
