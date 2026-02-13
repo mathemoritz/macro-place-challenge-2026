@@ -160,7 +160,7 @@ def _write_pins(fp, plc: PlacementCost, db_unit: int):
         pin_size = int(0.05 * db_unit)  # 0.05 micron
 
         fp.write(f"  - {name} + NET {name} + DIRECTION {direction} + USE SIGNAL\n")
-        fp.write(f"      + LAYER M1 ( -{pin_size} -{pin_size} ) ( {pin_size} {pin_size} )\n")
+        fp.write(f"      + LAYER metal1 ( -{pin_size} -{pin_size} ) ( {pin_size} {pin_size} )\n")
         fp.write(f"      + FIXED ( {x_db} {y_db} ) {side} ;\n")
 
     fp.write("END PINS\n\n")

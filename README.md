@@ -1,5 +1,7 @@
 # Partcl/HRT Macro Placement Challenge
 
+<img src="assets/HRT.png" alt="Hudson River Trading" height="80"> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <img src="assets/partcl.png" alt="Partcl" height="80">
+
 **Win $20,000 by developing better macro placement algorithms!**
 
 Partcl and Hudson River Trading are excited to co-host a competition to solve the macro placement problem. 
@@ -18,8 +20,7 @@ For example, the **ibm01** benchmark has:
 <HRT GIVES BLURB HERE>
 
 ## Background Papers
-[An Updated Assessment of Reinforcement Learning
-for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)
+[An Updated Assessment of Reinforcement Learning for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)
 
 [Assessment of Reinforcement Learning for Macro Placement](https://vlsicad.ucsd.edu/Publications/Conferences/396/c396.pdf)
 
@@ -27,9 +28,8 @@ for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11
 
 ## 🏆 Prizes
 
-- **$20,000 — First Place:** Awarded to the top submission that surpasses the Simulated Annealing (SA) and RePlAce baselines reported in [An Updated Assessment of Reinforcement Learning
-for Macro Placement]([https://arxiv.org/pdf/2302.11014](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)).  
-- **$10,000 — First Place (Alternate):** Awarded if the winning submission ranks first overall but does **not** exceed the SA and RePlAce benchmark results.  
+- **$20,000 — First Place (Grand Prize):** Awarded to the top submission by proxy score that surpasses the Simulated Annealing (SA) and RePlAce baselines for WNS, TNS, and Area reported in [An Updated Assessment of Reinforcement Learning for Macro Placement]([https://arxiv.org/pdf/2302.11014](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)) for NG45.  
+- **$10,000 — First Place (Alternate):** Awarded if the winning submission ranks first overall for proxy score but does **not** exceed the SA and RePlAce benchmark results for WNS, TNS, and Area.  
 - **$5,000 — Second Place:** Awarded to the runner-up based on final competition rankings.  
 - **$4,000 — Innovation Award:** Granted to the most creative or technically innovative approach among the top entries, as determined by the judging panel.
 - **Swag:** Every valid submission gets HRT swag!
@@ -40,8 +40,16 @@ for Macro Placement]([https://arxiv.org/pdf/2302.11014](https://ieeexplore.ieee.
 - Private submissions will be required to share repository with judges so they may clone/evaluate the method.
 - Teams may be up to 5 individuals.
 - The deadline for submissions is 10 weeks from the posting of the competition at 11:59PM PT WILL INSERT DEADLINE DATE.
-- All teams may only submit one algorithm and one person may only join one team. 
+- All teams may only submit one algorithm.
 - **All winning implementations must be made open-source under Apache 2.0 or GPL**
+
+## Evaluation Details
+
+- Benchmark numbers are in this paper: [An Updated Assessment of Reinforcement Learning for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)
+- We will judge the top 5 submissions ranked by proxy score. We will run the OpenROAD flow on these submissions to judge that submission methods generalize to full PnR flows.
+- You must be within 5% of the nangate45 Innovus results for WNS, TNS, Area when evaluated with the OpenROAD flow for the Simulated Annealing and RePlAce. You must also be pareto-optimal in runtime to get the grand prize. 
+- To avoid overfitting, we will also evaluate submissions on 1~2 hidden designs with the OpenROAD flow backend.
+
 
 
 ## 🚀 Quick Start
