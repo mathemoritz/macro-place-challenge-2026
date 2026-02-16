@@ -28,9 +28,9 @@ For example, the **ibm01** benchmark has:
 
 ## 🏆 Prizes
 
-- **$20,000 — First Place (Grand Prize):** Awarded to the top submission by proxy score that surpasses the Simulated Annealing (SA) and RePlAce baselines for WNS, TNS, and Area reported in [An Updated Assessment of Reinforcement Learning for Macro Placement]([https://arxiv.org/pdf/2302.11014](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)) for NG45.  
-- **$10,000 — First Place (Alternate):** Awarded if the winning submission ranks first overall for proxy score but does **not** exceed the SA and RePlAce benchmark results for WNS, TNS, and Area.  
-- **$5,000 — Second Place:** Awarded to the runner-up based on final competition rankings.  
+- **$20,000 — Grand Prize:** The top 7 submissions by proxy score are evaluated through the OpenROAD flow on NG45 designs (including hidden designs). Among those 7, the submission that beats the SA and RePlAce baselines (reported in [An Updated Assessment of Reinforcement Learning for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)) by the largest margin on WNS, TNS, and Area wins the Grand Prize.
+- **$10,000 — First Place (Proxy):** Awarded to the #1 submission by proxy score. Only awarded if no submission qualifies for the Grand Prize.
+- **$5,000 — Second Place:** Awarded to the runner-up of the Grand Prize. If no submission qualifies for the Grand Prize, awarded to the #2 submission by proxy score.
 - **$4,000 — Innovation Award:** Granted to the most creative or technically innovative approach among the top entries, as determined by the judging panel.
 - **Swag:** Every valid submission gets HRT swag!
 
@@ -39,16 +39,51 @@ For example, the **ibm01** benchmark has:
 - All submissions will be via google form. Submissions may be made public or private before the end of judging.
 - Private submissions will be required to share repository with judges so they may clone/evaluate the method.
 - Teams may be up to 5 individuals.
-- The deadline for submissions is 10 weeks from the posting of the competition at 11:59PM PT WILL INSERT DEADLINE DATE.
+- The deadline for submissions is May 4, 2026, 11:59 pacific.
 - All teams may only submit one algorithm.
 - **All winning implementations must be made open-source under Apache 2.0 or GPL**
 
+## Additional Rules
+
+### Allowed
+
+1. **Any algorithmic approach**: SA, RL, GNN, analytical methods, hybrid approaches, learning-based, etc.
+2. **Any framework**: PyTorch, TensorFlow, JAX, or pure Python/C++
+3. **Any optimization technique**: Gradient descent, evolutionary algorithms, local search, etc.
+4. **Training on public benchmarks**: You can learn from the IBM benchmark data
+
+### Not Allowed
+
+1. ❌ Modifying the evaluation functions (must use TILOS MacroPlacement evaluator as-is)
+2. ❌ Hardcoding solutions for specific benchmarks (must be general algorithm)
+3. ❌ Using external/proprietary placement tools (must be open-source submission)
+4. ❌ Exceeding runtime limits (1 hour per benchmark hard timeout)
+
+### Runtime Constraints
+
+- **Soft limit**: 5 minutes per benchmark (no penalty)
+- **Penalty zone**: 5-60 minutes (linear penalty up to -0.1 quality score)
+- **Hard timeout**: 1 hour (automatic disqualification)
+
 ## Evaluation Details
 
-- Benchmark numbers are in this paper: [An Updated Assessment of Reinforcement Learning for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)
-- We will judge the top 5 submissions ranked by proxy score. We will run the OpenROAD flow on these submissions to judge that submission methods generalize to full PnR flows.
-- You must be within 5% of the nangate45 Innovus results for WNS, TNS, Area when evaluated with the OpenROAD flow for the Simulated Annealing and RePlAce. You must also be pareto-optimal in runtime to get the grand prize. 
-- To avoid overfitting, we will also evaluate submissions on 1~2 hidden designs with the OpenROAD flow backend.
+Evaluation is two-tiered:
+
+### Tier 1: Proxy Cost Ranking (All Submissions)
+
+All submissions are ranked by **proxy cost** across the 18 IBM benchmarks. This is the primary qualifying metric. Proxy cost is computed using the TILOS MacroPlacement evaluator:
+
+> **Proxy Cost = 1.0 × Wirelength + 0.5 × Density + 0.5 × Congestion**
+
+Baseline numbers are from: [An Updated Assessment of Reinforcement Learning for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)
+
+### Tier 2: OpenROAD Flow Validation (Top Submissions)
+
+The top 7 submissions by proxy score will be evaluated through the full **OpenROAD flow** on NG45 designs to measure real PnR outcomes: **WNS, TNS, and Area**.
+
+- The **Grand Prize ($20K)** is awarded based on best OpenROAD results among these top submissions.
+- To qualify, you must surpass the SA and RePlAce baselines for WNS, TNS, and Area.
+- To avoid overfitting, we will also evaluate on 1-2 hidden NG45 designs.
 
 
 
@@ -77,160 +112,23 @@ pytest
 ### Run Your First Example
 
 ```bash
-# Run the simple random placer example
-python submissions/examples/simple_random_placer.py
+# Run the greedy row placer on ibm01
+python submissions/examples/greedy_row_placer.py
+
+# Run on all 17 IBM benchmarks
+python submissions/examples/greedy_row_placer.py --all
 ```
 
-You should see output like:
+Running on all benchmarks produces a summary like:
 ```
-[4/4] Computing proxy cost and overlap metrics...
-  ✓ Costs computed:
-    - Wirelength:  0.128768
-    - Density:     1.276113
-    - Congestion:  2.248285
-    - Proxy Cost:  1.890967 ⭐
-
-  ✓ Overlap analysis:
-    - Overlapping pairs:       211
-    - Macros with overlaps:    198 (80.5%)
-    - Total overlap area:      99.632 μm²
-
-Comparison with initial placement:
-  Initial proxy cost:   1.038498 (overlaps: 9)
-  Random proxy cost:    1.890967 (overlaps: 211)
-  Score: -1000 (DISQUALIFIED: 211 overlaps)
+Benchmark     Proxy        SA   RePlAce     vs SA  vs RePlAce  Overlaps
+   ibm01    2.0463    1.3166    0.9976    -55.4%     -105.1%         0
+   ibm02    2.0431    1.9072    1.8370     -7.1%      -11.2%         0
+   ...
+     AVG    2.2109    2.1251    1.4578     -4.0%      -51.7%         0
 ```
 
-The random placer has overlaps and is automatically disqualified - your job is to do better!
-
-## 🎓 How It Works
-
-### 1. Benchmark Representation
-
-Benchmarks are represented as **PyTorch tensors** for easy integration with ML approaches:
-
-```python
-from loader import load_benchmark_from_dir
-
-# Load a benchmark
-benchmark, plc = load_benchmark_from_dir('external/MacroPlacement/Testcases/ICCAD04/ibm01')
-
-print(f"Benchmark: {benchmark.name}")
-print(f"Macros: {benchmark.num_macros}")
-print(f"Nets: {benchmark.num_nets}")
-print(f"Canvas: {benchmark.canvas_width} × {benchmark.canvas_height} μm")
-
-# Access data
-print(f"Macro positions: {benchmark.macro_positions.shape}")  # [246, 2]
-print(f"Macro sizes: {benchmark.macro_sizes.shape}")          # [246, 2]
-print(f"Fixed macros: {benchmark.macro_fixed.shape}")         # [246] (bool)
-```
-
-### 2. Implementing Your Placer
-
-Create a class with a `.place()` method:
-
-```python
-import torch
-from benchmark import Benchmark
-
-class MyPlacer:
-    def place(self, benchmark: Benchmark) -> torch.Tensor:
-        """
-        Generate macro placement.
-
-        Args:
-            benchmark: Benchmark object with:
-                - num_macros: Number of macros (246 for ibm01)
-                - macro_sizes: [num_macros, 2] (width, height) in μm
-                - macro_fixed: [num_macros] bool (True if fixed)
-                - canvas_width, canvas_height: Canvas dimensions
-                - num_nets: Number of nets (7269 for ibm01)
-
-        Returns:
-            placement: [num_macros, 2] tensor of (x, y) center positions
-        """
-        placement = torch.zeros(benchmark.num_macros, 2)
-
-        # Your algorithm here!
-        # - Use GNNs, RL, SA, optimization, or any approach
-        # - MUST have zero overlaps (automatic disqualification otherwise)
-        # - MUST be within canvas boundaries
-        # - Minimize proxy cost while keeping runtime reasonable
-
-        # Remember to respect fixed macros!
-        fixed_mask = benchmark.macro_fixed
-        placement[fixed_mask] = benchmark.macro_positions[fixed_mask]
-
-        return placement
-```
-
-### 3. Evaluation
-
-```python
-import time
-from loader import load_benchmark_from_dir
-from objective import compute_proxy_cost
-from utils import validate_placement
-
-# Load benchmark
-benchmark, plc = load_benchmark_from_dir('external/MacroPlacement/Testcases/ICCAD04/ibm01')
-
-# Run your placer with timing
-start_time = time.time()
-placer = MyPlacer()
-placement = placer.place(benchmark)
-runtime = time.time() - start_time
-
-# Validate placement legality
-is_valid, violations = validate_placement(placement, benchmark)
-if not is_valid:
-    print(f"Invalid placement: {violations}")
-
-# Compute cost and overlap metrics
-costs = compute_proxy_cost(placement, benchmark, plc)
-print(f"Proxy cost: {costs['proxy_cost']:.6f}")
-print(f"Overlaps: {costs['overlap_count']} pairs")
-print(f"Runtime: {runtime:.2f}s")
-
-# Compute score
-if costs['overlap_count'] > 0:
-    score = -1000  # Disqualified
-else:
-    baseline_cost = 1.0  # Replace with actual baseline
-    quality = (baseline_cost - costs['proxy_cost']) / baseline_cost
-    runtime_penalty = max(0, (runtime - 300) / 300)
-    score = quality - 0.1 * runtime_penalty
-
-print(f"Score: {score}")
-```
-
-## 📋 Competition Rules
-
-### Allowed
-
-1. **Any algorithmic approach**: SA, RL, GNN, analytical methods, hybrid approaches, learning-based, etc.
-2. **Any framework**: PyTorch, TensorFlow, JAX, or pure Python/C++
-3. **Any optimization technique**: Gradient descent, evolutionary algorithms, local search, etc.
-4. **Training on public benchmarks**: You can learn from the IBM benchmark data
-
-### Not Allowed
-
-1. ❌ Modifying the evaluation functions (must use TILOS MacroPlacement evaluator as-is)
-2. ❌ Hardcoding solutions for specific benchmarks (must be general algorithm)
-3. ❌ Using external/proprietary placement tools (must be open-source submission)
-4. ❌ Exceeding runtime limits (1 hour per benchmark hard timeout)
-
-### Runtime Constraints
-
-- **Soft limit**: 5 minutes per benchmark (no penalty)
-- **Penalty zone**: 5-60 minutes (linear penalty up to -0.1 quality score)
-- **Hard timeout**: 1 hour (automatic disqualification)
-
-Runtime measured on standard hardware:
-- CPU: AMD EPYC 7763 (64 cores) or equivalent
-- RAM: 256GB
-- No GPU acceleration in evaluation (but you can use GPU during development)
+The greedy placer achieves zero overlaps but makes no attempt to optimize wirelength or connectivity — your job is to do better! See [`SETUP.md`](SETUP.md) for the full API reference and [`submissions/examples/`](submissions/examples/) for working examples.
 
 ### Overlap Tolerance: ZERO
 
@@ -273,7 +171,7 @@ Each benchmark includes:
 **Baseline Analysis:**
 - RePlAce (⭐) consistently outperforms SA across all benchmarks
 - RePlAce achieves 15-55% lower proxy cost than SA
-- **To win the $20K prize, you must beat RePlAce (the stronger baseline) on aggregate**
+- **To qualify for the Grand Prize, your placement must also produce better WNS, TNS, and Area than both baselines when evaluated through the OpenROAD flow on NG45 designs**
 - Both baselines achieve zero overlaps (enforced as hard constraint)
 
 ## 💡 Why This Is Hard
@@ -292,9 +190,8 @@ Classical methods (SA, RePlAce) have been refined for decades but still have roo
 
 ## 📖 Documentation
 
-- **Setup Guide**: [`SETUP.md`](SETUP.md) - Infrastructure details, testing, cost computation
-- **API Reference**: [`SETUP.md`](SETUP.md) - Benchmark format, loader, objective functions
-- **Example Submissions**: [`submissions/examples/`](submissions/examples/) - Random placer example
+- **Setup & API Reference**: [`SETUP.md`](SETUP.md) - Infrastructure details, benchmark format, cost computation, testing
+- **Example Submissions**: [`submissions/examples/`](submissions/examples/) - Working placer examples
 
 ## 📚 References
 
@@ -304,6 +201,18 @@ Classical methods (SA, RePlAce) have been refined for decades but still have roo
   - SA and RePlAce baseline implementations
 
 - **ICCAD04 Benchmarks**: Classic macro placement benchmark suite used in academic research
+
+## 🏅 Leaderboard
+
+Submissions are ranked by **average proxy cost** across all 18 IBM benchmarks (lower is better). Zero overlaps required on all benchmarks.
+
+| Rank | Team | Avg Proxy Cost | Best | Worst | Overlaps | Runtime |
+|------|------|---------------|------|-------|----------|---------|
+| — | RePlAce (baseline) | **1.4578** | 0.9976 | 1.8370 | 0 | — |
+| — | SA (baseline) | 2.1251 | 1.3166 | 3.6726 | 0 | — |
+| — | Greedy Row (demo) | 2.2109 | 1.6728 | 2.7696 | 0 | 0.3s |
+
+*Submit your results to appear on the leaderboard!*
 
 ## 🤔 FAQ
 
@@ -317,13 +226,13 @@ A: Real chip design requires practical algorithms. A solution that takes hours i
 A: GPU use is encouraged. We will evaluate implementations with a GPU >40GB VRAM and 100GB of RAM.
 
 **Q: What if I beat one baseline but not the other?**
-A: You must beat BOTH baselines on aggregate to win the prize. However, you'll still be recognized on the leaderboard.
+A: You must beat BOTH SA and RePlAce baselines on WNS, TNS, and Area to qualify for the Grand Prize. You can still win the Proxy or Innovation prizes regardless.
 
 **Q: Are there hidden test cases?**
-A: No. All 18 IBM benchmarks are public. The aggregate score across all 18 determines the winner.
+A: All 18 IBM benchmarks for proxy cost ranking are public. For the OpenROAD flow evaluation (Tier 2), we will also test on 1-2 hidden NG45 designs to ensure generalization.
 
 **Q: What counts as "beating" the baseline?**
-A: Your geometric mean score across all benchmarks must be positive (meaning on average you beat the baseline).
+A: For proxy cost (Tier 1), your aggregate score across all IBM benchmarks must be positive. For the Grand Prize (Tier 2), your OpenROAD results for WNS, TNS, and Area must surpass both SA and RePlAce baselines on NG45 designs.
 
 ## 📧 Contact
 
@@ -332,12 +241,4 @@ A: Your geometric mean score across all benchmarks must be positive (meaning on 
 
 ## 📄 License
 
-This project is licensed under the PolyForm Noncommercial License 1.0.0 - see [LICENSE.md](LICENSE.md) for details.
-
----
-
-**Ready to win $20,000?**
-
-Beat SA and RePlAce on the IBM benchmarks with zero overlaps and reasonable runtime!
-
-Good luck! 🚀
+This project is licensed under the Apache License 2.0 - see [LICENSE.md](LICENSE.md) for details.
