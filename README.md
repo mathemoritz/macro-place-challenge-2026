@@ -15,6 +15,11 @@ For example, the **ibm01** benchmark has:
 - **7,269 nets** connecting macros to each other and to 894 pre-placed standard cell clusters
 - **A 22.9 × 23.0 μm canvas** with 42.8% area utilization
 
+<p align="center">
+  <img src="assets/sa_ibm01.gif" alt="Simulated annealing on ibm01" width="600"><br>
+  <img src="assets/fd_ibm01.gif" alt="Force-directed placement on ibm01" width="600">
+</p>
+
 ## About HRT Hardware
 
 <HRT GIVES BLURB HERE>
