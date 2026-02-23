@@ -33,7 +33,7 @@ For example, the **ibm01** benchmark has:
 
 ## 🏆 Prizes
 
-- **$20,000 — Grand Prize:** The top 7 submissions by proxy score are evaluated through the OpenROAD flow on NG45 designs (including hidden designs). Among those 7, the submission that beats the SA and RePlAce baselines (reported in [An Updated Assessment of Reinforcement Learning for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)) by the largest margin on WNS, TNS, and Area wins the Grand Prize.
+- **$20,000 — Grand Prize:** The top 7 submissions by proxy score are evaluated through the OpenROAD flow on NG45 designs (including hidden designs). Among those 7, the submission that beats the SA and RePlAce baselines (reported in [An Updated Assessment of Reinforcement Learning for Macro Placement](https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=11300304)) by the largest margin on WNS, TNS, and Area wins the Grand Prize. An additional score adjustment will be applied based on human-expert analysis of the resulting placement. 
 - **$10,000 — First Place (Proxy):** Awarded to the #1 submission by proxy score. Only awarded if no submission qualifies for the Grand Prize.
 - **$5,000 — Second Place:** Awarded to the runner-up of the Grand Prize. If no submission qualifies for the Grand Prize, awarded to the #2 submission by proxy score.
 - **$4,000 — Innovation Award:** Granted to the most creative or technically innovative approach among the top entries, as determined by the judging panel.
@@ -48,28 +48,25 @@ For example, the **ibm01** benchmark has:
 - All teams may only submit one algorithm.
 - **All winning implementations must be made open-source under Apache 2.0 or GPL**
 - All submissions must be registered via this [Submission Link](https://github.com/partcleda/macro-place-challenge-2026).
+- All submissions must be under 1 hour end-to-end runtime for the macro placement algorithm.
+- All submissions will be evaluated on a AMD EPYC 9655P with 16 cores + 100GB of memory and an NVIDIA RTX 6000 Ada 48GB.
 
 ## Additional Rules
 
 ### Allowed
 
-1. **Any algorithmic approach**: SA, RL, GNN, analytical methods, hybrid approaches, learning-based, etc.
-2. **Any framework**: PyTorch, TensorFlow, JAX, or pure Python/C++
-3. **Any optimization technique**: Gradient descent, evolutionary algorithms, local search, etc.
-4. **Training on public benchmarks**: You can learn from the IBM benchmark data
+- **Any algorithmic approach**: SA, RL, GNN, analytical methods, hybrid approaches, learning-based, etc.
+- **Any framework**: PyTorch, TensorFlow, JAX, or pure Python/C++
+- **Any optimization technique**: Gradient descent, evolutionary algorithms, local search, etc.
+- **Training on public benchmarks**: You can learn from the IBM benchmark data
 
 ### Not Allowed
 
-1. ❌ Modifying the evaluation functions (must use TILOS MacroPlacement evaluator as-is)
-2. ❌ Hardcoding solutions for specific benchmarks (must be general algorithm)
-3. ❌ Using external/proprietary placement tools (must be open-source submission)
-4. ❌ Exceeding runtime limits (1 hour per benchmark hard timeout)
-
-### Runtime Constraints
-
-- **Soft limit**: 5 minutes per benchmark (no penalty)
-- **Penalty zone**: 5-60 minutes (linear penalty up to -0.1 quality score)
-- **Hard timeout**: 1 hour (automatic disqualification)
+- Modifying the evaluation functions (must use TILOS MacroPlacement evaluator as-is)
+- Hardcoding solutions for specific benchmarks (must be general algorithm)
+- Using external/proprietary placement tools (must be open-source submission)
+- Exceeding runtime limits (1 hour per benchmark hard timeout)
+- Overlaps in resulting placement
 
 ## Evaluation Details
 
@@ -90,8 +87,6 @@ The top 7 submissions by proxy score will be evaluated through the full **OpenRO
 - The **Grand Prize ($20K)** is awarded based on best OpenROAD results among these top submissions.
 - To qualify, you must surpass the SA and RePlAce baselines for WNS, TNS, and Area.
 - To avoid overfitting, we will also evaluate on 1-2 hidden NG45 designs.
-
-
 
 ## 🚀 Quick Start
 
@@ -139,14 +134,6 @@ Benchmark     Proxy        SA   RePlAce     vs SA  vs RePlAce  Overlaps
 ```
 
 The greedy placer achieves zero overlaps but makes no attempt to optimize wirelength or connectivity — your job is to do better! See [`SETUP.md`](SETUP.md) for the full API reference and [`submissions/examples/`](submissions/examples/) for working examples.
-
-### Overlap Tolerance: ZERO
-
-Unlike density cost which is continuous, overlaps result in automatic disqualification:
-- 0 overlaps: ✅ Eligible for scoring
-- 1+ overlaps: ❌ Score = -1000 (disqualified for that benchmark)
-
-This matches the constraints enforced by the SA baseline.
 
 ## 🎯 IBM Benchmark Suite (ICCAD04)
 
@@ -228,12 +215,6 @@ Submissions are ranked by **average proxy cost** across all 18 IBM benchmarks (l
 
 **Q: Why only IBM benchmarks?**
 A: The IBM (ICCAD04) suite is the standard academic benchmark for macro placement, with well-established baselines and extensive prior work.
-
-**Q: Why is runtime part of the score?**
-A: Real chip design requires practical algorithms. A solution that takes hours is less useful than one that takes minutes, even if slightly lower quality.
-
-**Q: Can I use GPU?**
-A: GPU use is encouraged. We will evaluate implementations with a GPU >40GB VRAM and 100GB of RAM.
 
 **Q: What if I beat one baseline but not the other?**
 A: You must beat BOTH SA and RePlAce baselines on WNS, TNS, and Area to qualify for the Grand Prize. You can still win the Proxy or Innovation prizes regardless.
