@@ -233,3 +233,9 @@ A: For proxy cost (Tier 1), your aggregate score across all IBM benchmarks must 
 ## 📄 License
 
 This project is licensed under the Apache License 2.0 - see [LICENSE.md](LICENSE.md) for details.
+
+## Competition Updates
+
+The organizers may update or clarify rules, evaluation details, timelines, prizes, or infrastructure as needed to ensure fairness, technical accuracy, and smooth operation of the competition. Any updates will be communicated through official channels and will apply going forward.
+
+Participation in the competition constitutes acceptance of the current rules and any subsequent updates. The organizers’ decisions regarding scoring, eligibility, and interpretation of these rules are final.
