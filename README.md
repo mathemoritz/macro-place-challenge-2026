@@ -51,10 +51,10 @@ Joining Hudson River Trading’s hardware team means working alongside leading e
 - All submissions will be via google form. Submissions may be made public or private before the end of judging.
 - Private submissions will be required to share repository with judges so they may clone/evaluate the method.
 - Teams may be up to 5 individuals.
-- The deadline for submissions is May 4, 2026, 11:59 pacific.
+- The deadline for submissions is May 21, 2026, 11:59 pacific.
 - All teams may only submit one algorithm.
 - **All winning implementations must be made open-source under Apache 2.0 or GPL**
-- All submissions must be registered via this [Submission Link](https://github.com/partcleda/macro-place-challenge-2026).
+- All submissions must be registered via this [Submission Link](https://forms.gle/YDRtYV5Vq68SZgKW9).
 - All submissions must be under 1 hour end-to-end runtime for the macro placement algorithm.
 - All submissions will be evaluated on a AMD EPYC 9655P with 16 cores + 100GB of memory and an NVIDIA RTX 6000 Ada 48GB.
 
