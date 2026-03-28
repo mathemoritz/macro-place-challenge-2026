@@ -133,6 +133,9 @@ uv run evaluate submissions/examples/greedy_row_placer.py
 # Run on all 17 IBM benchmarks
 uv run evaluate submissions/examples/greedy_row_placer.py --all
 
+# Run on NG45 commercial designs (ariane133, ariane136, mempool_tile, nvdla)
+uv run evaluate submissions/examples/greedy_row_placer.py --ng45
+
 # Visualize the result
 uv run evaluate submissions/examples/greedy_row_placer.py --vis
 uv run evaluate submissions/examples/greedy_row_placer.py --all --vis
