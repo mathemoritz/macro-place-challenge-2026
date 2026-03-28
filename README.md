@@ -117,14 +117,11 @@ cd partcl-macro-place-challenge
 # Initialize TILOS MacroPlacement submodule (required for evaluation)
 git submodule update --init external/MacroPlacement
 
-# Create virtual environment
-uv venv
+# Install the package and all dependencies
+uv sync
 
-# Install dependencies
-uv pip install -r requirements.txt
-
-# Test the infrastructure
-pytest
+# Verify the setup
+uv run evaluate submissions/examples/greedy_row_placer.py -b ibm01
 ```
 
 ### Run Your First Example
@@ -135,6 +132,9 @@ uv run evaluate submissions/examples/greedy_row_placer.py
 
 # Run on all 17 IBM benchmarks
 uv run evaluate submissions/examples/greedy_row_placer.py --all
+
+# Run on NG45 commercial designs (ariane133, ariane136, mempool_tile, nvdla)
+uv run evaluate submissions/examples/greedy_row_placer.py --ng45
 
 # Visualize the result
 uv run evaluate submissions/examples/greedy_row_placer.py --vis
@@ -230,17 +230,17 @@ Submissions are ranked by **average proxy cost** across all 18 IBM benchmarks (l
 
 ## 🤔 FAQ
 
-**Q: Why only IBM benchmarks?**
-A: The IBM (ICCAD04) suite is the standard academic benchmark for macro placement, with well-established baselines and extensive prior work.
+**Q: What benchmarks are used?**
+A: Tier 1 (proxy cost) uses 17 IBM ICCAD04 benchmarks — the standard academic suite with well-established baselines. Tier 2 (OpenROAD flow) uses NG45 commercial designs (ariane133, ariane136, mempool_tile, nvdla) plus 1-2 hidden designs. You can evaluate on both with `--all` (IBM) and `--ng45` (NG45).
 
 **Q: What if I beat one baseline but not the other?**
 A: You must beat BOTH SA and RePlAce baselines on WNS, TNS, and Area to qualify for the Grand Prize. You can still win the Proxy or Innovation prizes regardless.
 
 **Q: Are there hidden test cases?**
-A: All 18 IBM benchmarks for proxy cost ranking are public. For the OpenROAD flow evaluation (Tier 2), we will also test on 1-2 hidden NG45 designs to ensure generalization.
+A: All 17 IBM benchmarks for proxy cost ranking are public. The 4 NG45 designs are also public. For the OpenROAD flow evaluation (Tier 2), we will additionally test on 1-2 hidden NG45 designs to ensure generalization.
 
 **Q: What counts as "beating" the baseline?**
-A: For proxy cost (Tier 1), your aggregate score across all IBM benchmarks must be positive. For the Grand Prize (Tier 2), your OpenROAD results for WNS, TNS, and Area must surpass both SA and RePlAce baselines on NG45 designs.
+A: For proxy cost (Tier 1), your aggregate score across all IBM benchmarks must be lower than the baselines. For the Grand Prize (Tier 2), your OpenROAD results for WNS, TNS, and Area must surpass both SA and RePlAce baselines on NG45 designs.
 
 ## 📧 Contact
 
@@ -256,9 +256,5 @@ This project is licensed under the Apache License 2.0 - see [LICENSE.md](LICENSE
 The organizers may update or clarify rules, evaluation details, timelines, prizes, or infrastructure as needed to ensure fairness, technical accuracy, and smooth operation of the competition. Any updates will be communicated through official channels and will apply going forward.
 
 Participation in the competition constitutes acceptance of the current rules and any subsequent updates. The organizers’ decisions regarding scoring, eligibility, and interpretation of these rules are final.
-
-The organizers may update or clarify rules, evaluation details, timelines, prizes, or infrastructure as needed to ensure fairness, technical accuracy, and smooth operation of the competition. Any updates will be communicated through official channels and will apply going forward.
-
-Participation in the competition constitutes acceptance of the current rules and any subsequent updates. The organizers’ decisions regarding scoring, eligibility, and interpretation of these rules are final. 
 
 Submissions & contact information may be shared with sponsors.
