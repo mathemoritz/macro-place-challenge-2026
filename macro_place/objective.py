@@ -185,11 +185,36 @@ def _set_placement(plc: PlacementCost, placement: torch.Tensor, benchmark: Bench
     # Convert tensor to numpy for PlacementCost API
     placement_np = placement.cpu().numpy()
 
-    # Set each macro's position
+    # Build macro_name -> [pin_indices] lookup (cached on plc)
+    if not hasattr(plc, '_macro_pin_map'):
+        pin_map = {}
+        for idx, mod in enumerate(plc.modules_w_pins):
+            if mod.get_type() == 'MACRO_PIN' and hasattr(mod, 'get_macro_name'):
+                name = mod.get_macro_name()
+                if name not in pin_map:
+                    pin_map[name] = []
+                pin_map[name].append(idx)
+        plc._macro_pin_map = pin_map
+
+    # Set hard macro positions (indices [0, num_hard))
     for i, macro_idx in enumerate(benchmark.hard_macro_indices):
         x, y = placement_np[i]
         node = plc.modules_w_pins[macro_idx]
         node.set_pos(x, y)
+        # Update pin positions (pin.get_pos() caches stale coordinates)
+        for pin_idx in plc._macro_pin_map.get(node.get_name(), []):
+            pin = plc.modules_w_pins[pin_idx]
+            pin.set_pos(x + pin.x_offset, y + pin.y_offset)
+
+    # Set soft macro positions (indices [num_hard, num_macros))
+    num_hard = benchmark.num_hard_macros
+    for i, macro_idx in enumerate(benchmark.soft_macro_indices):
+        x, y = placement_np[num_hard + i]
+        node = plc.modules_w_pins[macro_idx]
+        node.set_pos(x, y)
+        for pin_idx in plc._macro_pin_map.get(node.get_name(), []):
+            pin = plc.modules_w_pins[pin_idx]
+            pin.set_pos(x + pin.x_offset, y + pin.y_offset)
 
     # Reinitialize congestion arrays with correct size
     # This is needed because the arrays may be incorrectly sized

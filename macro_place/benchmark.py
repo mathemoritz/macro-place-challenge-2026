@@ -16,6 +16,11 @@ class Benchmark:
 
     All coordinates are in microns.
     All indices are 0-based.
+
+    Tensors contain both hard macros (indices [0, num_hard_macros)) and
+    soft macros (indices [num_hard_macros, num_macros)). Hard macros are
+    the primary optimization targets; soft macros are standard cell clusters
+    that should be co-optimized for best results.
     """
 
     # Core data
@@ -25,7 +30,7 @@ class Benchmark:
     canvas_width: float
     canvas_height: float
 
-    # Macros (hard macros only)
+    # Macros (hard + soft, hard macros first)
     num_macros: int
     macro_positions: torch.Tensor  # [num_macros, 2] - (x, y) centers
     macro_sizes: torch.Tensor  # [num_macros, 2] - (width, height)
@@ -45,11 +50,25 @@ class Benchmark:
     hroutes_per_micron: float = 11.285  # Horizontal routing tracks per micron
     vroutes_per_micron: float = 12.605  # Vertical routing tracks per micron
 
-    # PlacementCost mapping (for objective computation)
-    hard_macro_indices: List[int] = field(default_factory=list)  # Map tensor index → PlacementCost module index
+    # PlacementCost mapping (tensor index → PlacementCost module index)
+    hard_macro_indices: List[int] = field(default_factory=list)
+    soft_macro_indices: List[int] = field(default_factory=list)
+
+    # Counts
+    num_hard_macros: int = 0
+    num_soft_macros: int = 0
 
     def __post_init__(self):
-        """Validate tensor shapes."""
+        """Validate tensor shapes and set counts."""
+        # Backwards compat: if num_hard_macros not set, all macros are hard
+        if self.num_hard_macros == 0 and self.num_soft_macros == 0:
+            self.num_hard_macros = self.num_macros
+            self.num_soft_macros = 0
+
+        assert self.num_macros == self.num_hard_macros + self.num_soft_macros, (
+            f"num_macros {self.num_macros} != "
+            f"num_hard {self.num_hard_macros} + num_soft {self.num_soft_macros}"
+        )
         assert self.macro_positions.shape == (self.num_macros, 2), (
             f"macro_positions shape {self.macro_positions.shape} != ({self.num_macros}, 2)"
         )
@@ -60,7 +79,6 @@ class Benchmark:
             f"macro_fixed shape {self.macro_fixed.shape} != ({self.num_macros},)"
         )
 
-        # Note: net_nodes may be empty even if num_nets > 0 (nets stored in PlacementCost only)
         if len(self.net_nodes) > 0:
             assert len(self.net_nodes) == self.num_nets, (
                 f"len(net_nodes) {len(self.net_nodes)} != num_nets {self.num_nets}"
@@ -78,6 +96,8 @@ class Benchmark:
                 "canvas_width": self.canvas_width,
                 "canvas_height": self.canvas_height,
                 "num_macros": self.num_macros,
+                "num_hard_macros": self.num_hard_macros,
+                "num_soft_macros": self.num_soft_macros,
                 "macro_positions": self.macro_positions,
                 "macro_sizes": self.macro_sizes,
                 "macro_fixed": self.macro_fixed,
@@ -90,6 +110,7 @@ class Benchmark:
                 "hroutes_per_micron": self.hroutes_per_micron,
                 "vroutes_per_micron": self.vroutes_per_micron,
                 "hard_macro_indices": self.hard_macro_indices,
+                "soft_macro_indices": self.soft_macro_indices,
             },
             path,
         )
@@ -98,17 +119,36 @@ class Benchmark:
     def load(cls, path: str) -> "Benchmark":
         """Load benchmark from .pt file."""
         data = torch.load(path, weights_only=False)
+        # Backwards compat: old .pt files lack soft macro fields
+        if "num_hard_macros" not in data:
+            data["num_hard_macros"] = data["num_macros"]
+            data["num_soft_macros"] = 0
+        if "soft_macro_indices" not in data:
+            data["soft_macro_indices"] = []
         return cls(**data)
 
     def get_movable_mask(self) -> torch.Tensor:
         """Return mask of movable macros (not fixed)."""
         return ~self.macro_fixed
 
+    def get_hard_macro_mask(self) -> torch.Tensor:
+        """Return mask that is True for hard macros (first num_hard_macros entries)."""
+        mask = torch.zeros(self.num_macros, dtype=torch.bool)
+        mask[: self.num_hard_macros] = True
+        return mask
+
+    def get_soft_macro_mask(self) -> torch.Tensor:
+        """Return mask that is True for soft macros."""
+        mask = torch.zeros(self.num_macros, dtype=torch.bool)
+        mask[self.num_hard_macros :] = True
+        return mask
+
     def __repr__(self) -> str:
         """String representation."""
         return (
             f"Benchmark(name='{self.name}', "
-            f"num_macros={self.num_macros}, "
+            f"hard_macros={self.num_hard_macros}, "
+            f"soft_macros={self.num_soft_macros}, "
             f"num_nets={self.num_nets}, "
             f"canvas={self.canvas_width:.1f}x{self.canvas_height:.1f}um)"
         )
