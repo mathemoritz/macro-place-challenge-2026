@@ -43,28 +43,42 @@ def load_benchmark(
     hroutes_per_micron = plc.hroutes_per_micron
     vroutes_per_micron = plc.vroutes_per_micron
 
-    # Extract hard macros only (movable + fixed blocks)
-    hard_macro_indices = plc.hard_macro_indices
-    num_macros = len(hard_macro_indices)
+    # Extract hard macros
+    hard_macro_plc_indices = plc.hard_macro_indices
+    num_hard = len(hard_macro_plc_indices)
 
     macro_positions = []
     macro_sizes = []
     macro_fixed = []
     macro_names = []
 
-    for idx in hard_macro_indices:
+    for idx in hard_macro_plc_indices:
         node = plc.modules_w_pins[idx]
-
         x, y = node.get_pos()
         w = node.get_width()
         h = node.get_height()
         fixed = node.get_fix_flag()
-        node_name = node.get_name()
-
         macro_positions.append([x, y])
         macro_sizes.append([w, h])
         macro_fixed.append(fixed)
-        macro_names.append(node_name)
+        macro_names.append(node.get_name())
+
+    # Extract soft macros (standard cell clusters)
+    soft_macro_plc_indices = plc.soft_macro_indices
+    num_soft = len(soft_macro_plc_indices)
+
+    for idx in soft_macro_plc_indices:
+        node = plc.modules_w_pins[idx]
+        x, y = node.get_pos()
+        w = node.get_width()
+        h = node.get_height()
+        fixed = node.get_fix_flag()
+        macro_positions.append([x, y])
+        macro_sizes.append([w, h])
+        macro_fixed.append(fixed)
+        macro_names.append(node.get_name())
+
+    num_macros = num_hard + num_soft
 
     # Convert to tensors
     macro_positions = torch.tensor(macro_positions, dtype=torch.float32)
@@ -72,24 +86,9 @@ def load_benchmark(
     macro_fixed = torch.tensor(macro_fixed, dtype=torch.bool)
 
     # Extract net connectivity
-    # NOTE: PlacementCost has all the nets internally (net_cnt), but extracting them
-    # into tensor format is complex due to pins/sinks structure. Since cost computation
-    # is handled by PlacementCost directly, we don't strictly need them in tensor form.
-    # For now, just capture the count for display purposes.
     num_nets = int(plc.net_cnt) if hasattr(plc, "net_cnt") else 0
-
-    # TODO: If needed for participant algorithms, extract nets from PlacementCost:
-    # - Iterate through hard_macro_pin_indices and soft_macro_pin_indices
-    # - Build driver-sink relationships from pin.get_sink()
-    # - Convert to List[Tensor] format for net_nodes
     net_nodes = []
-    net_weights = []
-
-    net_weights_tensor = (
-        torch.tensor(net_weights, dtype=torch.float32)
-        if net_weights
-        else torch.zeros(num_nets, dtype=torch.float32)
-    )
+    net_weights_tensor = torch.zeros(num_nets, dtype=torch.float32)
 
     # Create Benchmark object
     benchmark = Benchmark(
@@ -97,6 +96,8 @@ def load_benchmark(
         canvas_width=canvas_width,
         canvas_height=canvas_height,
         num_macros=num_macros,
+        num_hard_macros=num_hard,
+        num_soft_macros=num_soft,
         macro_positions=macro_positions,
         macro_sizes=macro_sizes,
         macro_fixed=macro_fixed,
@@ -108,7 +109,8 @@ def load_benchmark(
         grid_cols=grid_cols,
         hroutes_per_micron=hroutes_per_micron,
         vroutes_per_micron=vroutes_per_micron,
-        hard_macro_indices=hard_macro_indices,
+        hard_macro_indices=hard_macro_plc_indices,
+        soft_macro_indices=soft_macro_plc_indices,
     )
 
     return benchmark, plc

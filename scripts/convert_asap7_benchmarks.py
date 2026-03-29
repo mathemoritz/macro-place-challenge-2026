@@ -31,4 +31,4 @@ def main():
             print(f"✗ {name:25} FAILED: {e}")
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import sys; sys.exit(main())
