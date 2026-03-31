@@ -40,7 +40,8 @@ class SimpleRandomPlacer:
 
         placement = benchmark.macro_positions.clone()
 
-        for i in range(benchmark.num_macros):
+        # Only place hard macros; soft macros stay at initial positions
+        for i in range(benchmark.num_hard_macros):
             if benchmark.macro_fixed[i]:
                 continue
 

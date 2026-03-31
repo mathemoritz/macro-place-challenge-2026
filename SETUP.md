@@ -57,16 +57,22 @@ The `Benchmark` dataclass contains:
 | `name` | `str` | Benchmark name (e.g., "ibm01") |
 | `canvas_width` | `float` | Canvas width in microns |
 | `canvas_height` | `float` | Canvas height in microns |
-| `num_macros` | `int` | Number of hard macros |
-| `macro_positions` | `Tensor [N, 2]` | (x, y) center positions |
+| `num_macros` | `int` | Total macros (hard + soft) |
+| `num_hard_macros` | `int` | Number of hard macros (indices `[0, num_hard)`) |
+| `num_soft_macros` | `int` | Number of soft macros (indices `[num_hard, num_macros)`) |
+| `macro_positions` | `Tensor [N, 2]` | (x, y) center positions (hard first, then soft) |
 | `macro_sizes` | `Tensor [N, 2]` | (width, height) of each macro |
 | `macro_fixed` | `Tensor [N]` | Boolean mask of fixed macros |
 | `macro_names` | `List[str]` | Macro names for debugging |
 | `num_nets` | `int` | Number of nets |
 | `grid_rows`, `grid_cols` | `int` | Grid dimensions for density/congestion |
+| `hard_macro_indices` | `List[int]` | Map tensor index → PlacementCost module index (hard) |
+| `soft_macro_indices` | `List[int]` | Map tensor index → PlacementCost module index (soft) |
 
 Helper methods:
 - `benchmark.get_movable_mask()` — returns `~macro_fixed`
+- `benchmark.get_hard_macro_mask()` — True for hard macros (first `num_hard_macros` entries)
+- `benchmark.get_soft_macro_mask()` — True for soft macros
 - `benchmark.save(path)` / `Benchmark.load(path)` — serialize to/from `.pt` files
 
 ### Computing Proxy Cost
@@ -116,7 +122,7 @@ visualize_placement(placement, benchmark, save_path='output.png')
 
 ## Writing a Placer
 
-Your placer takes a `Benchmark` and returns a `[num_macros, 2]` tensor of positions:
+Your placer takes a `Benchmark` and returns a `[num_macros, 2]` tensor of positions. The tensor contains both hard macros (indices `[0, num_hard_macros)`) and soft macros (indices `[num_hard_macros, num_macros)`). Typically you only optimize hard macro positions and leave soft macros at their initial positions:
 
 ```python
 import torch
@@ -125,10 +131,13 @@ from macro_place.benchmark import Benchmark
 class MyPlacer:
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         placement = benchmark.macro_positions.clone()
-        movable = benchmark.get_movable_mask()
 
-        # Your algorithm here — modify positions for movable macros
-        # ...
+        # Only move hard macros — soft macros stay at initial positions
+        hard_movable = benchmark.get_movable_mask() & benchmark.get_hard_macro_mask()
+        movable_indices = torch.where(hard_movable)[0]
+
+        # Your algorithm here — modify positions for movable hard macros
+        # placement[movable_indices] = ...
 
         return placement
 ```
@@ -137,7 +146,7 @@ Key constraints:
 - Positions are **center coordinates** (not corners)
 - Fixed macros must stay at their original positions
 - All macros must be fully within canvas bounds
-- **Zero overlaps** required (automatic disqualification otherwise)
+- **Zero hard macro overlaps** required (soft macros may overlap — they are standard cell cluster abstractions)
 
 See `submissions/examples/greedy_row_placer.py` for a complete working example.
 

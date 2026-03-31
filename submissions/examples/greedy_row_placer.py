@@ -31,7 +31,8 @@ class GreedyRowPlacer:
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         placement = benchmark.macro_positions.clone()
-        movable = benchmark.get_movable_mask()
+        # Only place hard macros; soft macros stay at initial positions
+        movable = benchmark.get_movable_mask() & benchmark.get_hard_macro_mask()
         movable_indices = torch.where(movable)[0].tolist()
 
         sizes = benchmark.macro_sizes
