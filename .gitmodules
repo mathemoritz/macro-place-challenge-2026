@@ -1,3 +1,4 @@
 [submodule "external/MacroPlacement"]
 	path = external/MacroPlacement
-	url = https://github.com/TILOS-AI-Institute/MacroPlacement.git
+	url = https://github.com/partcleda/MacroPlacement.git
+	branch = fix-scientific-notation-parsing
