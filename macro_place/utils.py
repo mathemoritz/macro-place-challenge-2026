@@ -257,8 +257,8 @@ def visualize_placement(
             [0],
             marker="o",
             color="w",
-            markerfacecolor="orange",
-            markeredgecolor="darkorange",
+            markerfacecolor="darkslateblue",
+            markeredgecolor="darkslateblue",
             markersize=5,
             label="Macro pins",
         ),
@@ -273,7 +273,8 @@ def visualize_placement(
             label="I/O pins",
         ),
     ]
-    ax.legend(handles=legend_elements, loc="upper right")
+    legend = ax.legend(handles=legend_elements, loc="upper right")
+    legend.set_zorder(10)
 
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
