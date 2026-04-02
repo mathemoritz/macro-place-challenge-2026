@@ -95,34 +95,10 @@ def validate_placement(
     return len(violations) == 0, violations
 
 
-def visualize_placement(
-    placement: torch.Tensor,
-    benchmark: Benchmark,
-    save_path: Optional[str] = None,
-    plc=None,
-):
-    """
-    Visualize placement (requires matplotlib).
+def _draw_canvas(ax, benchmark):
+    """Draw the canvas border on an axis."""
+    from matplotlib.patches import Rectangle
 
-    Args:
-        placement: [num_macros, 2] positions
-        benchmark: Benchmark data
-        save_path: Optional path to save figure
-        plc: Optional PlacementCost object (enables net connectivity drawing)
-    """
-    try:
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import Rectangle
-    except ImportError:
-        print(
-            "Error: matplotlib not installed. Install with: pip install matplotlib",
-            file=sys.stderr,
-        )
-        return
-
-    fig, ax = plt.subplots(figsize=(10, 10))
-
-    # Draw canvas
     ax.add_patch(
         Rectangle(
             (0, 0),
@@ -133,16 +109,76 @@ def visualize_placement(
             linewidth=2,
         )
     )
+    ax.set_xlim(0, benchmark.canvas_width)
+    ax.set_ylim(0, benchmark.canvas_height)
+    ax.set_aspect("equal")
+    ax.set_xlabel("X (μm)")
+    ax.set_ylabel("Y (μm)")
 
-    # Draw macros
-    num_hard = getattr(benchmark, "num_hard_macros", benchmark.num_macros)
+
+def _draw_hard_macros(ax, placement, benchmark):
+    """Draw only hard macro outlines (no fill, no soft macros)."""
+    from matplotlib.patches import Rectangle
+
+    num_hard = benchmark.num_hard_macros
+    for i in range(num_hard):
+        x, y = placement[i].tolist()
+        w, h = benchmark.macro_sizes[i].tolist()
+        color = "red" if benchmark.macro_fixed[i] else "black"
+        ax.add_patch(
+            Rectangle(
+                (x - w / 2, y - h / 2),
+                w,
+                h,
+                fill=False,
+                edgecolor=color,
+                linewidth=0.8,
+                zorder=3,
+            )
+        )
+
+
+def visualize_placement(
+    placement: torch.Tensor,
+    benchmark: Benchmark,
+    save_path: Optional[str] = None,
+    plc=None,
+):
+    """
+    Visualize placement as 3 side-by-side panels:
+      1. Placement (hard + soft macros, pins, nets)
+      2. Density heatmap (hard macros only)
+      3. Congestion heatmap (hard macros only)
+
+    Args:
+        placement: [num_macros, 2] positions
+        benchmark: Benchmark data
+        save_path: Optional path to save figure
+        plc: Optional PlacementCost object (enables nets + heatmaps)
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.patches import Rectangle, Patch
+        from matplotlib.lines import Line2D
+        from matplotlib.collections import LineCollection
+    except ImportError:
+        print(
+            "Error: matplotlib not installed. Install with: pip install matplotlib",
+            file=sys.stderr,
+        )
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(30, 10))
+
+    # ── Panel 1: Full placement ──────────────────────────────────────────
+    ax = axes[0]
+    _draw_canvas(ax, benchmark)
+
+    num_hard = benchmark.num_hard_macros
     for i in range(benchmark.num_macros):
         x, y = placement[i].tolist()
         w, h = benchmark.macro_sizes[i].tolist()
-
-        x_min = x - w / 2
-        y_min = y - h / 2
-
         is_soft = i >= num_hard
         color = (
             "red"
@@ -153,10 +189,9 @@ def visualize_placement(
         )
         alpha = 0.25 if is_soft else 0.5
         linestyle = "dashed" if is_soft else "solid"
-
         ax.add_patch(
             Rectangle(
-                (x_min, y_min),
+                (x - w / 2, y - h / 2),
                 w,
                 h,
                 fill=True,
@@ -168,10 +203,9 @@ def visualize_placement(
             )
         )
 
-    # Draw hard macro pins as small circles at macro_center + offset
+    # Macro pins
     if benchmark.macro_pin_offsets:
-        all_pin_x = []
-        all_pin_y = []
+        all_pin_x, all_pin_y = [], []
         for i, offsets in enumerate(benchmark.macro_pin_offsets):
             if offsets.shape[0] == 0:
                 continue
@@ -179,32 +213,18 @@ def visualize_placement(
             all_pin_x.extend((cx + offsets[:, 0]).tolist())
             all_pin_y.extend((cy + offsets[:, 1]).tolist())
         if all_pin_x:
-            ax.scatter(
-                all_pin_x,
-                all_pin_y,
-                s=3,
-                c="darkslateblue",
-                zorder=6,
-            )
+            ax.scatter(all_pin_x, all_pin_y, s=3, c="darkslateblue", zorder=6)
 
-    # Draw I/O pins as small circles
+    # I/O pins
     if benchmark.port_positions.shape[0] > 0:
-        pin_x = benchmark.port_positions[:, 0].tolist()
-        pin_y = benchmark.port_positions[:, 1].tolist()
         ax.scatter(
-            pin_x,
-            pin_y,
-            s=8,
-            c="green",
-            zorder=5,
-            edgecolors="darkgreen",
-            linewidths=0.3,
+            benchmark.port_positions[:, 0].tolist(),
+            benchmark.port_positions[:, 1].tolist(),
+            s=8, c="green", zorder=5, edgecolors="darkgreen", linewidths=0.3,
         )
 
-    # Draw net connections as star topology (average center → each pin)
+    # Net connections
     if plc is not None:
-        from matplotlib.collections import LineCollection
-
         lines = []
         for driver_name, sink_names in plc.nets.items():
             if driver_name not in plc.mod_name_to_indices:
@@ -226,58 +246,76 @@ def visualize_placement(
             for cx, cy in coords:
                 lines.append([(avg_x, avg_y), (cx, cy)])
         if lines:
-            lc = LineCollection(
-                lines, colors="gray", alpha=0.05, linewidths=0.5, zorder=1
+            ax.add_collection(
+                LineCollection(lines, colors="gray", alpha=0.05, linewidths=0.5, zorder=1)
             )
-            ax.add_collection(lc)
 
-    ax.set_xlim(0, benchmark.canvas_width)
-    ax.set_ylim(0, benchmark.canvas_height)
-    ax.set_aspect("equal")
-    ax.set_xlabel("X (μm)")
-    ax.set_ylabel("Y (μm)")
-    ax.set_title(f"Placement: {benchmark.name}")
-
-    # Add legend
-    from matplotlib.patches import Patch
-    from matplotlib.lines import Line2D
-
+    ax.set_title(f"{benchmark.name} — Placement")
     legend_elements = [
         Patch(facecolor="blue", alpha=0.5, edgecolor="black", label="Hard macros"),
-        Patch(
-            facecolor="lightsteelblue",
-            alpha=0.1,
-            edgecolor="black",
-            linestyle="dashed",
-            label="Soft macros",
-        ),
+        Patch(facecolor="lightsteelblue", alpha=0.1, edgecolor="black",
+              linestyle="dashed", label="Soft macros"),
         Patch(facecolor="red", alpha=0.3, edgecolor="black", label="Fixed macros"),
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor="darkslateblue",
-            markeredgecolor="darkslateblue",
-            markersize=5,
-            label="Macro pins",
-        ),
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor="green",
-            markeredgecolor="darkgreen",
-            markersize=6,
-            label="I/O pins",
-        ),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="darkslateblue",
+               markeredgecolor="darkslateblue", markersize=5, label="Macro pins"),
+        Line2D([0], [0], marker="o", color="w", markerfacecolor="green",
+               markeredgecolor="darkgreen", markersize=6, label="I/O pins"),
     ]
-    legend = ax.legend(handles=legend_elements, loc="upper right")
+    legend = ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
     legend.set_zorder(10)
+    # Invisible colorbar so panel 1 has the same width as panels 2 & 3
+    sm = plt.cm.ScalarMappable(cmap="Greys", norm=plt.Normalize(0, 1))
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+    cbar.ax.set_visible(False)
+
+    # ── Panel 2: Density heatmap ─────────────────────────────────────────
+    ax = axes[1]
+    _draw_canvas(ax, benchmark)
+    extent = (0, benchmark.canvas_width, 0, benchmark.canvas_height)
+
+    if plc is not None:
+        plc.get_density_cost()
+        nrow, ncol = benchmark.grid_rows, benchmark.grid_cols
+        dens = np.asarray(plc.grid_cells, dtype=float).reshape(nrow, ncol)
+        vmax = max(float(np.max(dens)), 1e-9)
+        im_dens = ax.imshow(
+            dens, origin="lower", extent=extent, aspect="equal",
+            cmap="Blues", alpha=0.6, vmin=0.0, vmax=vmax, zorder=0,
+            interpolation="nearest",
+        )
+        fig.colorbar(im_dens, ax=ax, fraction=0.046, pad=0.04, label="Density")
+
+    _draw_hard_macros(ax, placement, benchmark)
+    ax.set_title(f"{benchmark.name} — Density")
+
+    # ── Panel 3: Congestion heatmap ──────────────────────────────────────
+    ax = axes[2]
+    _draw_canvas(ax, benchmark)
+
+    if plc is not None:
+        plc.get_congestion_cost()
+        nrow, ncol = benchmark.grid_rows, benchmark.grid_cols
+        h_cong = np.asarray(plc.H_routing_cong, dtype=float).reshape(nrow, ncol)
+        v_cong = np.asarray(plc.V_routing_cong, dtype=float).reshape(nrow, ncol)
+        cong = np.maximum(h_cong, v_cong)
+        pos = cong[cong > 0]
+        vmax = float(np.percentile(pos, 99)) if pos.size else 1.0
+        vmax = max(vmax, 1e-9)
+        im_cong = ax.imshow(
+            cong, origin="lower", extent=extent, aspect="equal",
+            cmap="hot", alpha=0.6, vmin=0.0, vmax=vmax, zorder=0,
+            interpolation="nearest",
+        )
+        fig.colorbar(im_cong, ax=ax, fraction=0.046, pad=0.04, label="Congestion (max H/V)")
+
+    _draw_hard_macros(ax, placement, benchmark)
+    ax.set_title(f"{benchmark.name} — Congestion")
+
+    fig.tight_layout()
 
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"Saved visualization to {save_path}")
     else:
         plt.show()
+    plt.close(fig)
