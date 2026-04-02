@@ -122,7 +122,9 @@ visualize_placement(placement, benchmark, save_path='output.png')
 
 ## Writing a Placer
 
-Your placer takes a `Benchmark` and returns a `[num_macros, 2]` tensor of positions. The tensor contains both hard macros (indices `[0, num_hard_macros)`) and soft macros (indices `[num_hard_macros, num_macros)`). Typically you only optimize hard macro positions and leave soft macros at their initial positions:
+Your placer takes a `Benchmark` and returns a `[num_macros, 2]` tensor of positions. The tensor contains both hard macros (indices `[0, num_hard_macros)`) and soft macros (indices `[num_hard_macros, num_macros)`).
+
+**Both hard and soft macros are movable.** Hard macros are the primary optimization targets (SRAMs, IPs, etc.). Soft macros are standard cell clusters — co-optimizing their positions alongside hard macros will improve wirelength, density, and congestion. The SA baseline does this by running force-directed placement on soft macros after each batch of hard macro moves.
 
 ```python
 import torch
@@ -132,12 +134,17 @@ class MyPlacer:
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         placement = benchmark.macro_positions.clone()
 
-        # Only move hard macros — soft macros stay at initial positions
+        # Hard macros: indices [0, num_hard_macros)
+        # Soft macros: indices [num_hard_macros, num_macros)
+        # Both are movable — optimize both for best results
+
         hard_movable = benchmark.get_movable_mask() & benchmark.get_hard_macro_mask()
         movable_indices = torch.where(hard_movable)[0]
 
-        # Your algorithm here — modify positions for movable hard macros
-        # placement[movable_indices] = ...
+        # Your algorithm here
+        # - Move hard macros to optimize placement
+        # - Optionally reposition soft macros to follow hard macro changes
+        #   (the SA baseline uses PlacementCost.optimize_stdcells() for this)
 
         return placement
 ```
@@ -147,8 +154,9 @@ Key constraints:
 - Fixed macros must stay at their original positions
 - All macros must be fully within canvas bounds
 - **Zero hard macro overlaps** required (soft macros may overlap — they are standard cell cluster abstractions)
+- Moving hard macros without repositioning soft macros will degrade wirelength and density
 
-See `submissions/examples/greedy_row_placer.py` for a complete working example.
+See `submissions/examples/greedy_row_placer.py` for a simple example and `submissions/will_seed/placer.py` for a more complete approach.
 
 ## Net Connectivity
 
@@ -166,6 +174,25 @@ for i, module in enumerate(plc.modules_w_pins):
 ```
 
 See the [TILOS MacroPlacement source](https://github.com/TILOS-AI-Institute/MacroPlacement/blob/main/CodeElements/Plc_client/plc_client_os.py) for the full PlacementCost API.
+
+## Soft Macro Optimization
+
+Soft macros (standard cell clusters) are connected to hard macros via nets. When you move hard macros, the optimal soft macro positions change. The PlacementCost API provides a built-in force-directed placer for soft macros:
+
+```python
+# After setting hard macro positions, reoptimize soft macros:
+canvas_size = max(benchmark.canvas_width, benchmark.canvas_height)
+plc.optimize_stdcells(
+    use_current_loc=False, move_stdcells=True, move_macros=False,
+    log_scale_conns=False, use_sizes=False, io_factor=1.0,
+    num_steps=[100, 100, 100],
+    max_move_distance=[canvas_size/100]*3,
+    attract_factor=[100, 1.0e-3, 1.0e-5],
+    repel_factor=[0, 1.0e6, 1.0e7],
+)
+```
+
+This is what the SA baseline does between iterations. Note: this is slow in Python (~minutes per call). You can reduce `num_steps` for faster but less optimal results, or implement your own soft macro optimization (e.g., jointly in a GPU-based optimizer).
 
 ## Running Benchmarks
 
