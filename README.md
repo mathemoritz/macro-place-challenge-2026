@@ -107,7 +107,7 @@ The top 7 submissions by proxy score will be evaluated through the full **OpenRO
 
 ## 🚀 Quick Start
 
-### Installation
+### Installation 
 
 ```bash
 # Clone the repository
@@ -178,7 +178,7 @@ We evaluate on the complete ICCAD04 IBM benchmark suite:
 
 Each benchmark includes:
 - Hard macros (you place these)
-- Soft macros (pre-placed standard cell clusters, fixed during evaluation)
+- Soft macros (you can also place these)
 - Nets connecting all components
 - Initial placement (hand-crafted, serves as reference)
 
