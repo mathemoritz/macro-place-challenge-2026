@@ -218,16 +218,19 @@ Classical methods (SA, RePlAce) have been refined for decades but still have roo
 
 ## 🏅 Leaderboard
 
-Submissions are ranked by **average proxy cost** across all 18 IBM benchmarks (lower is better). Zero overlaps required on all benchmarks.
+Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (lower is better). Zero overlaps required on all benchmarks. Scores are unverified until confirmed by judges.
 
-| Rank | Team | Avg Proxy Cost | Best | Worst | Overlaps | Runtime |
-|------|------|---------------|------|-------|----------|---------|
+| Rank | Team | Avg Proxy Cost | Best | Worst | Overlaps | Verified |
+|------|------|---------------|------|-------|----------|----------|
+| 1 | UT Austin (DREAMPlace) | **1.4076** | — | — | 0 | |
+| 2 | BakaBobo (Spread+Refine) | **1.4403** | — | — | 0 | |
 | — | RePlAce (baseline) | **1.4578** | 0.9976 | 1.8370 | 0 | — |
-| 1 | Will (Partcl) | **1.5338** | 1.1625 | 1.7965 | 0 | 35s |
+| 3 | Convex Optimization | **1.4556** | — | — | 0 | |
+| 4 | Will (Partcl) | **1.5338** | 1.1625 | 1.7965 | 0 | |
 | — | SA (baseline) | 2.1251 | 1.3166 | 3.6726 | 0 | — |
-| — | Greedy Row (demo) | 2.2109 | 1.6728 | 2.7696 | 0 | 0.3s |
+| — | Greedy Row (demo) | 2.2109 | 1.6728 | 2.7696 | 0 | — |
 
-*Submit your results to appear on the leaderboard!*
+*Submit your results via the [Submission Link](https://forms.gle/YDRtYV5Vq68SZgKW9)!*
 
 ## 🤔 FAQ
 
