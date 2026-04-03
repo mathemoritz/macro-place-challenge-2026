@@ -228,7 +228,7 @@ Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (l
 | 3 | Convex Optimization | **1.4556** | — | — | 0 | 16s total | |
 | 4 | Will Seed (Partcl) | **1.5338** | 1.1625 | 1.7965 | 0 | 35s total | :white_check_mark: |
 | — | SA (baseline) | 2.1251 | 1.3166 | 3.6726 | 0 | — | :white_check_mark: |
-| — | Greedy Row (demo) | 2.2109 | 1.6728 | 2.7696 | 0 | 0.3s total | — |
+| — | Greedy Row (demo) | 2.2109 | 1.6728 | 2.7696 | 0 | 0.3s total | :white_check_mark: |
 
 *Submit your results via the [Submission Link](https://forms.gle/YDRtYV5Vq68SZgKW9)!*
 
