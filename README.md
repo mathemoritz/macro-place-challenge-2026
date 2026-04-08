@@ -83,7 +83,7 @@ Partcl develops GPU-accelerated systems for physical design that run orders of m
 - Hardcoding solutions for specific benchmarks (must be general algorithm)
 - Using external/proprietary placement tools (must be open-source submission)
 - Exceeding runtime limits (1 hour per benchmark hard timeout)
-- Overlaps in resulting placement
+- Overlaps in resulting placement (strictly zero overlap between hard macros — no tolerance. Participants should add small gaps in their legalization to avoid float-precision edge cases.)
 
 ## Evaluation Details
 
