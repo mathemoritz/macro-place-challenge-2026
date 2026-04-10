@@ -19,6 +19,12 @@ COPY requirements.txt /challenge/requirements.txt
 # Copy benchmarks (read-only at runtime, but needed in image)
 COPY external/MacroPlacement/Testcases/ICCAD04/ /challenge/external/MacroPlacement/Testcases/ICCAD04/
 
+# Copy PlacementCost evaluator (plc_client_os from TILOS submodule)
+COPY external/MacroPlacement/CodeElements/Plc_client/ /challenge/external/MacroPlacement/CodeElements/Plc_client/
+
+# Copy example submissions (for smoke testing)
+COPY submissions/examples/ /challenge/submissions/examples/
+
 # Install challenge package and base deps
 RUN pip install --no-cache-dir -e . && \
     pip install --no-cache-dir scipy tqdm
