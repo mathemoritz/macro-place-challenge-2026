@@ -325,7 +325,11 @@ dict for {prefix entries} $_odb_groups {
                 f.write(f'# {plc_name}\n')
                 f.write(f'set _inst [_find_macro $block "{tcl_name}"]\n')
                 f.write(f'if {{$_inst ne "NULL"}} {{\n')
-                f.write(f'    place_macro -macro_name [list [$_inst getName]] -location [list {x_ll:.6f} {y_ll:.6f}] -orientation {orient}\n')
+                # Use the inst object directly to place — avoids name escaping issues
+                f.write(f'    set _loc [odb::dbInst_getLocation $_inst]\n')
+                f.write(f'    $_inst setOrient {orient}\n')
+                f.write(f'    $_inst setLocation [ord::microns_to_dbu {x_ll:.6f}] [ord::microns_to_dbu {y_ll:.6f}]\n')
+                f.write(f'    $_inst setPlacementStatus FIRM\n')
                 f.write(f'    incr _placed\n')
                 f.write(f'}} else {{\n')
                 f.write(f'    puts "WARNING: ODB instance not found: {odb_name}"\n')
