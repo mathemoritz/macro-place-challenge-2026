@@ -306,6 +306,26 @@ def evaluate_benchmark(
     else:
         orfs_config_dir = Path(f"external/MacroPlacement/Flows/ASAP7/{source_name}/scripts/OpenROAD/{source_name}")
 
+    # Extract .tar.gz configs (ariane136, mempool_tile ship as tarballs)
+    if not orfs_config_dir.exists():
+        import tarfile
+        tar_parent = orfs_config_dir.parent
+        for tar_path in tar_parent.glob("*.tar.gz") if tar_parent.exists() else []:
+            print(f"  Extracting {tar_path.name}...")
+            with tarfile.open(tar_path) as tar:
+                # Find config.mk inside the tar (may be nested)
+                config_members = [m for m in tar.getmembers() if m.name.endswith("config.mk")]
+                if config_members:
+                    orfs_config_dir.mkdir(parents=True, exist_ok=True)
+                    # Extract all files, stripping the leading path to get just filenames
+                    for member in tar.getmembers():
+                        if member.isfile():
+                            member_name = Path(member.name).name
+                            member.name = member_name
+                            tar.extract(member, orfs_config_dir)
+                    print(f"  ✓ Extracted {len(tar.getmembers())} files to {orfs_config_dir}")
+                    break
+
     # Generate ORFS config for nvdla if it doesn't exist (no upstream collateral)
     if not orfs_config_dir.exists() and source_name == "nvdla":
         orfs_config_dir.mkdir(parents=True, exist_ok=True)
