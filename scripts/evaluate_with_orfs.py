@@ -498,17 +498,17 @@ set_output_delay -clock core_clock 0 [all_outputs]
                 )
                 print(f"  ✓ Fixed mempool_tile config (disabled hierarchical flow, increased die to 2000x2000, opened all pin sides)")
 
-            if source_name == "ariane136":
-                # Reduce macro halo so 136 macros can be clustered (default 22.4x15.12 is too large)
+            if source_name in ("ariane133", "ariane136"):
+                # Reduce macro halo so 133/136 macros fit (default 22.4x15.12 is too large)
                 if 'MACRO_PLACE_HALO' not in config_content:
-                    config_content += '\nexport MACRO_PLACE_HALO = 11.2 7.56\n'
+                    config_content += '\nexport MACRO_PLACE_HALO = 5.0 5.0\n'
                 else:
                     config_content = re.sub(
                         r'export MACRO_PLACE_HALO\s*=.*',
-                        'export MACRO_PLACE_HALO = 11.2 7.56',
+                        'export MACRO_PLACE_HALO = 5.0 5.0',
                         config_content
                     )
-                print(f"  ✓ Reduced ariane136 MACRO_PLACE_HALO to 11.2 7.56 (from default 22.4 15.12)")
+                print(f"  ✓ Reduced {source_name} MACRO_PLACE_HALO to 5.0 5.0")
 
             if source_name == "black_parrot":
                 # Disable hierarchical synthesis — we use our own macro placement
