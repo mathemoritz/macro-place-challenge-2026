@@ -4,10 +4,9 @@ This document defines the **deterministic, rules-based evaluation system** for t
 
 The goal is simple:
 - No ambiguity
-- No subjective judging
 - No post-hoc decisions
 
-All submissions are evaluated using a **fixed pipeline** and **mechanical scoring rules**.
+All submissions are evaluated using **mechanical scoring rules** applied to outputs from a shared evaluation pipeline.
 
 ---
 
@@ -191,9 +190,9 @@ Submissions may be disqualified if they:
 
 ## Reproducibility
 
-- Evaluation uses a **fixed, versioned OpenROAD flow**
+- Evaluation uses a versioned OpenROAD flow; the exact version used for final scoring will be documented with the results
 - The evaluation pipeline will be released alongside final results
-- All submissions are evaluated under **identical conditions** on the same hardware
+- All submissions in a given evaluation round are run under the same conditions on the same hardware
 
 ---
 
@@ -204,5 +203,3 @@ To win the Grand Prize:
 1. Be in the **top 7 by proxy cost** (Tier 1)
 2. **Pass feasibility** — don't regress timing below both baselines on any design
 3. **Maximize your weighted geometric mean score** — prioritize WNS, then TNS, then Area (weights 3:2:1) across all designs
-
-This is a **strictly rules-based system**. There is **no subjective judgment** in ranking.
