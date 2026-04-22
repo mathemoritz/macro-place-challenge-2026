@@ -305,19 +305,25 @@ dict for {prefix entries} $_odb_groups {
 
 """)
 
-        # Direct placements for non-Ariane designs (mempool_tile, nvdla, etc.)
+        # Direct placements for non-Ariane designs or Genus netlists
         if direct_placements:
-            f.write("# Direct placements (non-genblk naming)\n")
+            f.write("# Direct placements\n")
             f.write("set block [ord::get_db_block]\n" if not group_data else "")
             for odb_name, x_ll, y_ll, orient, plc_name in direct_placements:
-                odb_escaped = odb_name.replace('[', '\\[').replace(']', '\\]')
+                # ODB stores Verilog escaped names with literal backslash-brackets: \[0\]
+                # In TCL, to get a literal \[ we need \\[ inside double quotes.
+                # Try both escaped (\[N\]) and unescaped ([N]) forms to handle
+                # both Genus (escaped) and other netlists (unescaped).
+                odb_escaped = odb_name.replace('[', '\\\\[').replace(']', '\\\\]')
+                odb_plain = odb_name.replace('[', '\\[').replace(']', '\\]')
                 f.write(f'# {plc_name}\n')
                 f.write(f'set _inst [$block findInst "{odb_escaped}"]\n')
+                f.write(f'if {{$_inst eq "NULL"}} {{ set _inst [$block findInst "{odb_plain}"] }}\n')
                 f.write(f'if {{$_inst ne "NULL"}} {{\n')
-                f.write(f'    place_macro -macro_name [list {odb_escaped}] -location [list {x_ll:.6f} {y_ll:.6f}] -orientation {orient}\n')
+                f.write(f'    place_macro -macro_name [list [$_inst getName]] -location [list {x_ll:.6f} {y_ll:.6f}] -orientation {orient}\n')
                 f.write(f'    incr _placed\n')
                 f.write(f'}} else {{\n')
-                f.write(f'    puts "WARNING: ODB instance not found: {odb_escaped}"\n')
+                f.write(f'    puts "WARNING: ODB instance not found: {odb_name}"\n')
                 f.write(f'}}\n')
             f.write("\n")
 
