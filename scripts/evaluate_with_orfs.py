@@ -424,6 +424,7 @@ set_output_delay -clock core_clock 0 [all_outputs]
             # Use pre-mapped Genus gate netlist when available (bypasses Yosys).
             # This fixes ariane133 where PRESERVE_CELLS causes Yosys to drop
             # 89 of 133 SRAMs (see issue #50).
+            _using_genus_netlist = False
             genus_netlist_dir = Path(
                 f"external/MacroPlacement/Flows/NanGate45/{source_name}/netlist"
             )
@@ -441,6 +442,7 @@ set_output_delay -clock core_clock 0 [all_outputs]
                         stale_yosys = orfs_root / "flow" / "results" / tech / source_name / "base" / "1_2_yosys.v"
                         if stale_yosys.is_file():
                             stale_yosys.unlink()
+                        _using_genus_netlist = True
                         print(f"  ✓ Using Genus gate netlist: {candidate.name} ({n_sram} SRAMs)")
                         break
 
@@ -578,7 +580,7 @@ set_output_delay -clock core_clock 0 [all_outputs]
             print(f"  ✓ Parsed CORE_AREA: {core_area}")
 
         # Regenerate TCL with core_area clamping
-        write_orfs_macro_placement(placement, benchmark, plc, str(tcl_file), core_area=core_area)
+        write_orfs_macro_placement(placement, benchmark, plc, str(tcl_file), core_area=core_area, use_genus_names=_using_genus_netlist)
         shutil.copy(tcl_file, design_dir / "macros.tcl")
         # Also overwrite any existing macro placement TCL referenced in config
         tcl_ref = re.search(r'MACRO_PLACEMENT_TCL\s*=.*?/([^/\s]+\.tcl)', config_text)

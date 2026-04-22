@@ -150,7 +150,7 @@ def _plc_to_odb_name(plc_name):
     return name
 
 
-def write_orfs_macro_placement(placement, benchmark, plc, output_file, core_area=None):
+def write_orfs_macro_placement(placement, benchmark, plc, output_file, core_area=None, use_genus_names=False):
     """
     Write macro placement in ORFS format using place_macro command.
 
@@ -163,6 +163,10 @@ def write_orfs_macro_placement(placement, benchmark, plc, output_file, core_area
     per genblk). Instead of guessing, we match at runtime by grouping ODB
     instances by their sram block prefix and assigning linear indices.
 
+    When use_genus_names=True, bypasses the genblk matching and uses the raw
+    .plc hierarchical names directly (for Genus-mapped gate netlists which
+    preserve the original hierarchy).
+
     When core_area is provided, proxy canvas coordinates are **scaled** to fill
     the ORFS core area (the proxy canvas and ORFS die have different dimensions).
 
@@ -172,6 +176,7 @@ def write_orfs_macro_placement(placement, benchmark, plc, output_file, core_area
         plc: PlacementCost object
         output_file: Output TCL file path
         core_area: Optional tuple (x_min, y_min, x_max, y_max) to scale+clamp positions
+        use_genus_names: If True, use raw .plc names for placement (Genus netlists)
     """
     from collections import defaultdict
 
@@ -217,16 +222,22 @@ def write_orfs_macro_placement(placement, benchmark, plc, output_file, core_area
             y_ll = max(core_y_min + margin, min(y_ll, core_y_max - h - margin))
 
         orientation = node.get_orientation() if node.get_orientation() else "R0"
-        group_prefix, macro_k = _plc_extract_group_and_index(plc_name)
 
-        if group_prefix is not None:
-            group_data[group_prefix][macro_k] = (x_ll, y_ll, orientation, plc_name)
+        if use_genus_names:
+            # Genus netlists preserve original hierarchy — use .plc name directly
+            direct_placements.append((plc_name, x_ll, y_ll, orientation, plc_name))
             total_macros += 1
         else:
-            # Fallback: convert plc name directly to ODB name (mempool_tile, nvdla, etc.)
-            odb_name = _plc_to_odb_name(plc_name)
-            direct_placements.append((odb_name, x_ll, y_ll, orientation, plc_name))
-            total_macros += 1
+            group_prefix, macro_k = _plc_extract_group_and_index(plc_name)
+
+            if group_prefix is not None:
+                group_data[group_prefix][macro_k] = (x_ll, y_ll, orientation, plc_name)
+                total_macros += 1
+            else:
+                # Fallback: convert plc name directly to ODB name (mempool_tile, nvdla, etc.)
+                odb_name = _plc_to_odb_name(plc_name)
+                direct_placements.append((odb_name, x_ll, y_ll, orientation, plc_name))
+                total_macros += 1
 
     with open(output_file, 'w') as f:
         f.write("# Macro Placement for OpenROAD-flow-scripts\n")
