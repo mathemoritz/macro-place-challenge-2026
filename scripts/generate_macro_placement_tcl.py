@@ -126,28 +126,38 @@ def _plc_extract_group_and_index(plc_name):
 
 
 def _plc_to_odb_name(plc_name):
-    """Convert a .plc hierarchical name to the flat ODB instance name.
+    """Convert a .plc hierarchical name to the Yosys-flattened ODB instance name.
 
-    Verilog hierarchy flattens to ODB with:
-      '/' -> '.'
-      '[N].' -> '_N__'  (mid-hierarchy generate index)
-      '[N]' at end -> '_N_' (trailing generate index)
-      '.' within a level stays as '.' in ODB
+    Yosys flattens generate blocks by replacing brackets and dots within
+    a hierarchy level with underscores, but keeps '/' as the hierarchy separator.
+
+    Rules (observed from ODB dumps):
+      '[N].' -> '_N__'   (generate index followed by dot)
+      '.'    -> '_'      (dot within a hierarchy level, NOT hierarchy separator)
+      '/'    -> '/'      (hierarchy separator preserved)
 
     Examples:
       i_tile/gen_banks[3].mem_bank/genblk1.sram_instance
-        -> i_tile.gen_banks_3__mem_bank.genblk1.sram_instance
+        -> i_tile/gen_banks_3__mem_bank/genblk1_sram_instance
+
+      i_tile/gen_caches[0].i_snitch_icache/i_lookup/i_data/genblk1.fr_sp_instance0
+        -> i_tile/gen_caches_0__i_snitch_icache/i_lookup/i_data/genblk1_fr_sp_instance0
 
       u_NV_NVDLA_cbuf/u_cbuf_ram_bank0_ram0/rmod/rmod_a
-        -> u_NV_NVDLA_cbuf.u_cbuf_ram_bank0_ram0.rmod.rmod_a
+        -> u_NV_NVDLA_cbuf/u_cbuf_ram_bank0_ram0/rmod/rmod_a  (no change)
     """
-    # Handle [N]. pattern (generate block mid-hierarchy)
-    name = re.sub(r'\[(\d+)\]\.', r'_\1__.', plc_name)
-    # Handle [N] at end of a segment before '/'
-    name = re.sub(r'\[(\d+)\](?=/|$)', r'_\1_', name)
-    # Hierarchy separator
-    name = name.replace('/', '.')
-    return name
+    # Split by hierarchy separator first
+    parts = plc_name.split('/')
+    result = []
+    for part in parts:
+        # Handle [N]. pattern (generate index)
+        part = re.sub(r'\[(\d+)\]\.', r'_\1__', part)
+        # Handle [N] at end of segment
+        part = re.sub(r'\[(\d+)\]$', r'_\1_', part)
+        # Remaining dots within the segment become underscores
+        part = part.replace('.', '_')
+        result.append(part)
+    return '/'.join(result)
 
 
 def write_orfs_macro_placement(placement, benchmark, plc, output_file, core_area=None, use_genus_names=False):
