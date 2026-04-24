@@ -26,7 +26,7 @@ import torch
 from pathlib import Path
 
 # Memory limit for ORFS subprocesses (64 GB)
-MEMORY_LIMIT_BYTES = 64 * 1024 * 1024 * 1024
+MEMORY_LIMIT_BYTES = 100 * 1024 * 1024 * 1024  # 100GB for rtl_macro_placer
 
 def _set_memory_limit():
     """Pre-exec hook: cap virtual memory for the child process tree."""
@@ -102,6 +102,7 @@ def run_orfs_flow(design_dir: Path, orfs_root: Path, use_docker: bool = True, sk
         cmd = [
             "make",
             f"DESIGN_CONFIG=./designs/{tech}/{design_name}/config.mk",
+            "OPENROAD_ARGS=-threads 16",
             "finish"
         ]
         # Help ORFS find system-installed tools when not using Nix or Docker
@@ -127,7 +128,7 @@ def run_orfs_flow(design_dir: Path, orfs_root: Path, use_docker: bool = True, sk
                 cwd=flow_dir,
                 stdout=fout,
                 stderr=ferr,
-                timeout=21600,  # 6 hour timeout
+                timeout=43200,  # 12 hour timeout
                 preexec_fn=_set_memory_limit,
             )
         except subprocess.TimeoutExpired:
@@ -537,6 +538,25 @@ set_output_delay -clock core_clock 0 [all_outputs]
             # Add MACRO_PLACEMENT_TCL for ALL designs so ORFS uses our placement
             if 'MACRO_PLACEMENT_TCL' not in config_content:
                 config_content += '\nexport MACRO_PLACEMENT_TCL = ./designs/$(PLATFORM)/$(DESIGN_NICKNAME)/macros.tcl\n'
+
+            # Fix Genus netlist issue: constant-1 nets typed as POWER can't be routed.
+            # Reclassify them as SIGNAL before global routing.
+            if _using_genus_netlist:
+                fix_tcl = design_dir / "fix_power_nets.tcl"
+                fix_tcl.write_text(
+                    "# Reclassify constant nets mistyped as POWER/GROUND\n"
+                    "set block [ord::get_db_block]\n"
+                    "foreach net [$block getNets] {\n"
+                    "  set type [$net getSigType]\n"
+                    "  set name [$net getName]\n"
+                    "  if { ($type eq \"POWER\" || $type eq \"GROUND\") && $name ni {VDD VSS} } {\n"
+                    "    $net setSigType SIGNAL\n"
+                    "    puts \"Reclassified net $name from $type to SIGNAL\"\n"
+                    "  }\n"
+                    "}\n"
+                )
+                config_content += f'\nexport PRE_GLOBAL_ROUTE_TCL = ./designs/$(PLATFORM)/$(DESIGN_NICKNAME)/fix_power_nets.tcl\n'
+                print(f"  ✓ Added PRE_GLOBAL_ROUTE_TCL to fix Genus power net typing")
 
             # Workaround: repair_timing -sequence is not supported in older OpenROAD builds.
             # Set REMOVE_ABC_BUFFERS=1 so floorplan.tcl takes the remove_buffers path
