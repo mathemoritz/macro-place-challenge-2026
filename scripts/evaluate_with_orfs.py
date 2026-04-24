@@ -40,7 +40,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 from benchmark import Benchmark
 from loader import load_benchmark_from_dir
 from objective import compute_proxy_cost
-from orfs_integration.design_generator import create_orfs_design, ORFSDesign
+try:
+    from orfs_integration.design_generator import create_orfs_design, ORFSDesign
+except ImportError:
+    create_orfs_design = None  # Only needed for fallback config generation
 from generate_macro_placement_tcl import write_orfs_macro_placement
 
 
