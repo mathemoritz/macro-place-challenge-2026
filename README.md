@@ -58,6 +58,8 @@ Partcl develops GPU-accelerated systems for physical design that run orders of m
 - **Swag:** Every valid submission gets HRT swag!
 - **Note:** An additional score adjustment will be applied based on human-expert analysis of the resulting placement.
 
+For full Grand Prize scoring rules, feasibility gate, tie-breaking, and ORFS-failure handling, see [`SCORING.md`](SCORING.md).
+
 ## Submission Format
 
 - All submissions will be via google form. Submissions may be made public or private before the end of judging.
@@ -78,6 +80,7 @@ Partcl develops GPU-accelerated systems for physical design that run orders of m
 - **Any framework**: PyTorch, TensorFlow, JAX, or pure Python/C++
 - **Any optimization technique**: Gradient descent, evolutionary algorithms, local search, etc.
 - **Training on public benchmarks**: You can learn from the IBM benchmark data
+- **Hard-macro orientation flips** (Klein-4 only: `N`, `FN`, `FS`, `S`) — carried to Tier 2 via an optional `orientations.pt` sidecar
 
 ### Not Allowed
 
@@ -86,6 +89,8 @@ Partcl develops GPU-accelerated systems for physical design that run orders of m
 - Using external/proprietary placement tools (must be open-source submission)
 - Exceeding runtime limits (1 hour per benchmark hard timeout)
 - Overlaps in resulting placement (strictly zero overlap between hard macros — no tolerance. Participants should add small gaps in their legalization to avoid float-precision edge cases.)
+- 90° rotations of hard macros (`R90`, `R270`, `FE`, `FW`) — the fakeram45 SRAMs in our benchmarks aren't designed for rotation (pin access and internal metal direction assume a fixed orientation)
+- Resizing soft macros — soft-macro size is a proxy-only concept for density/congestion that doesn't translate to Tier 2; sizes are locked to the initial `.plc` values on every `compute_proxy_cost` call
 
 ## Evaluation Details
 
