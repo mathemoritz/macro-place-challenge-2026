@@ -1,14 +1,6 @@
 # Macro Placement Challenge — Grand Prize Scoring Rules (v2.0)
 
-This document defines the **deterministic, rules-based evaluation system** for the Grand Prize ($20,000).
-
-The goal is simple:
-- No ambiguity
-- No post-hoc decisions
-
-All submissions are evaluated using **mechanical scoring rules** applied to outputs from a shared evaluation pipeline.
-
----
+This document defines the evaluation system for the Grand Prize ($20,000).
 
 ## Overview
 
@@ -63,6 +55,34 @@ TNS_sub ≥ min(TNS_SA, TNS_RP)
 - You **cannot be worse than both baselines** on WNS or TNS for any design
 - You may match one baseline and beat the other
 - If either condition fails on **any design** → submission is **disqualified** from the Grand Prize
+
+---
+
+## Handling ORFS Failures
+
+If OpenROAD fails on any design (exits non-zero before producing WNS/TNS/Area),
+the submission is technically disqualified from the Grand Prize. In practice,
+we will reach out and work with the team to resolve the failure — whether the
+cause is on our side (evaluator bug, netlist issue) or on the placer's side
+(a placement choice ORFS can't route through).
+
+The evaluator auto-handles the following on behalf of placers:
+- Snap macro positions to the manufacturing grid
+- Iteratively push macros apart to maintain ≥12 μm clearance (PDN channel
+  routing needs ~10 μm between adjacent macros). This happens **only at
+  Tier 2**, after scaling the placement to ORFS core coordinates; Tier 1
+  proxy cost uses your submitted coordinates unchanged. The pre- and
+  post-push coordinates are logged to a sidecar `macros.tcl.spacing_diff.txt`
+  in the ORFS results directory so you can see exactly what was moved and
+  by how much. To keep full control over Tier 2 coordinates, leave ≥12 μm
+  between macros in your submitted placement.
+- Instance name escaping for Genus netlists
+
+The placer is responsible for: zero overlaps, staying within canvas bounds,
+macro orientation choices, and any other decisions that affect downstream
+ORFS routability.
+
+Tier 1 (Proxy Prize) ranking is unaffected by Tier 2 / ORFS outcomes.
 
 ---
 
