@@ -441,6 +441,12 @@ set_output_delay -clock core_clock 0 [all_outputs]
                         patched_netlist = design_dir / "genus_netlist.v"
                         shutil.copy(candidate, patched_netlist)
 
+                        # Fix Genus netlist syntax: join split "module\n  name" declarations
+                        # OpenROAD's Verilog reader can't handle module name on next line
+                        genus_raw = patched_netlist.read_text()
+                        genus_raw = re.sub(r'^module\s*\n\s+', 'module ', genus_raw, flags=re.MULTILINE)
+                        patched_netlist.write_text(genus_raw)
+
                         # Patch: add missing module definitions from RTL (issue #65).
                         # Genus netlist references lzc_MODE1_WIDTH64, lzc_WIDTH3, lzc_WIDTH4
                         # but their definitions were stripped. Extract from RTL and rename.
