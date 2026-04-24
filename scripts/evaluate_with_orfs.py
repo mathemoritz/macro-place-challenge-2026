@@ -434,10 +434,47 @@ set_output_delay -clock core_clock 0 [all_outputs]
                     with open(candidate) as fv:
                         n_sram = sum(1 for line in fv if "fakeram45_" in line)
                     if n_sram > 0:
-                        abs_path = candidate.resolve()
+                        # Copy Genus netlist to design dir so we can patch it
+                        patched_netlist = design_dir / "genus_netlist.v"
+                        shutil.copy(candidate, patched_netlist)
+
+                        # Patch: add missing module definitions from RTL (issue #65).
+                        # Genus netlist references lzc_MODE1_WIDTH64, lzc_WIDTH3, lzc_WIDTH4
+                        # but their definitions were stripped. Extract from RTL and rename.
+                        rtl_file = orfs_config_dir / "ariane.v"
+                        if rtl_file.exists():
+                            rtl_text = rtl_file.read_text()
+                            genus_text = patched_netlist.read_text()
+                            # Map: Genus name -> (RTL name, start pattern, end pattern)
+                            lzc_fixes = {
+                                'lzc_MODE1_WIDTH64': 'lzc_WIDTH64_MODE1',
+                                'lzc_WIDTH3': 'lzc_00000003',
+                                'lzc_WIDTH4': 'lzc_00000004',
+                            }
+                            patches = []
+                            for genus_name, rtl_name in lzc_fixes.items():
+                                if genus_name in genus_text and f"module {genus_name}" not in genus_text:
+                                    # Extract module from RTL
+                                    start = rtl_text.find(f"module {rtl_name}")
+                                    if start >= 0:
+                                        end = rtl_text.find("endmodule", start)
+                                        if end >= 0:
+                                            module_body = rtl_text[start:end + len("endmodule")]
+                                            # Rename module
+                                            module_body = module_body.replace(
+                                                f"module {rtl_name}", f"module {genus_name}", 1
+                                            )
+                                            patches.append(module_body)
+                                            print(f"  ✓ Patched missing module: {genus_name} (from RTL {rtl_name})")
+                            if patches:
+                                with open(patched_netlist, 'a') as pf:
+                                    pf.write("\n// --- Patched missing modules from RTL ---\n")
+                                    for p in patches:
+                                        pf.write(p + "\n\n")
+
                         config_content += (
-                            f"\n# Override: use Genus-mapped gate netlist ({n_sram} SRAMs)\n"
-                            f"export SYNTH_NETLIST_FILES = {abs_path}\n"
+                            f"\n# Override: use patched Genus gate netlist ({n_sram} SRAMs)\n"
+                            f"export SYNTH_NETLIST_FILES = ./designs/$(PLATFORM)/$(DESIGN_NICKNAME)/genus_netlist.v\n"
                         )
                         # Remove stale Yosys cache so ORFS uses the Genus netlist
                         stale_yosys = orfs_root / "flow" / "results" / tech / source_name / "base" / "1_2_yosys.v"
