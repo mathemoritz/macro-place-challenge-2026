@@ -479,10 +479,12 @@ set_output_delay -clock core_clock 0 [all_outputs]
                             f"\n# Override: use patched Genus gate netlist ({n_sram} SRAMs)\n"
                             f"export SYNTH_NETLIST_FILES = ./designs/$(PLATFORM)/$(DESIGN_NICKNAME)/genus_netlist.v\n"
                         )
-                        # Remove stale Yosys cache so ORFS uses the Genus netlist
-                        stale_yosys = orfs_root / "flow" / "results" / tech / source_name / "base" / "1_2_yosys.v"
-                        if stale_yosys.is_file():
-                            stale_yosys.unlink()
+                        # Pre-place the patched Genus netlist where ORFS expects 1_2_yosys.v.
+                        # This bypasses Yosys entirely — the Makefile sees the output
+                        # already exists and skips the canonicalize + synthesis steps.
+                        yosys_out = orfs_root / "flow" / "results" / tech / source_name / "base"
+                        yosys_out.mkdir(parents=True, exist_ok=True)
+                        shutil.copy(patched_netlist, yosys_out / "1_2_yosys.v")
                         _using_genus_netlist = True
                         print(f"  ✓ Using Genus gate netlist: {candidate.name} ({n_sram} SRAMs)")
                         break
