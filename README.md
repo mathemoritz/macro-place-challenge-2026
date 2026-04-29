@@ -242,8 +242,8 @@ Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (l
 | 10 | "UT Austin" - AS (DREAMPlace Analytical) | **1.4076** | — | — | 0 | 17s/bench | | |
 | 11 | "ByteDancer" (Incremental CD) | **1.4151** | 1.0236 | 1.7792 | 0 | 38min/bench | :white_check_mark: | |
 | 12 | "vmallela" (Incremental CD+LNS) | **1.4152** | 1.0236 | 1.7817 | 0 | 12h total | :white_check_mark: | Verified 1.4152 (self-reported 1.1172 — 27% worse on our hardware); pure Python+numpy, single-threaded |
-| 13 | "ArzunPD" (HyperPlace SA+LNS) | **1.4174** | — | — | 0 | 55min total | | New 4/27; SA + 1000× faster proxy + LNS episodes; verification in progress |
-| 14 | "TAISPlAce" (ALNS + Thompson Sampling) | **1.4321** | — | — | 0 | 28min/bench | | |
+| 13 | "TAISPlAce" (ALNS + Thompson Sampling) | **1.4321** | — | — | 0 | 28min/bench | | |
+| 14 | "ArzunPD" (HyperPlace SA+LNS) | **1.4421** | 1.0323 | 1.7851 | 0 | 6h total | :white_check_mark: | Verified 1.4421 (self-reported 1.4174); Stage 5 LNS disabled — missing `networkit` dep, fell back to Stage 4 across all benchmarks |
 | 15 | "Pragnay" (SweepingBellPlacement) | **1.4427** | — | — | 0 | 632s/bench | | |
 | 16 | "Convex Optimization" (UWaterloo Student) | **1.4556** | 1.0432 | 1.7867 | 0 | 11s/bench | :white_check_mark: | Resubmitted 4/13; fixed from DQ (was 846 overlaps) |
 | 17 | "another Waterloo kid" (Batched Nesterov GP) | **1.4568** | — | — | 0 | 118s/bench | | |
