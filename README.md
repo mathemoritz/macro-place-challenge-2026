@@ -233,7 +233,7 @@ Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (l
 | 1 | "vmallela" | **1.0109** | 0.7644 | 1.2921 | 0 | 15.5h total | :white_check_mark: | Verified 1.0109 (self-reported 1.1) |
 | 2 | "Cezar" | **1.037** | — | — | 0 | 55min/bench | | Resubmitted 5/3. Verification blocked on missing `steps/analytical.py` import. Previous variant verified 1.2224. |
 | 3 | "KLA MACH" | **1.2121** | 0.8527 | 1.6532 | 0 | 2h15min total | :white_check_mark: | Verified 1.2121 (self-reported 1.2355). Consolidates UTDA / Chuanqi Chen / KLA MACH submissions (one algorithm per team). |
-| 4 | "Hoop Dreams" | **1.2206** | — | — | 0 | 20min/bench | | New 5/1. Verification blocked on Python 3.12 / 3.11 ABI mismatch. |
+| 4 | "Hoop Dreams" | **1.2207** | 0.8972 | 1.5072 | 0 | 5h total | :white_check_mark: | Verified 1.2207 (self-reported 1.2206). Built and ran from team-provided `Dockerfile`. |
 | 5 | "Shoom" | **1.2353** | — | — | 0 | 42min/bench | | Resubmitted 5/1 (was 1.3381). |
 | 6 | "ArzunPD" | **1.2478** | — | — | 0 | 55min/bench | | Resubmitted 5/1 (was HyperPlace, verified 1.4421). |
 | 7 | "RoRa" | **1.2788** | 0.9577 | 1.6222 | 0 | 2.6h total | :white_check_mark: | Verified 1.2788 (self-reported 1.2723). Resubmitted 5/1. |
