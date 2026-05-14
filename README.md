@@ -233,7 +233,7 @@ Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (l
 |------|------|---------------|------|-------|----------|---------|----------|-------|
 | 1 | "vmallela" | **1.0109** | 0.7644 | 1.2921 | 0 | 15.5h total | :white_check_mark: | Verified 1.0109 (self-reported 1.1) |
 | 2 | "DREAMPlaceProMaxUltra" | **1.0121** | 0.7955 | 1.2167 | 0 | 6h total | :white_check_mark: | Verified 1.0121 (self-reported 1.0467). Built and ran from team-provided `Dockerfile`. |
-| 3 | "Vibe" | **1.1477** | — | — | 0 | 13851s total | | New 5/7. |
+| 3 | "Vibe" | **1.1443** | — | — | 0 | 13851s total | :white_check_mark: | Verified 1.1443 (self-reported 1.1477). |
 | 4 | "Archgen" | **1.16511** | — | — | 0 | 3343s/bench | | Resubmitted 5/9 (was 1.3479). |
 | 5 | "ArzunPD" | **1.1883** | — | — | 0 | 55min/bench | | Resubmitted 5/8 (was 1.2478). |
 | 6 | "Cezar" | **1.1893** | 0.9041 | 1.4379 | 0 | 15.5h total | :white_check_mark: | Verified 1.1893 (self-reported 1.037). Resubmitted 5/3. Previous variant verified 1.2224. |
