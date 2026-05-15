@@ -237,7 +237,7 @@ Submissions are ranked by **average proxy cost** across all 17 IBM benchmarks (l
 | 4 | "DREAMPlaceProMaxUltra" | **1.0121** | 0.7955 | 1.2167 | 0 | 6h total | :white_check_mark: | Verified 1.0121 (self-reported 1.0467). Built and ran from team-provided `Dockerfile`. |
 | 5 | "Cezar" | **1.037** | — | — | 0 | 4h total | | Resubmitted 5/11 — team reports finding the bug behind prior local/repo mismatch. Now ships team-provided `Dockerfile`. Previous variant verified 1.1893 (same self-report 1.037). |
 | 6 | "thinkorplace" | **1.0771** | — | — | 0 | 52min/bench | | New 5/13. Cascading Saddle Escape (coord descent + LNS + SA + Hessian saddle escape). |
-| 7 | "Vibe" | **1.1477** | — | — | 0 | 13851s total | | New 5/7. |
+| 7 | "Vibe" | **1.1443** | — | — | 0 | 13851s total | :white_check_mark: | Verified 1.1443 (self-reported 1.1477). |
 | 8 | "JonaU" | **1.1524** | — | — | 0 | 55min/bench | | New 5/13. SoftSwap (coord descent + adaptive push-apart). |
 | 9 | "Archgen" | **1.16511** | — | — | 0 | 3343s/bench | | Resubmitted 5/9 (was 1.3479). |
 | 10 | "KLA MACH" | **1.1764** | — | — | 0 | 15min/bench | | Resubmitted 5/14 as "ProxyCD" (DREAMPlace + parallel CD/SA + ILS). Previous algorithm verified 1.2121 (self-reported 1.2355). Consolidates UTDA / Chuanqi Chen / KLA MACH submissions (one algo per team). |
