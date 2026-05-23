@@ -1,5 +1,5 @@
 """
-LKHPlacer — Phase 1 of the LK-Chain RL plan, non-learned foundation.
+LKHPlacer — Phase 1 of the LK-Chain RL plan, non-learned foundation (MVP)
 
 Implements the LK cascade move pattern from
 background/mvp_implementation_plan_lkh.md, adapted to this repo's real API:
