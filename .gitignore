@@ -33,6 +33,7 @@ env/
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~
@@ -81,6 +82,7 @@ external/MacroPlacement/Flows/
 external/MacroPlacement/.git/
 
 # Internal dev tooling (not for participants)
+background/
 scripts/test_*.py
 scripts/debug_*.py
 scripts/run_random_ibm.py
