@@ -9,6 +9,12 @@ smoke test:
     policy   : Phase 4 — train ChainPolicy via PPO
     iter_    : Phase 5 — full iterative loop (Phase 3 + 4 per round)
 
+Speed: ``iter_`` runs Phase 3 data collection in parallel via Modal's
+``.starmap()`` (one container per benchmark, up to 20 concurrent), so the
+slow benchmarks (ibm15-18) no longer dominate. Total wall time becomes
+max(per-benchmark) instead of sum(per-benchmark), giving ~5× speedup on the
+full ICCAD04 sweep.
+
 Quickstart:
 
     # First time: install Modal and authenticate
@@ -223,6 +229,62 @@ def run_policy(benchmark: str, iterations: int, trajectories_per_iter: int,
     _persist("policy")
 
 
+# ---------------------------------------------------------------------------
+# Parallel per-benchmark data collection.
+#
+# ``compute_proxy_cost`` is single-threaded under the Python GIL, so a single
+# container can only collect one benchmark at a time even with multiple CPUs.
+# This function does exactly one benchmark per container; ``run_iter`` invokes
+# it as ``.starmap()`` to collect all 17 benchmarks concurrently.
+#
+# Wall time becomes max(per-benchmark) instead of sum, which is ~5× faster on
+# the full ICCAD04 sweep (3 h instead of 15 h). Each container writes its
+# benchmark's cache to /output/iter/per_bench/<name>.pt and commits the volume
+# so the next stage (Phase 3 training + PPO) sees a fully populated cache.
+# ---------------------------------------------------------------------------
+
+@app.function(image=image, volumes={"/output": volume},
+              cpu=2.0, memory=4096, timeout=4 * 3600,
+              nonpreemptible=True, max_containers=20)
+def collect_one_benchmark_modal(name: str, num_examples: int, seed: int) -> dict:
+    import time as _time
+    _setup_env()
+    import torch as _torch
+    import train as _train
+
+    cache_dir = Path("/output/iter/per_bench")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"{name}.pt"
+
+    # Idempotency: if someone managed to commit this benchmark already
+    # (e.g. a prior partial run), skip without recomputing.
+    if cache_file.exists():
+        try:
+            d = _torch.load(str(cache_file), weights_only=False)
+            return {"name": name, "n": int(len(d["features"])),
+                    "wall_s": 0.0, "from_cache": True}
+        except Exception:
+            print(f"[{name}] cache exists but unreadable; re-collecting")
+
+    t0 = _time.time()
+    print(f"[{name}] collecting {num_examples} examples...")
+    feats, targets = _train._collect_one_benchmark(
+        name, num_examples_per_benchmark=num_examples, seed=seed,
+    )
+    wall = _time.time() - t0
+
+    tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
+    _torch.save({"features": feats, "targets": targets,
+                 "num_examples": num_examples, "name": name},
+                str(tmp))
+    tmp.replace(cache_file)
+    volume.commit()
+    print(f"[{name}] done: {len(feats)} examples in "
+          f"{_train._fmt_time(wall)} ({_train._fmt_rate(len(feats), wall)})")
+    return {"name": name, "n": int(len(feats)),
+            "wall_s": float(wall), "from_cache": False}
+
+
 @app.function(image=image, volumes={"/output": volume},
               cpu=8.0, memory=16384, timeout=24 * 3600,
               nonpreemptible=True)
@@ -232,6 +294,11 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
     """Crash-safe Phase 5 driver: imports ``train_iter`` in-process and calls
     ``run_round`` in a loop, committing the volume after every round so a
     detached run that dies at hour 9 still leaves rounds 0..N-1 persisted.
+
+    Before the rounds, dispatches parallel per-benchmark data collection via
+    ``collect_one_benchmark_modal.starmap()`` so the slow Phase 3 phase runs
+    on N containers in parallel (max wall time = single slowest benchmark
+    instead of the sum across all 17).
     """
     import json as _json
     _setup_env()
@@ -246,6 +313,28 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
     data_path = Path("/root/repo/submissions/lkh/data/chain_data.pt")
     cost_ckpt = Path("/root/repo/submissions/lkh/checkpoints/cost_approximator.pt")
     policy_ckpt = Path("/root/repo/submissions/lkh/checkpoints/chain_policy.pt")
+
+    # ── Pre-pass: parallel per-benchmark data collection ───────────────────
+    if force_recollect:
+        # Wipe so the .starmap dispatch actually re-collects everything.
+        for f in per_benchmark_cache_dir.glob("*.pt"):
+            f.unlink()
+        print(f"[Modal] force_recollect: cleared {per_benchmark_cache_dir}")
+
+    todo = [name for name in benchmarks
+            if not (per_benchmark_cache_dir / f"{name}.pt").exists()]
+    if todo:
+        configs = [(name, examples, seed + i * 7919)
+                   for i, name in enumerate(todo)]
+        print(f"[Modal] parallel collection: {len(todo)} benchmarks via .starmap "
+              f"(skipping {len(benchmarks) - len(todo)} cached)")
+        for res in collect_one_benchmark_modal.starmap(configs):
+            tag = "cached" if res.get("from_cache") else "collected"
+            print(f"  {tag}: {res['name']:>6}  n={res['n']:>4}  "
+                  f"wall={_train._fmt_time(res.get('wall_s', 0.0))}")
+        print(f"[Modal] parallel collection complete.")
+    else:
+        print(f"[Modal] all {len(benchmarks)} benchmarks already cached.")
 
     print(f"=== Phase 5 on Modal ===")
     print(f"  benchmarks={benchmarks}  rounds={rounds}  output={output_root}")
