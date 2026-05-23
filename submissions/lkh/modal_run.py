@@ -272,40 +272,68 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
 
 @app.local_entrypoint()
 def smoke() -> None:
-    """Smoke-test the Modal setup (~2-3 minutes the first time)."""
+    """Smoke-test the Modal setup (~2-3 minutes the first time).
+
+    Uses ``.remote()`` because we *want* to wait for the result locally
+    (it's a fast sanity check).
+    """
     run_smoke.remote()
+
+
+# ---------------------------------------------------------------------------
+# Long-running entrypoints use ``.spawn()``, not ``.remote()``.
+#
+# Per Modal: ``.remote()`` blocks until the function returns, and a closed
+# local terminal cancels the in-flight call EVEN with ``--detach``. Using
+# ``.spawn()`` dispatches the work and returns a FunctionCall handle
+# immediately, so the job survives any local disconnection. The handle's
+# ``object_id`` is what you pass to ``modal call logs <id>`` to stream
+# output afterwards.
+# ---------------------------------------------------------------------------
+
+def _print_spawn_handle(call, label: str) -> None:
+    """Print the FunctionCall ID + the commands to monitor / cancel."""
+    fid = getattr(call, "object_id", None) or str(call)
+    print(f"\nSpawned {label} on Modal.")
+    print(f"  function_call_id: {fid}")
+    print(f"  monitor:  modal call logs {fid}")
+    print(f"  result:   modal call get {fid}")
+    print(f"  stop:     modal app stop lkh-macro-place")
+    print(f"  dashboard: https://modal.com/apps")
 
 
 @app.local_entrypoint()
 def train(benchmark: str = "ibm01", num_examples: int = 1500, epochs: int = 60,
           seed: int = 42, force_recollect: bool = False) -> None:
-    """Phase 3 — train CostApproximator on Modal.
+    """Phase 3 — train CostApproximator on Modal (background spawn).
 
     Examples:
         modal run modal_run.py::train --benchmark ibm01,ibm02 --num-examples 1500
         modal run modal_run.py::train --benchmark all --num-examples 300
     """
-    run_train.remote(
+    call = run_train.spawn(
         benchmark=benchmark, num_examples=num_examples,
         epochs=epochs, seed=seed, force_recollect=force_recollect,
     )
+    _print_spawn_handle(call, "run_train")
 
 
 @app.local_entrypoint()
 def policy(benchmark: str = "ibm01", iterations: int = 1000,
            trajectories_per_iter: int = 4, seed: int = 42,
            initial_policy: str = "") -> None:
-    """Phase 4 — train ChainPolicy via PPO on Modal.
+    """Phase 4 — train ChainPolicy via PPO on Modal (background spawn).
 
     Examples:
         modal run modal_run.py::policy --benchmark all --iterations 3000
         modal run modal_run.py::policy --benchmark ibm01,ibm07 --iterations 1000
     """
-    run_policy.remote(
+    call = run_policy.spawn(
         benchmark=benchmark, iterations=iterations,
         trajectories_per_iter=trajectories_per_iter,
         seed=seed, initial_policy=initial_policy,
     )
+    _print_spawn_handle(call, "run_policy")
 
 
 @app.local_entrypoint()
@@ -313,21 +341,26 @@ def iter_(benchmark: str = "ibm01", rounds: int = 2, examples: int = 400,
           cost_epochs: int = 60, policy_iterations: int = 1000,
           trajectories_per_iter: int = 4, eval_time_budget: float = 20.0,
           seed: int = 42, force_recollect: bool = False) -> None:
-    """Phase 5 — iterative training loop (Phases 3 + 4 per round).
+    """Phase 5 — iterative training loop, dispatched as a background job.
 
     Examples:
         # Quick: 1 round, 3 benchmarks, modest data
         modal run modal_run.py::iter_ --benchmark ibm01,ibm02,ibm07 \\
             --rounds 1 --examples 200 --policy-iterations 500
 
-        # Full: detached run, all benchmarks, multiple rounds
-        modal run --detach modal_run.py::iter_ --benchmark all \\
+        # Full: dispatch detached, all benchmarks, multiple rounds
+        modal run modal_run.py::iter_ --benchmark all \\
             --rounds 3 --examples 200 --policy-iterations 1500
+
+    The job runs to completion regardless of local terminal state — this
+    entrypoint returns as soon as the spawn is dispatched. ``--detach`` is
+    no longer required (it doesn't hurt either).
     """
-    run_iter.remote(
+    call = run_iter.spawn(
         benchmark=benchmark, rounds=rounds, examples=examples,
         cost_epochs=cost_epochs, policy_iterations=policy_iterations,
         trajectories_per_iter=trajectories_per_iter,
         eval_time_budget=eval_time_budget,
         seed=seed, force_recollect=force_recollect,
     )
+    _print_spawn_handle(call, "run_iter")
