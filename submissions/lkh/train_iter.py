@@ -217,14 +217,23 @@ def main():
                    default=str(_HERE / "checkpoints" / "cost_approximator.pt"))
     p.add_argument("--policy-ckpt",
                    default=str(_HERE / "checkpoints" / "chain_policy.pt"))
+    p.add_argument("--output-root",
+                   default=str(_HERE / "iter_output"),
+                   help="Directory for per-round archival (round_<i>/ + "
+                        "history.json). Set to empty string to disable.")
     args = p.parse_args()
 
     benchmarks = _train.parse_benchmarks(args.benchmark)
+    output_root = Path(args.output_root) if args.output_root else None
+    if output_root is not None:
+        output_root.mkdir(parents=True, exist_ok=True)
 
     print(f"=== Phase 5: iterative training ===")
     print(f"  benchmarks={benchmarks}  rounds={args.rounds}")
     print(f"  examples/benchmark={args.examples}  cost_epochs={args.cost_epochs}  "
           f"policy_iters={args.policy_iterations}")
+    if output_root is not None:
+        print(f"  output_root={output_root}")
 
     history: list[dict] = []
     for r in range(args.rounds):
@@ -241,8 +250,15 @@ def main():
             policy_ckpt=Path(args.policy_ckpt),
             force_recollect=args.force_recollect_each_round,
             eval_time_budget_s=args.eval_time_budget,
+            output_root=output_root,
         )
         history.append(record)
+        # Stream the aggregated history to disk after every round so a crash
+        # leaves the previous rounds analysable.
+        if output_root is not None:
+            (output_root / "history.json").write_text(
+                json.dumps(history, indent=2, default=str)
+            )
 
     print(f"\n=== Phase 5 summary ===")
     print(f"  Approximator quality per round:")
