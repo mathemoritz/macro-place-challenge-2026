@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
+import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -45,7 +48,16 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               cost_epochs: int, policy_iterations: int,
               trajectories_per_iter: int, seed: int,
               data_path: Path, cost_ckpt: Path, policy_ckpt: Path,
-              force_recollect: bool, eval_time_budget_s: float) -> dict:
+              force_recollect: bool, eval_time_budget_s: float,
+              output_root: Optional[Path] = None) -> dict:
+    """Run one round of Phase 3 + Phase 4 + per-benchmark evaluation.
+
+    Canonical writes (so the placer can find the latest checkpoints) go to
+    ``cost_ckpt`` and ``policy_ckpt``. When ``output_root`` is provided, each
+    round also gets an archival copy in ``output_root / f"round_{round_idx}/"``
+    plus a per-round JSON record — this is what makes detached Modal runs
+    crash-safe and lets you compare rounds after the fact.
+    """
     print(f"\n========== Round {round_idx} ==========")
     print(f"  benchmarks = {benchmarks}")
 
@@ -124,12 +136,29 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         print(f"  -- {name} --")
         per_bench_eval[name] = evaluate_round(name, time_budget_s=eval_time_budget_s)
 
-    return {
+    record = {
         "round": round_idx,
         "pearson": info["pearson"],
         "spearman": info["spearman"],
         "per_benchmark": per_bench_eval,
     }
+
+    # Per-round archival: keeps every round's checkpoint so we can compare
+    # across the iterative loop and so a crashed Modal run still leaves the
+    # finished rounds' data on the volume.
+    if output_root is not None:
+        round_dir = output_root / f"round_{round_idx}"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        if cost_ckpt.exists():
+            shutil.copy(str(cost_ckpt), str(round_dir / cost_ckpt.name))
+        if policy_ckpt.exists():
+            shutil.copy(str(policy_ckpt), str(round_dir / policy_ckpt.name))
+        (round_dir / "round_record.json").write_text(
+            json.dumps(record, indent=2, default=str)
+        )
+        print(f"  archived to {round_dir}")
+
+    return record
 
 
 def evaluate_round(benchmark: str, *, time_budget_s: float = 20.0) -> dict:

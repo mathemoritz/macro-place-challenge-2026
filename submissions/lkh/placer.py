@@ -281,6 +281,90 @@ def _features_for_move(state: "PlacementState", macro_idx: int,
     return feats
 
 
+# ── Legalization (Phase 6 finishing step) ──────────────────────────────────
+
+def _legalize(state: PlacementState, *, gap: float = 0.001,
+              max_search_radius: int = 150) -> np.ndarray:
+    """Greedy outward-spiral legalization to zero hard-macro overlap pairs.
+
+    Largest movable macros are placed first; each one keeps its position if it
+    doesn't collide with already-placed macros, otherwise it snaps to the
+    nearest legal slot via an outward (Chebyshev-ring) spiral around the
+    target position. Fixed macros are anchors. The safety ``gap`` (default
+    1 nm) sits inside the evaluator's strict overlap definition, so the
+    result passes ``validate_placement``.
+
+    Adapted from submissions/will_seed/placer.py with a tighter gap (was
+    0.05 μm) and bounded search radius (configurable).
+
+    Returns the legalized [N, 2] array; the input ``state.pos`` is unchanged.
+    """
+    n = state.n
+    sizes = state.sizes
+    half_w = state.half_w
+    half_h = state.half_h
+    cw, ch = state.cw, state.ch
+    movable = state.movable
+    pos = state.pos.copy()
+
+    sep_x = (sizes[:, 0:1] + sizes[:, 0:1].T) / 2.0 + gap
+    sep_y = (sizes[:, 1:2] + sizes[:, 1:2].T) / 2.0 + gap
+
+    order = sorted(range(n), key=lambda i: -float(sizes[i, 0] * sizes[i, 1]))
+    placed = np.zeros(n, dtype=bool)
+    legal = pos.copy()
+
+    for idx in order:
+        if not movable[idx]:
+            placed[idx] = True
+            continue
+
+        # If current position is already legal w.r.t. placed neighbours, keep it.
+        if placed.any():
+            dx = np.abs(legal[idx, 0] - legal[:, 0])
+            dy = np.abs(legal[idx, 1] - legal[:, 1])
+            collide = (dx < sep_x[idx]) & (dy < sep_y[idx]) & placed
+            collide[idx] = False
+            if not collide.any():
+                placed[idx] = True
+                continue
+
+        # Outward spiral search. ``step`` is 1/4 of the macro's longest side
+        # so we don't skip plausible slots while keeping the search bounded.
+        step = max(sizes[idx, 0], sizes[idx, 1]) * 0.25
+        best_p = legal[idx].copy()
+        best_d = float("inf")
+        for r in range(1, max_search_radius + 1):
+            found = False
+            for dxm in range(-r, r + 1):
+                for dym in range(-r, r + 1):
+                    if abs(dxm) != r and abs(dym) != r:
+                        continue
+                    cx = float(np.clip(pos[idx, 0] + dxm * step,
+                                        half_w[idx], cw - half_w[idx]))
+                    cy = float(np.clip(pos[idx, 1] + dym * step,
+                                        half_h[idx], ch - half_h[idx]))
+                    if placed.any():
+                        dx = np.abs(cx - legal[:, 0])
+                        dy = np.abs(cy - legal[:, 1])
+                        c = (dx < sep_x[idx]) & (dy < sep_y[idx]) & placed
+                        c[idx] = False
+                        if c.any():
+                            continue
+                    d = (cx - pos[idx, 0]) ** 2 + (cy - pos[idx, 1]) ** 2
+                    if d < best_d:
+                        best_d = d
+                        best_p = np.array([cx, cy])
+                        found = True
+            if found:
+                break
+
+        legal[idx] = best_p
+        placed[idx] = True
+
+    return legal
+
+
 # ── Cost approximator loading (Phase 3) ────────────────────────────────────
 
 def _load_cost_approximator(ckpt_path: Path):
@@ -614,6 +698,17 @@ class LKHPlacer:
                 stagnation = 0
 
         state.pos[:] = best_pos
+
+        # Phase 6 finishing — legalize residual hard-macro overlaps to zero.
+        # This is the difference between an "invalid" submission (overlap_count
+        # > 0, disqualified) and a valid one. The LK commit gate prevents
+        # *adding* overlaps but cannot drive them to zero unaided.
+        n_overlaps_before = state.overlap_pairs()
+        if n_overlaps_before > 0:
+            state.pos[:] = _legalize(state)
+            n_overlaps_after = state.overlap_pairs()
+            print(f"[LKHPlacer] legalization: "
+                  f"{n_overlaps_before} -> {n_overlaps_after} overlap pairs")
 
         # Build full placement: hard macros from LK, soft macros untouched.
         full = benchmark.macro_positions.clone()
