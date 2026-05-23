@@ -28,7 +28,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -49,7 +49,9 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               trajectories_per_iter: int, seed: int,
               data_path: Path, cost_ckpt: Path, policy_ckpt: Path,
               force_recollect: bool, eval_time_budget_s: float,
-              output_root: Optional[Path] = None) -> dict:
+              output_root: Optional[Path] = None,
+              per_benchmark_cache_dir: Optional[Path] = None,
+              post_benchmark_callback: Optional[Callable[[str], None]] = None) -> dict:
     """Run one round of Phase 3 + Phase 4 + per-benchmark evaluation.
 
     Canonical writes (so the placer can find the latest checkpoints) go to
@@ -57,6 +59,10 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
     round also gets an archival copy in ``output_root / f"round_{round_idx}/"``
     plus a per-round JSON record — this is what makes detached Modal runs
     crash-safe and lets you compare rounds after the fact.
+
+    ``per_benchmark_cache_dir`` and ``post_benchmark_callback`` are forwarded
+    to ``collect_data`` so a preempted-and-restarted run can resume from the
+    last completed benchmark instead of starting over.
     """
     print(f"\n========== Round {round_idx} ==========")
     print(f"  benchmarks = {benchmarks}")
@@ -85,6 +91,8 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         features, targets = _train.collect_data(
             benchmarks, num_examples_per_benchmark,
             seed=seed + round_idx,
+            per_benchmark_cache_dir=per_benchmark_cache_dir,
+            post_benchmark_callback=post_benchmark_callback,
         )
         data_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"features": features, "targets": targets,
@@ -221,12 +229,19 @@ def main():
                    default=str(_HERE / "iter_output"),
                    help="Directory for per-round archival (round_<i>/ + "
                         "history.json). Set to empty string to disable.")
+    p.add_argument("--per-benchmark-cache-dir",
+                   default=str(_HERE / "data" / "per_bench"),
+                   help="Directory of per-benchmark cache files. A preemption "
+                        "or Ctrl-C resumes here on next run. Empty string disables.")
     args = p.parse_args()
 
     benchmarks = _train.parse_benchmarks(args.benchmark)
     output_root = Path(args.output_root) if args.output_root else None
     if output_root is not None:
         output_root.mkdir(parents=True, exist_ok=True)
+    per_benchmark_cache_dir = (
+        Path(args.per_benchmark_cache_dir) if args.per_benchmark_cache_dir else None
+    )
 
     print(f"=== Phase 5: iterative training ===")
     print(f"  benchmarks={benchmarks}  rounds={args.rounds}")
@@ -251,6 +266,7 @@ def main():
             force_recollect=args.force_recollect_each_round,
             eval_time_budget_s=args.eval_time_budget,
             output_root=output_root,
+            per_benchmark_cache_dir=per_benchmark_cache_dir,
         )
         history.append(record)
         # Stream the aggregated history to disk after every round so a crash
