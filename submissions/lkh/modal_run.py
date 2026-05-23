@@ -18,15 +18,20 @@ Quickstart:
     # Smoke-test the image and mounts (~2-3 minutes)
     uv run modal run submissions/lkh/modal_run.py::smoke
 
+    # Long-running entrypoints use ``.spawn()`` + ``--detach``.
+    # ``.spawn()`` makes the call async (immune to local terminal disconnect);
+    # ``--detach`` keeps the *app* alive after ``modal run`` exits so the
+    # spawned function actually has time to execute. You need both flags.
+
     # Phase 3 across all 17 benchmarks (per-benchmark example count = N)
-    uv run modal run submissions/lkh/modal_run.py::train \\
+    uv run modal run --detach submissions/lkh/modal_run.py::train \\
         --benchmark all --num-examples 300 --epochs 80
 
     # Phase 4 across all 17 benchmarks, real-scale training
-    uv run modal run submissions/lkh/modal_run.py::policy \\
+    uv run modal run --detach submissions/lkh/modal_run.py::policy \\
         --benchmark all --iterations 3000
 
-    # Full iterative pipeline (long-running; use --detach)
+    # Full iterative pipeline (long-running)
     uv run modal run --detach submissions/lkh/modal_run.py::iter_ \\
         --benchmark all --rounds 3 --examples 200 --policy-iterations 1500
 
@@ -281,14 +286,15 @@ def smoke() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Long-running entrypoints use ``.spawn()``, not ``.remote()``.
+# Long-running entrypoints use ``.spawn()`` + ``--detach`` together.
 #
-# Per Modal: ``.remote()`` blocks until the function returns, and a closed
-# local terminal cancels the in-flight call EVEN with ``--detach``. Using
-# ``.spawn()`` dispatches the work and returns a FunctionCall handle
-# immediately, so the job survives any local disconnection. The handle's
-# ``object_id`` is what you pass to ``modal call logs <id>`` to stream
-# output afterwards.
+# ``.remote()`` blocks until the function returns, and the call is cancelled
+# when the local terminal disconnects — even with ``--detach``. ``.spawn()``
+# dispatches the work and returns a FunctionCall handle immediately, so the
+# call survives the disconnect; ``--detach`` keeps the App alive after the
+# CLI exits so the spawned function actually gets to run. Without both,
+# the App tears itself down before the spawned function starts (the
+# dashboard then shows the App as "stopped" with 0 calls).
 # ---------------------------------------------------------------------------
 
 def _print_spawn_handle(call, label: str) -> None:
@@ -345,16 +351,17 @@ def iter_(benchmark: str = "ibm01", rounds: int = 2, examples: int = 400,
 
     Examples:
         # Quick: 1 round, 3 benchmarks, modest data
-        modal run modal_run.py::iter_ --benchmark ibm01,ibm02,ibm07 \\
+        modal run --detach modal_run.py::iter_ --benchmark ibm01,ibm02,ibm07 \\
             --rounds 1 --examples 200 --policy-iterations 500
 
-        # Full: dispatch detached, all benchmarks, multiple rounds
-        modal run modal_run.py::iter_ --benchmark all \\
+        # Full: all benchmarks, multiple rounds
+        modal run --detach modal_run.py::iter_ --benchmark all \\
             --rounds 3 --examples 200 --policy-iterations 1500
 
-    The job runs to completion regardless of local terminal state — this
-    entrypoint returns as soon as the spawn is dispatched. ``--detach`` is
-    no longer required (it doesn't hurt either).
+    Always launch with ``--detach``: ``.spawn()`` makes the call asynchronous
+    but the App itself shuts down when ``modal run`` exits, taking the
+    spawned function with it. ``--detach`` keeps the App alive so the spawn
+    can actually execute.
     """
     call = run_iter.spawn(
         benchmark=benchmark, rounds=rounds, examples=examples,
