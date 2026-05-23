@@ -54,31 +54,18 @@ app = modal.App("lkh-macro-place")
 # Local repo root (this file is at submissions/lkh/modal_run.py).
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Python 3.11 matches the judges' container and our local uv environment.
-# Deps mirror submissions/lkh + macro_place's pyproject.toml (CPU torch is fine —
-# our MLPs are tiny and the bottleneck is `compute_proxy_cost` which is CPU-only).
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .pip_install(
-        "torch>=2.0",
-        "numpy>=1.20",
-        "matplotlib>=3.5",
-        "tqdm>=4.65",
-        "absl-py>=1.0",
-    )
-)
+def _ignore(path) -> bool:
+    """``ignore`` callable for ``Image.add_local_dir``: True ⇒ exclude file.
 
-volume = modal.Volume.from_name("lkh-results", create_if_missing=True)
+    Modal 1.x removed ``modal.Mount`` and replaced ``condition=`` (True = keep)
+    with ``ignore=`` (True = drop). The TILOS MacroPlacement submodule alone
+    is ~3 GB; we drop everything except CodeElements/Plc_client (needed for the
+    PlacementCost parser) and Testcases/ICCAD04 (our 17 benchmarks).
 
-
-def _include(path: str) -> bool:
-    """Filter for ``Mount.from_local_dir``: skip transient, IDE, and bloat dirs.
-
-    The TILOS MacroPlacement submodule alone is ~3 GB; we drop everything
-    except CodeElements/Plc_client (needed for the PlacementCost parser) and
-    Testcases/ICCAD04 (the benchmarks we train on).
+    The path arg is a ``pathlib.Path`` relative to ``local_path``; we normalize
+    with a leading slash so ``/segment/`` substring checks work uniformly.
     """
-    # Substrings to skip anywhere in the path.
+    p = "/" + str(path).replace("\\", "/").strip("/")
     drop = [
         "/.git/", "/.venv/", "/__pycache__/", "/.pytest_cache/",
         "/.idea/", "/.vscode/", "/.cursor/", "/.DS_Store",
@@ -101,14 +88,32 @@ def _include(path: str) -> bool:
         "/external/MacroPlacement/CodeElements/StatTest/",
         "/external/MacroPlacement/CodeElements/VisualPlacement/",
     ]
-    return not any(s in path for s in drop)
+    return any(s in p for s in drop)
 
 
-repo_mount = modal.Mount.from_local_dir(
-    str(REPO_ROOT),
-    remote_path="/root/repo",
-    condition=_include,
+# Python 3.11 matches the judges' container and our local uv environment.
+# Deps mirror submissions/lkh + macro_place's pyproject.toml (CPU torch is fine —
+# our MLPs are tiny and the bottleneck is `compute_proxy_cost` which is CPU-only).
+# ``add_local_dir`` is the modern Modal replacement for ``Mount.from_local_dir``;
+# with ``copy=False`` (the default), files are attached at container start, not
+# baked into the image — so iterating on local code doesn't rebuild the image.
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install(
+        "torch>=2.0",
+        "numpy>=1.20",
+        "matplotlib>=3.5",
+        "tqdm>=4.65",
+        "absl-py>=1.0",
+    )
+    .add_local_dir(
+        local_path=str(REPO_ROOT),
+        remote_path="/root/repo",
+        ignore=_ignore,
+    )
 )
+
+volume = modal.Volume.from_name("lkh-results", create_if_missing=True)
 
 
 # ── Container-side helpers (run inside Modal) ──────────────────────────────
@@ -158,7 +163,7 @@ def _persist(label: str) -> None:
 
 # ── Remote functions ───────────────────────────────────────────────────────
 
-@app.function(image=image, mounts=[repo_mount], volumes={"/output": volume},
+@app.function(image=image, volumes={"/output": volume},
               cpu=8.0, memory=8192, timeout=30 * 60)
 def run_smoke() -> None:
     """Verify the image, mount, and benchmark loader on a fresh container."""
@@ -181,7 +186,7 @@ def run_smoke() -> None:
     print("OK")
 
 
-@app.function(image=image, mounts=[repo_mount], volumes={"/output": volume},
+@app.function(image=image, volumes={"/output": volume},
               cpu=8.0, memory=8192, timeout=6 * 3600)
 def run_train(benchmark: str, num_examples: int, epochs: int, seed: int,
               force_recollect: bool) -> None:
@@ -196,7 +201,7 @@ def run_train(benchmark: str, num_examples: int, epochs: int, seed: int,
     _persist("train")
 
 
-@app.function(image=image, mounts=[repo_mount], volumes={"/output": volume},
+@app.function(image=image, volumes={"/output": volume},
               cpu=8.0, memory=8192, timeout=12 * 3600)
 def run_policy(benchmark: str, iterations: int, trajectories_per_iter: int,
                seed: int, initial_policy: str) -> None:
@@ -211,7 +216,7 @@ def run_policy(benchmark: str, iterations: int, trajectories_per_iter: int,
     _persist("policy")
 
 
-@app.function(image=image, mounts=[repo_mount], volumes={"/output": volume},
+@app.function(image=image, volumes={"/output": volume},
               cpu=8.0, memory=16384, timeout=24 * 3600)
 def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
              policy_iterations: int, trajectories_per_iter: int,
