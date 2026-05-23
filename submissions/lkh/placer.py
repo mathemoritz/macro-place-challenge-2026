@@ -138,27 +138,33 @@ class PlacementState:
             float(np.clip(y, self.half_h[idx], self.ch - self.half_h[idx])),
         )
 
-    def overlapping_with(self, idx: int, gap: float = 0.05) -> list[int]:
+    # Gap default of 1e-6 = "match the evaluator (strict overlap) up to float
+    # precision". ibm01's initial.plc has ~190 pairs sitting within 0.05 μm
+    # of touching; using gap=0.05 there miscounts those as overlaps and lets
+    # chains "commit" reductions in the inflated count while real overlaps
+    # increase. Callers that want a breathing-room margin must pass gap
+    # explicitly.
+
+    def overlapping_with(self, idx: int, gap: float = 1e-6) -> list[int]:
         """Return indices of macros currently overlapping macro idx."""
         dx = np.abs(self.pos[idx, 0] - self.pos[:, 0])
         dy = np.abs(self.pos[idx, 1] - self.pos[:, 1])
-        hits = (dx < self.sep_x[idx] + gap) & (dy < self.sep_y[idx] + gap)
+        hits = (dx + gap < self.sep_x[idx]) & (dy + gap < self.sep_y[idx])
         hits[idx] = False
         return np.where(hits)[0].tolist()
 
-    def has_overlap(self, idx: int, gap: float = 0.05) -> bool:
+    def has_overlap(self, idx: int, gap: float = 1e-6) -> bool:
         dx = np.abs(self.pos[idx, 0] - self.pos[:, 0])
         dy = np.abs(self.pos[idx, 1] - self.pos[:, 1])
-        hits = (dx < self.sep_x[idx] + gap) & (dy < self.sep_y[idx] + gap)
+        hits = (dx + gap < self.sep_x[idx]) & (dy + gap < self.sep_y[idx])
         hits[idx] = False
         return bool(hits.any())
 
-    def overlap_pairs(self, gap: float = 0.05) -> int:
+    def overlap_pairs(self, gap: float = 1e-6) -> int:
         """Count overlapping hard-macro pairs (matches the evaluator semantics)."""
-        n = self.n
         dx = np.abs(self.pos[:, 0:1] - self.pos[:, 0:1].T)
         dy = np.abs(self.pos[:, 1:2] - self.pos[:, 1:2].T)
-        ov = (dx < self.sep_x + gap) & (dy < self.sep_y + gap)
+        ov = (dx + gap < self.sep_x) & (dy + gap < self.sep_y)
         np.fill_diagonal(ov, False)
         return int(ov.sum() // 2)
 
@@ -303,20 +309,101 @@ def _load_cost_approximator(ckpt_path: Path):
     }
 
 
+# ── Chain policy loading (Phase 4) ─────────────────────────────────────────
+
+def _load_chain_policy(ckpt_path: Path):
+    """Returns a dict with policy + chain_env helpers, or None if missing."""
+    if not ckpt_path.exists():
+        return None
+    try:
+        from lkh_model import ChainPolicy
+    except ImportError:
+        return None
+    # Import chain_env via importlib to avoid circular imports.
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("chain_env", str(_HERE / "chain_env.py"))
+    env_mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(env_mod)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    policy = ChainPolicy(hidden=ckpt.get("hidden", 64))
+    policy.load_state_dict(ckpt["state_dict"])
+    policy.eval()
+    return {
+        "policy": policy,
+        "ChainEnv": env_mod.ChainEnv,
+        "trained_on": ckpt.get("trained_on"),
+        "n_iterations": ckpt.get("n_iterations"),
+    }
+
+
 # ── LK chain (greedy, optionally approximator-guided) ──────────────────────
 
 class LKChain:
     """Cascading move chain: pick seed; move to best candidate (by trained
     approximator if available, else HPWL+overlap surrogate); follow first
     displaced macro; cap at max_length; commit only on lex (overlap_pairs,
-    hpwl) improvement vs the chain's start state."""
+    hpwl) improvement vs the chain's start state.
+
+    If a learned ``policy`` is provided, the policy chooses the action at
+    each step instead of the greedy approximator/surrogate. The commit gate
+    is unchanged so the placer still guarantees monotone (overlap_pairs,
+    hpwl) progress regardless of which scorer the chain uses.
+    """
 
     def __init__(self, state: PlacementState, seed_macro: int,
-                 rng: random.Random, approximator: dict | None = None):
+                 rng: random.Random, approximator: dict | None = None,
+                 policy_bundle: dict | None = None):
         self.state = state
         self.rng = rng
         self.seed = seed_macro
         self.approx = approximator
+        self.policy_bundle = policy_bundle
+
+    def run_with_policy(self, max_length: int = 8) -> dict:
+        """Drive the chain with the trained policy via ChainEnv."""
+        st = self.state
+        if not st.movable[self.seed]:
+            return {"chain_gain": 0.0, "committed": False, "length": 0,
+                    "overlap_delta": 0}
+
+        ChainEnv = self.policy_bundle["ChainEnv"]
+        policy = self.policy_bundle["policy"]
+        env = ChainEnv(st, self.seed, rng=self.rng,
+                        max_chain_length=max_length, max_candidates=8)
+        import torch.nn.functional as _F
+        while not env.done:
+            sp = env.state_for_policy()
+            K = sp["candidates"].shape[0]
+            if K == 0:
+                env.step(0, [])
+                break
+            with torch.no_grad():
+                logits, _v = policy(
+                    torch.from_numpy(sp["global"]),
+                    torch.from_numpy(sp["macro"]),
+                    torch.from_numpy(sp["candidates"]),
+                    torch.from_numpy(sp["chain"]),
+                )
+                action = int(_F.softmax(logits, dim=-1).argmax().item())
+            env.step(action, sp["raw_candidates"])
+
+        end_hpwl = st.hpwl()
+        end_overlap_pairs = st.overlap_pairs()
+        # env's _finalize already enforces the same lex (overlap_pairs, hpwl)
+        # gate as run_greedy, so we just report what happened.
+        return {
+            "chain_gain": env.start_hpwl - end_hpwl,
+            "committed": end_overlap_pairs < env.start_overlaps or
+                         (end_overlap_pairs == env.start_overlaps and end_hpwl < env.start_hpwl),
+            "length": env.chain_length,
+            "overlap_delta": end_overlap_pairs - env.start_overlaps,
+        }
+
+    def run(self, max_length: int = 8) -> dict:
+        """Run with policy if available, else fall back to greedy."""
+        if self.policy_bundle is not None:
+            return self.run_with_policy(max_length)
+        return self.run_greedy(max_length)
 
     def run_greedy(self, max_length: int = 8) -> dict:
         st = self.state
@@ -420,26 +507,66 @@ class LKChain:
 # ── Submission placer ──────────────────────────────────────────────────────
 
 class LKHPlacer:
-    """Run many random-seed greedy LK chains under a wall-clock budget."""
+    """Run many random-seed LK chains under a wall-clock budget.
+
+    Uses the learned ChainPolicy when ``checkpoints/chain_policy.pt`` exists,
+    else the learned CostApproximator when ``checkpoints/cost_approximator.pt``
+    exists, else a pure HPWL+overlap surrogate. Phase 6 inference adds a
+    stagnation counter that triggers a random perturbation of K random
+    macros when no chain has improved the best-seen placement in a while.
+    """
 
     def __init__(self, seed: int = 42, time_budget_s: float = 60.0,
                  max_chains: int = 5000, max_chain_length: int = 8,
-                 checkpoint_path: str | None = None):
+                 checkpoint_path: str | None = None,
+                 policy_path: str | None = None,
+                 stagnation_threshold: int = 50,
+                 perturb_macros: int = 5,
+                 use_policy: bool = True):
         self.seed = seed
         self.time_budget_s = time_budget_s
         self.max_chains = max_chains
         self.max_chain_length = max_chain_length
-        ckpt = Path(checkpoint_path) if checkpoint_path else (
+        self.stagnation_threshold = stagnation_threshold
+        self.perturb_macros = perturb_macros
+
+        approx_ckpt = Path(checkpoint_path) if checkpoint_path else (
             _HERE / "checkpoints" / "cost_approximator.pt"
         )
-        self.approximator = _load_cost_approximator(ckpt)
+        self.approximator = _load_cost_approximator(approx_ckpt)
         if self.approximator is not None:
             r = self.approximator.get("pearson_r_val")
             trained_on = self.approximator.get("trained_on")
             print(f"[LKHPlacer] cost approximator loaded "
                   f"(r={r:.3f}, trained on {trained_on})")
         else:
-            print(f"[LKHPlacer] no approximator at {ckpt} — using HPWL surrogate")
+            print(f"[LKHPlacer] no approximator at {approx_ckpt} — using HPWL surrogate")
+
+        self.policy_bundle = None
+        if use_policy:
+            policy_ckpt = Path(policy_path) if policy_path else (
+                _HERE / "checkpoints" / "chain_policy.pt"
+            )
+            self.policy_bundle = _load_chain_policy(policy_ckpt)
+            if self.policy_bundle is not None:
+                print(f"[LKHPlacer] chain policy loaded "
+                      f"(iters={self.policy_bundle.get('n_iterations')}, "
+                      f"trained on {self.policy_bundle.get('trained_on')})")
+            else:
+                print(f"[LKHPlacer] no policy at {policy_ckpt} — using greedy chains")
+
+    def _perturb(self, state: PlacementState, rng: random.Random) -> None:
+        """Move ``perturb_macros`` random movable macros to random legal-ish
+        positions. Lets the search escape local minima (Phase 6.1)."""
+        movable_idx = np.where(state.movable)[0]
+        if len(movable_idx) == 0:
+            return
+        for _ in range(self.perturb_macros):
+            i = int(rng.choice(movable_idx.tolist()))
+            x = rng.uniform(state.half_w[i], state.cw - state.half_w[i])
+            y = rng.uniform(state.half_h[i], state.ch - state.half_h[i])
+            state.pos[i, 0] = x
+            state.pos[i, 1] = y
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         rng = random.Random(self.seed)
@@ -461,18 +588,30 @@ class LKHPlacer:
         chains = 0
         best_pos = state.pos.copy()
         best_key = (state.overlap_pairs(), state.hpwl())
+        stagnation = 0
 
         while chains < self.max_chains and (time.time() - start) < self.time_budget_s:
             seed_macro = rng.choices(movable_idx, weights=seed_weights, k=1)[0]
             result = LKChain(state, seed_macro, rng,
-                              approximator=self.approximator).run_greedy(self.max_chain_length)
+                              approximator=self.approximator,
+                              policy_bundle=self.policy_bundle,
+                              ).run(self.max_chain_length)
             chains += 1
             if result["committed"]:
-                # Track best on the same lex criterion the chain commit gate uses.
                 cur_key = (state.overlap_pairs(), state.hpwl())
                 if cur_key < best_key:
                     best_key = cur_key
                     best_pos = state.pos.copy()
+                    stagnation = 0
+                else:
+                    stagnation += 1
+            else:
+                stagnation += 1
+
+            # Phase 6.1: random perturbation on stagnation.
+            if stagnation >= self.stagnation_threshold:
+                self._perturb(state, rng)
+                stagnation = 0
 
         state.pos[:] = best_pos
 
