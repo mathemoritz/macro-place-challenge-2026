@@ -172,15 +172,19 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
 
         if time.time() - last_log > 5.0:
             elapsed = time.time() - t_collect
-            rate = len(feats_list) / max(elapsed, 1e-6)
-            eta = (num_examples - len(feats_list)) / max(rate, 1e-6)
-            print(f"  collected {len(feats_list):4d}/{num_examples}  "
-                  f"({elapsed:.1f}s, rate={rate:.1f}/s, eta={eta:.0f}s, base={base_cost:.3f})")
+            n_done = len(feats_list)
+            rate = n_done / max(elapsed, 1e-6)
+            remaining = num_examples - n_done
+            eta = remaining / max(rate, 1e-9)
+            print(f"  collected {n_done:4d}/{num_examples}  "
+                  f"(elapsed={_fmt_time(elapsed)}, "
+                  f"rate={_fmt_rate(n_done, elapsed)}, "
+                  f"eta={_fmt_time(eta)}, base={base_cost:.3f})")
             last_log = time.time()
 
     elapsed = time.time() - t_collect
-    print(f"  done in {elapsed:.1f}s "
-          f"({len(feats_list) / max(elapsed, 1e-6):.1f} examples/s)")
+    print(f"  done in {_fmt_time(elapsed)} "
+          f"({_fmt_rate(len(feats_list), elapsed)})")
     return np.stack(feats_list), np.array(targets_list, dtype=np.float32)
 
 
