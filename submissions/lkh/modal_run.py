@@ -221,19 +221,51 @@ def run_policy(benchmark: str, iterations: int, trajectories_per_iter: int,
 def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
              policy_iterations: int, trajectories_per_iter: int,
              eval_time_budget: float, seed: int, force_recollect: bool) -> None:
-    cmd = ["python", "submissions/lkh/train_iter.py",
-           "--benchmark", benchmark,
-           "--rounds", str(rounds),
-           "--examples", str(examples),
-           "--cost-epochs", str(cost_epochs),
-           "--policy-iterations", str(policy_iterations),
-           "--trajectories-per-iter", str(trajectories_per_iter),
-           "--eval-time-budget", str(eval_time_budget),
-           "--seed", str(seed)]
-    if force_recollect:
-        cmd.append("--force-recollect-each-round")
-    _run(cmd)
-    _persist("iter")
+    """Crash-safe Phase 5 driver: imports ``train_iter`` in-process and calls
+    ``run_round`` in a loop, committing the volume after every round so a
+    detached run that dies at hour 9 still leaves rounds 0..N-1 persisted.
+    """
+    import json as _json
+    _setup_env()
+    import train as _train
+    import train_iter as _ti
+
+    benchmarks = _train.parse_benchmarks(benchmark)
+    output_root = Path("/output/iter")
+    output_root.mkdir(parents=True, exist_ok=True)
+    data_path = Path("/root/repo/submissions/lkh/data/chain_data.pt")
+    cost_ckpt = Path("/root/repo/submissions/lkh/checkpoints/cost_approximator.pt")
+    policy_ckpt = Path("/root/repo/submissions/lkh/checkpoints/chain_policy.pt")
+
+    print(f"=== Phase 5 on Modal ===")
+    print(f"  benchmarks={benchmarks}  rounds={rounds}  output={output_root}")
+
+    history: list[dict] = []
+    for r in range(rounds):
+        record = _ti.run_round(
+            r,
+            benchmarks=benchmarks,
+            num_examples_per_benchmark=examples,
+            cost_epochs=cost_epochs,
+            policy_iterations=policy_iterations,
+            trajectories_per_iter=trajectories_per_iter,
+            seed=seed,
+            data_path=data_path,
+            cost_ckpt=cost_ckpt,
+            policy_ckpt=policy_ckpt,
+            force_recollect=force_recollect,
+            eval_time_budget_s=eval_time_budget,
+            output_root=output_root,
+        )
+        history.append(record)
+        # Stream aggregated history + canonical-path snapshot, then commit so
+        # if the container dies on the NEXT round, rounds 0..r are durable.
+        (output_root / "history.json").write_text(
+            _json.dumps(history, indent=2, default=str)
+        )
+        _persist("iter")
+        volume.commit()
+        print(f"[Modal] round {r} committed ({len(history)} rounds done).")
 
 
 # ── Local entrypoints ──────────────────────────────────────────────────────
