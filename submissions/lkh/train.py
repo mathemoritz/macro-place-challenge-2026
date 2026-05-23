@@ -2,18 +2,20 @@
 
 Workflow
 --------
-1. Load benchmark + PlacementCost via the standard loader.
-2. Sample random (macro, candidate-target) moves; for each one record:
-     - features = placer._features_for_move(state, macro_idx, Δ)
-     - target   = compute_proxy_cost(after) - compute_proxy_cost(before)
-3. Cache the (features, targets) tensor to disk so we can re-train without
-   re-paying the expensive exact-cost calls.
+1. For each benchmark in the list: load it, sample random (macro, candidate)
+   moves under state-drift, record (features, exact Δproxy_cost) pairs.
+2. Concatenate the per-benchmark arrays into a single dataset.
+3. Cache (features, targets) + the benchmarks list to disk so re-training
+   doesn't re-pay the expensive exact-cost calls.
 4. Train a small MLP (lkh_model.CostApproximator) with Smooth-L1 loss.
-5. Validate on a 20% held-out split; report Pearson r.
+   Normalization stats are computed globally over the combined dataset.
+5. Validate on a 20% held-out split; report Pearson r and Spearman ρ.
 6. Save state-dict + normalization stats to ``checkpoints/cost_approximator.pt``.
 
 Usage:
-    uv run python submissions/lkh/train.py            # default: ibm01, 1500 examples
+    uv run python submissions/lkh/train.py                    # default: ibm01
+    uv run python submissions/lkh/train.py --benchmark ibm01,ibm02,ibm03
+    uv run python submissions/lkh/train.py --benchmark all --num-examples 200
     uv run python submissions/lkh/train.py --num-examples 3000 --epochs 80
 """
 
@@ -43,19 +45,40 @@ from macro_place.loader import load_benchmark_from_dir
 from macro_place.objective import compute_proxy_cost
 
 
+# ── Benchmark list parsing ─────────────────────────────────────────────────
+
+def parse_benchmarks(arg: str) -> list[str]:
+    """Parse a ``--benchmark`` CLI value into a list of benchmark names.
+
+    Accepts:
+        - single name: ``ibm01``
+        - comma-separated: ``ibm01,ibm02,ibm03``
+        - the literal ``all`` -> the canonical 17-benchmark IBM suite from
+          ``macro_place/evaluate.py::IBM_BENCHMARKS``.
+
+    Existence of each benchmark directory is verified by ``load_benchmark_from_dir``
+    when collection begins; parse_benchmarks only does the syntactic split so
+    callers can build lists programmatically without needing the cwd set.
+    """
+    arg = (arg or "").strip()
+    if arg == "all":
+        from macro_place.evaluate import IBM_BENCHMARKS
+        return list(IBM_BENCHMARKS)
+    names = [n.strip() for n in arg.split(",") if n.strip()]
+    if not names:
+        raise ValueError("--benchmark must contain at least one benchmark name")
+    return names
+
+
 # ── Data collection ────────────────────────────────────────────────────────
 
-def collect_data(benchmark_name: str, num_examples: int, seed: int,
-                  drift_prob: float = 0.3) -> tuple[np.ndarray, np.ndarray]:
-    """Sample (state, move, exact_Δproxy_cost) triples for training.
+def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
+                            drift_prob: float = 0.3
+                            ) -> tuple[np.ndarray, np.ndarray]:
+    """Single-benchmark state-drift sampler. Returns (features [N, F], targets [N]).
 
-    Each iteration: pick a random movable macro, sample up to 8 candidate
-    positions, and for each candidate compute the exact Δcost (move, eval,
-    revert). With probability ``drift_prob`` we then COMMIT one of the best
-    candidates as the new base state, so subsequent samples come from a
-    drifted state — better coverage than always sampling from initial.plc,
-    which addresses the in-chain distributional shift identified in
-    background/mvp_implementation_plan_lkh.md Phase 5.
+    The plc object is released when this function returns so the next
+    benchmark in a multi-benchmark sweep doesn't accumulate memory.
     """
     bench_dir = Path("external/MacroPlacement/Testcases/ICCAD04") / benchmark_name
     benchmark, plc = load_benchmark_from_dir(str(bench_dir))
@@ -127,6 +150,32 @@ def collect_data(benchmark_name: str, num_examples: int, seed: int,
     print(f"  done in {elapsed:.1f}s "
           f"({len(feats_list) / max(elapsed, 1e-6):.1f} examples/s)")
     return np.stack(feats_list), np.array(targets_list, dtype=np.float32)
+
+
+def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
+                  seed: int, drift_prob: float = 0.3
+                  ) -> tuple[np.ndarray, np.ndarray]:
+    """Multi-benchmark wrapper. Concatenates per-benchmark arrays.
+
+    Each benchmark contributes ``num_examples_per_benchmark`` samples; the
+    seed is offset per benchmark so different benchmarks don't share the
+    same RNG trajectory. Total dataset size = N × len(benchmark_names).
+    """
+    if not benchmark_names:
+        raise ValueError("collect_data: benchmark_names is empty")
+
+    all_feats: list[np.ndarray] = []
+    all_targets: list[np.ndarray] = []
+    for b_idx, name in enumerate(benchmark_names):
+        print(f"\n  [{b_idx + 1}/{len(benchmark_names)}] benchmark = {name}")
+        feats, targets = _collect_one_benchmark(
+            name, num_examples_per_benchmark,
+            seed=seed + b_idx * 7919,   # arbitrary stride so offsets don't collide
+            drift_prob=drift_prob,
+        )
+        all_feats.append(feats)
+        all_targets.append(targets)
+    return np.concatenate(all_feats, axis=0), np.concatenate(all_targets, axis=0)
 
 
 # ── Training ───────────────────────────────────────────────────────────────
@@ -222,8 +271,11 @@ def train_model(features: np.ndarray, targets: np.ndarray, *,
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--benchmark", default="ibm01")
-    p.add_argument("--num-examples", type=int, default=1500)
+    p.add_argument("--benchmark", default="ibm01",
+                   help="Single name, comma-separated list, or 'all' for the 17 IBM benchmarks. "
+                        "Example: --benchmark ibm01,ibm02,ibm07")
+    p.add_argument("--num-examples", type=int, default=1500,
+                   help="Per-benchmark example count. Total dataset = N * len(benchmarks).")
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -238,28 +290,40 @@ def main():
                    help="Re-run data collection even if cached data exists.")
     args = p.parse_args()
 
+    benchmarks = parse_benchmarks(args.benchmark)
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
     print(f"=== Phase 3: Cost Approximator ===")
-    print(f"  benchmark = {args.benchmark}, examples = {args.num_examples}")
+    print(f"  benchmarks = {benchmarks}")
+    print(f"  examples/benchmark = {args.num_examples}, "
+          f"total = {args.num_examples * len(benchmarks)}")
 
     data_path = Path(args.data_out)
+    use_cache = False
     if data_path.exists() and not args.force_recollect:
-        print(f"\n[1/3] Loading cached data from {data_path}")
-        data = torch.load(data_path, weights_only=False)
-        features, targets = data["features"], data["targets"]
-        if data.get("benchmark") != args.benchmark:
-            print(f"  WARNING: cached data is from '{data.get('benchmark')}', "
-                  f"not '{args.benchmark}'")
-        if len(features) < args.num_examples:
-            print(f"  cached only has {len(features)} examples; use --force-recollect to expand")
-    else:
-        print(f"\n[1/3] Collecting data on {args.benchmark}...")
-        features, targets = collect_data(args.benchmark, args.num_examples, args.seed)
+        cached = torch.load(data_path, weights_only=False)
+        # Backwards compat: old caches stored "benchmark" (singular string).
+        cached_benchmarks = cached.get("benchmarks")
+        if cached_benchmarks is None:
+            singleton = cached.get("benchmark")
+            cached_benchmarks = [singleton] if singleton else []
+        if set(cached_benchmarks) == set(benchmarks):
+            print(f"\n[1/3] Loading cached data from {data_path}  "
+                  f"(benchmarks match: {sorted(cached_benchmarks)})")
+            features, targets = cached["features"], cached["targets"]
+            use_cache = True
+        else:
+            print(f"\n[1/3] Cached data covers {sorted(cached_benchmarks)} "
+                  f"but request is {sorted(benchmarks)} — re-collecting")
+
+    if not use_cache:
+        print(f"\n[1/3] Collecting on {benchmarks}...")
+        features, targets = collect_data(benchmarks, args.num_examples, args.seed)
         data_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"features": features, "targets": targets,
-                    "benchmark": args.benchmark, "feature_dim": FEATURE_DIM},
+                    "benchmarks": benchmarks, "feature_dim": FEATURE_DIM},
                    data_path)
         print(f"  saved {len(features)} examples to {data_path}")
 
@@ -287,7 +351,7 @@ def main():
         "feature_dim": features.shape[1],
         "hidden": args.hidden,
         "pearson_r_val": info["pearson"],
-        "trained_on": args.benchmark,
+        "trained_on": benchmarks,
         "n_train": info["n_train"],
         "n_val": info["n_val"],
     }

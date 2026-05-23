@@ -6,9 +6,16 @@ so transitions are processed individually inside the update — for the
 modest batch sizes implied by the plan (~40 transitions/iter), no padding
 is needed.
 
+Multi-benchmark support (plan §4.3): all benchmarks are pre-loaded into a
+lightweight cache (the PlacementCost object is dropped — PPO only needs the
+HPWL surrogate, not exact proxy cost), and each rollout samples a random
+benchmark from the cache. State is reset to the benchmark's initial.plc
+positions before every rollout so trajectories are independent.
+
 Usage:
     uv run python submissions/lkh/train_policy.py --iterations 200
-    uv run python submissions/lkh/train_policy.py --iterations 100 --benchmark ibm03
+    uv run python submissions/lkh/train_policy.py --benchmark ibm01,ibm02,ibm03
+    uv run python submissions/lkh/train_policy.py --benchmark all --iterations 100
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent.parent))
 
 from lkh_model import ChainPolicy
+from train import parse_benchmarks   # shared CLI helper
 
 _spec_placer = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer.py"))
 _placer = importlib.util.module_from_spec(_spec_placer)
@@ -40,6 +48,28 @@ _spec_env.loader.exec_module(_env_mod)
 ChainEnv = _env_mod.ChainEnv
 
 from macro_place.loader import load_benchmark_from_dir
+
+
+def _load_benchmark_cache(benchmark_names: list[str]) -> dict[str, dict]:
+    """Pre-load all benchmarks into memory for fast per-trajectory sampling.
+
+    PPO training uses ChainEnv (HPWL surrogate reward), which doesn't need
+    PlacementCost. We bind ``_plc`` to ``_`` so it can be garbage-collected
+    immediately, keeping the cache lightweight (≈1–2 MB per benchmark).
+    """
+    cache: dict[str, dict] = {}
+    for name in benchmark_names:
+        bench_dir = Path("external/MacroPlacement/Testcases/ICCAD04") / name
+        benchmark, _plc = load_benchmark_from_dir(str(bench_dir))
+        del _plc
+        edges, edge_weights = _placer._hard_macro_edges(benchmark)
+        state = _placer.PlacementState(benchmark, edges, edge_weights)
+        cache[name] = {
+            "state": state,
+            "init_pos": state.pos.copy(),
+            "movable": np.where(state.movable)[0].tolist(),
+        }
+    return cache
 
 
 # ── Rollout collection ─────────────────────────────────────────────────────
@@ -148,7 +178,7 @@ def ppo_update(policy: ChainPolicy, optimizer: torch.optim.Optimizer,
 
 # ── Training loop ──────────────────────────────────────────────────────────
 
-def train_chain_policy(benchmark_name: str, *, n_iterations: int,
+def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                         trajectories_per_iter: int, max_chain_length: int,
                         max_candidates: int, terminal_commit_bonus: float,
                         seed: int, lr: float, gamma: float, lam: float,
@@ -156,18 +186,23 @@ def train_chain_policy(benchmark_name: str, *, n_iterations: int,
                         ppo_epochs: int, output_ckpt: Path,
                         initial_policy_ckpt: Path | None = None,
                         log_every: int = 5) -> dict:
+    """PPO training across one or more benchmarks. Each trajectory samples
+    a random benchmark from ``benchmarks`` (plan §4.3 semantics)."""
     import random as _random
+
+    if not benchmarks:
+        raise ValueError("train_chain_policy: benchmarks list is empty")
 
     rng = _random.Random(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    bench_dir = Path("external/MacroPlacement/Testcases/ICCAD04") / benchmark_name
-    benchmark, _plc = load_benchmark_from_dir(str(bench_dir))
-    edges, edge_weights = _placer._hard_macro_edges(benchmark)
-    base_state = _placer.PlacementState(benchmark, edges, edge_weights)
-    init_pos = base_state.pos.copy()
-    movable_indices = np.where(base_state.movable)[0].tolist()
+    print(f"=== Phase 4: PPO chain policy ===")
+    print(f"  benchmarks={benchmarks}  iterations={n_iterations}  "
+          f"traj/iter={trajectories_per_iter}")
+    print(f"  max_chain_length={max_chain_length}  max_candidates={max_candidates}")
+    print(f"  pre-loading {len(benchmarks)} benchmark(s) into RAM...")
+    bench_cache = _load_benchmark_cache(benchmarks)
 
     policy = ChainPolicy(hidden=64)
     if initial_policy_ckpt is not None and initial_policy_ckpt.exists():
@@ -176,9 +211,9 @@ def train_chain_policy(benchmark_name: str, *, n_iterations: int,
         print(f"  warm-started policy from {initial_policy_ckpt}")
     optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
 
-    print(f"=== Phase 4: PPO chain policy ===")
-    print(f"  benchmark={benchmark_name}  iterations={n_iterations}  traj/iter={trajectories_per_iter}")
-    print(f"  max_chain_length={max_chain_length}  max_candidates={max_candidates}")
+    # Per-benchmark counters for diagnostics (only emitted at end-of-run).
+    per_bench_traj_count = {n: 0 for n in benchmarks}
+    per_bench_commit_count = {n: 0 for n in benchmarks}
 
     history = []
     t_start = time.time()
@@ -188,15 +223,18 @@ def train_chain_policy(benchmark_name: str, *, n_iterations: int,
         length_total = 0
         gain_total = 0.0
         for _ in range(trajectories_per_iter):
-            base_state.pos[:] = init_pos
-            seed_macro = rng.choice(movable_indices)
+            name = rng.choice(benchmarks)
+            bc = bench_cache[name]
+            bc["state"].pos[:] = bc["init_pos"]
+            seed_macro = rng.choice(bc["movable"])
             env = ChainEnv(
-                base_state, seed_macro, rng=rng,
+                bc["state"], seed_macro, rng=rng,
                 max_chain_length=max_chain_length,
                 max_candidates=max_candidates,
                 terminal_commit_bonus=terminal_commit_bonus,
             )
             traj = collect_rollout(env, policy)
+            per_bench_traj_count[name] += 1
             if not traj:
                 continue
             traj = compute_gae(traj, gamma=gamma, lam=lam)
@@ -212,6 +250,7 @@ def train_chain_policy(benchmark_name: str, *, n_iterations: int,
             if committed:
                 commit_count += 1
                 gain_total += env.start_hpwl - end_hpwl
+                per_bench_commit_count[name] += 1
 
         metrics = ppo_update(policy, optimizer, all_transitions,
                              clip=clip, ent_coef=ent_coef, vf_coef=vf_coef,
@@ -243,10 +282,19 @@ def train_chain_policy(benchmark_name: str, *, n_iterations: int,
                   f"ent={metrics['entropy']:.3f}  "
                   f"[{elapsed:.1f}s]")
 
+    # Per-benchmark commit summary (helps diagnose generalization gaps).
+    if len(benchmarks) > 1:
+        print(f"  per-benchmark commit rates:")
+        for name in benchmarks:
+            n_traj = per_bench_traj_count[name]
+            n_commit = per_bench_commit_count[name]
+            rate = n_commit / max(n_traj, 1)
+            print(f"    {name:>10}  {n_commit}/{n_traj} = {rate:.0%}")
+
     output_ckpt.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "state_dict": policy.state_dict(),
-        "trained_on": benchmark_name,
+        "trained_on": benchmarks,
         "n_iterations": n_iterations,
         "hidden": 64,
     }, output_ckpt)
@@ -258,7 +306,8 @@ def train_chain_policy(benchmark_name: str, *, n_iterations: int,
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--benchmark", default="ibm01")
+    p.add_argument("--benchmark", default="ibm01",
+                   help="Single name, comma-separated list, or 'all' for the 17 IBM benchmarks.")
     p.add_argument("--iterations", type=int, default=200)
     p.add_argument("--trajectories-per-iter", type=int, default=4)
     p.add_argument("--max-chain-length", type=int, default=8)
@@ -279,8 +328,10 @@ def main():
                    default=str(_HERE / "checkpoints" / "chain_policy.pt"))
     args = p.parse_args()
 
+    benchmarks = parse_benchmarks(args.benchmark)
+
     train_chain_policy(
-        args.benchmark,
+        benchmarks,
         n_iterations=args.iterations,
         trajectories_per_iter=args.trajectories_per_iter,
         max_chain_length=args.max_chain_length,
