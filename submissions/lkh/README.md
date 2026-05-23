@@ -1,5 +1,9 @@
 # LKH Placer — How it Works and How to Use It
 
+> **Repo homepage:** This file is the source for the repository root
+> [`README.md`](../../README.md), which shows this documentation first and the
+> original challenge readme below when you scroll down on GitHub.
+
 A macro placement system that beats the `initial.plc` placement by combining
 non-learned Lin-Kernighan chain refinement with two learned models. Based on
 `background/mvp_implementation_plan_lkh.md`. All training infrastructure runs
@@ -359,7 +363,7 @@ Three layers of resilience, in order of how often they help:
 ## Reference
 
 - Plan: `background/mvp_implementation_plan_lkh.md`
-- Macro Placement Challenge: `README.md`, `SETUP.md`, `SCORING.md`
+- Macro Placement Challenge: `CHALLENGE_README.md`, `SETUP.md`, `SCORING.md`
 - Evaluator: `macro_place/evaluate.py`
 - Baseline placers: `submissions/examples/`, `submissions/will_seed/`
 - Modal compute guide: CS224R Modal Compute Guide PDF (see TA email)
