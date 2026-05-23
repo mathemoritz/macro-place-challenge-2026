@@ -1,0 +1,365 @@
+# LKH Placer — How it Works and How to Use It
+
+A macro placement system that beats the `initial.plc` placement by combining
+non-learned Lin-Kernighan chain refinement with two learned models. Based on
+`background/mvp_implementation_plan_lkh.md`. All training infrastructure runs
+either locally or on Modal cloud.
+
+## TL;DR — the 3 commands main commands:
+
+**1. Start a training run on Modal** (one-time `uv add modal && uv run modal setup` first):
+
+```bash
+uv run modal run --detach submissions/lkh/modal_run.py::iter_ \
+    --benchmark all --rounds 4 --examples 75 \
+    --policy-iterations 1500 --eval-time-budget 20
+```
+
+Returns in ~10 seconds; the actual training runs in the background for ~3 hours.
+You can close your laptop. Modal will email you when it finishes.
+
+**2. Watch progress** (from any terminal, anytime):
+
+```bash
+modal app logs lkh-macro-place               # live log stream
+modal volume ls lkh-results /iter/per_bench  # which benchmarks finished collecting
+modal volume ls lkh-results /iter            # which rounds finished
+```
+
+**3. Collect results** (after Modal emails "completed"):
+
+```bash
+# Pull everything from the volume
+modal volume get lkh-results /iter ./modal_output
+
+# Promote trained checkpoints to local
+cp modal_output/checkpoints/*.pt submissions/lkh/checkpoints/
+
+# Verify the placer with the new models
+uv run python -m macro_place.evaluate submissions/lkh/placer.py --all
+```
+
+Everything else below is reference material for tuning, debugging, and local development.
+
+---
+
+## Pipeline at a Glance
+
+```
+initial.plc                                                     valid
+(input)                                                         placement
+   |                                                              ^
+   v                                                              |
+PlacementState                                               Legalization
+(numpy arrays)                                               (outward spiral)
+   |                                                              ^
+   v                                                              |
+LK Chain ----score candidates-----> +-- ChainPolicy (PPO)          |
+(cascading                          |   if checkpoint loaded      |
+ macro moves)                       +-- CostApproximator (MLP)    |
+   |                                |   if checkpoint loaded      |
+   |                                +-- HPWL surrogate            |
+   |                                    (default fallback)        |
+   |                                                              |
+   +---chain commit gate---> best placement -> legalize ----------+
+       (lex: overlap_pairs,
+        then HPWL)
+```
+
+The placer runs a wall-clock-bounded loop of chains; each chain cascades
+moves through the state. After the loop, a legalization pass forces
+overlaps to zero so the output is a valid competition submission.
+
+## What's in This Directory
+
+| File | Role |
+|---|---|
+| `placer.py` | The placer (`LKHPlacer`). Contains `PlacementState`, `LKChain`, `_legalize`, checkpoint loaders. This is what the competition evaluator calls. |
+| `lkh_model.py` | The two neural models: `CostApproximator` (Phase 3) and `ChainPolicy` (Phase 4 actor-critic). |
+| `chain_env.py` | `ChainEnv` — wraps `PlacementState` as a Gym-style RL environment for PPO. |
+| `encoder.py` | `PlacementGNN` + `CanvasCNN` + `StateEncoder` (Phase 2). Implemented but **not yet wired** into the rest of the pipeline; uses hand-crafted features by default. |
+| `train.py` | Phase 3 trainer for `CostApproximator`. Collects `(features, exact_Δproxy_cost)` triples and trains an MLP. |
+| `train_policy.py` | Phase 4 PPO trainer for `ChainPolicy`. |
+| `train_iter.py` | Phase 5 iterative loop: Phase 3 + Phase 4 + per-benchmark evaluation, repeated N rounds. |
+| `ablate.py` | Phase 7 ablation: compares initial / HPWL-surrogate / +approximator / +policy on a benchmark. |
+| `visualize.py` | Side-by-side renders: initial placement vs LKHPlacer output, with displacement arrows. |
+| `modal_run.py` | Modal entry points (smoke, train, policy, iter\_). All long-running training jobs go through this. |
+| `checkpoints/` | Trained weights (`cost_approximator.pt`, `chain_policy.pt`). The placer auto-loads if present. |
+| `data/` | Cached training data. `chain_data.pt` is the aggregated dataset; `per_bench/` has per-benchmark caches that survive preemption. |
+| `iter_output/` | Per-round archival from `train_iter.py` (round\_0/, round\_1/, ..., history.json). |
+
+## Local Workflows
+
+### Evaluate the placer
+
+```bash
+# Single benchmark (uses whatever checkpoints exist in checkpoints/)
+uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01
+
+# All 17 IBM benchmarks
+uv run python -m macro_place.evaluate submissions/lkh/placer.py --all
+
+# Hide checkpoints to test the no-learning baseline
+mv submissions/lkh/checkpoints submissions/lkh/checkpoints.bak
+uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01
+mv submissions/lkh/checkpoints.bak submissions/lkh/checkpoints
+```
+
+The evaluator prints `proxy=<cost>  overlaps=<n>  VALID/INVALID` per benchmark.
+A valid submission has `overlaps=0` on every benchmark.
+
+### Ablation (compare A/B/C/D)
+
+```bash
+uv run python submissions/lkh/ablate.py --time-budget 30 --benchmark ibm01
+```
+
+Prints a table:
+
+| method                     | proxy | overlaps |
+|----------------------------|------:|---------:|
+| A: initial.plc             | 1.04  | 69       |
+| B: surrogate only          | 1.22  | 49       |
+| C: + CostApproximator      | 1.05  | 61       |
+| D: + ChainPolicy (full)    | 1.16  | 0 (valid)|
+
+### Visualize a placement
+
+```bash
+uv run python submissions/lkh/visualize.py --benchmark ibm01 --time-budget 30
+# -> vis/ibm01_compare.png  (initial | placer output, with displacement arrows)
+
+# Multiple benchmarks
+uv run python submissions/lkh/visualize.py --benchmark ibm01,ibm07 --no-arrows
+```
+
+### Train locally (for quick experiments)
+
+```bash
+# Phase 3 only (cost approximator on ibm01)
+uv run python submissions/lkh/train.py --benchmark ibm01 --num-examples 200
+
+# Phase 4 only (PPO policy on ibm01)
+uv run python submissions/lkh/train_policy.py --benchmark ibm01 --iterations 200
+
+# Phase 5 full pipeline (small, ~5 min)
+uv run python submissions/lkh/train_iter.py \
+    --benchmark ibm01,ibm07 --rounds 1 --examples 20 --policy-iterations 100
+```
+
+Local training is fine for development but slow at scale. For real training,
+use Modal.
+
+## Modal Workflows (the main path)
+
+Modal lets us run training on rented CPUs in parallel. Used for any training
+that needs more than a few minutes.
+
+### One-time setup
+
+```bash
+# Install the Modal CLI in this project
+uv add modal
+
+# Authenticate (opens browser to your Modal account; you should have credits
+# from the CS224R compute email)
+uv run modal setup
+```
+
+### Smoke-test the Modal image (~30 sec the second time, ~3 min first)
+
+```bash
+uv run modal run submissions/lkh/modal_run.py::smoke
+```
+
+This builds the Docker image, mounts the repo, loads ibm01 on a Modal worker,
+and prints `OK`. Run this once after any change to `modal_run.py` to confirm
+the environment still works.
+
+### Full training run (the main workflow)
+
+```bash
+uv run modal run --detach submissions/lkh/modal_run.py::iter_ \
+    --benchmark all \
+    --rounds 4 \
+    --examples 75 \
+    --policy-iterations 1500 \
+    --eval-time-budget 20
+```
+
+Both `--detach` and `.spawn()` are needed:
+- `.spawn()` (in modal\_run.py) makes the call async — survives local terminal disconnect.
+- `--detach` keeps the App alive after `modal run` exits.
+
+The CLI returns within ~10 seconds with a `function_call_id`. You can close
+your laptop; the run continues on Modal.
+
+### Tuning knobs
+
+| Flag | Default | Tradeoff |
+|---|---:|---|
+| `--benchmark` | `ibm01` | `all` = full IBM suite (17). Comma list for subsets. |
+| `--rounds` | `2` | More rounds = longer PPO warm-start. Each round after the first is fast (data cached). |
+| `--examples` | `400` | Per-benchmark sample count for Phase 3. `compute_proxy_cost` cost scales with examples × benchmark size. |
+| `--policy-iterations` | `1000` | PPO update count per round. 1500-3000 is reasonable. |
+| `--trajectories-per-iter` | `4` | Higher = better gradient estimates but slower PPO. |
+| `--eval-time-budget` | `20.0` | Seconds per benchmark during eval phase. Bigger = better placement quality. |
+| `--force-recollect-each-round` | off | Wipes per-benchmark cache; forces re-collection each round. Usually off. |
+
+### Wall-time estimates on Modal
+
+For `--benchmark all`:
+
+| examples | Parallel data collection | per round (PPO+eval) | rounds | total |
+|---:|---:|---:|---:|---:|
+| 50 | ~1.5 h | ~7 min | 3 | ~2.0 h |
+| 75 | ~2.2 h | ~7 min | 4 | ~3.0 h |
+| 100 | ~3.0 h | ~7 min | 4 | ~3.7 h |
+| 150 | ~4.5 h | ~7 min | 3 | ~5.0 h |
+
+The parallel collection runs once (cached after); subsequent rounds reuse it.
+Cost: `nonpreemptible=True` is set on long-running functions and bills at
+3× the list CPU rate — expect a few credits per full run.
+
+### Watching it run
+
+In another terminal (your laptop can sleep — the job won't die):
+
+```bash
+# Confirm it's actually running
+modal app list | grep lkh-macro-place
+# Should show 'running' status
+
+# Live log stream (Ctrl-C just detaches the viewer, doesn't stop the run)
+modal app logs lkh-macro-place
+
+# Which benchmarks have finished data collection
+modal volume ls lkh-results /iter/per_bench
+# Each name.pt that appears = one benchmark fully collected
+
+# Check overall progress
+modal volume ls lkh-results /iter
+# After round 0 finishes: round_0/, checkpoints/, history.json, data/
+# After round N: round_0/, ..., round_N/
+```
+
+You will get a Modal email when the run finishes.
+
+### After it finishes
+
+```bash
+# Pull everything from the volume
+modal volume get lkh-results /iter ./modal_output
+
+# Inspect
+ls modal_output/
+# checkpoints/, data/, history.json, per_bench/, round_0/, round_1/, ...
+
+# See training progress numerically
+cat modal_output/history.json
+
+# Promote the trained checkpoints to local
+cp modal_output/checkpoints/*.pt submissions/lkh/checkpoints/
+
+# Test the placer locally
+uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01
+uv run python -m macro_place.evaluate submissions/lkh/placer.py --all
+
+# Visualize on a few benchmarks
+uv run python submissions/lkh/visualize.py --benchmark ibm01,ibm10,ibm17
+```
+
+You can also inspect or test the per-round snapshots:
+
+```bash
+# Round 2 vs round 3 on ibm01
+cp modal_output/round_2/*.pt submissions/lkh/checkpoints/
+uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01
+cp modal_output/round_3/*.pt submissions/lkh/checkpoints/
+uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01
+```
+
+### Stopping a run
+
+```bash
+modal app stop lkh-macro-place
+# If you have multiple lkh-macro-place apps in 'app list', use the app ID:
+modal app stop ap-XXXX...
+```
+
+Any completed rounds remain on the volume (per-round `volume.commit()`).
+
+## How the Pipeline Recovers from Failure
+
+Three layers of resilience, in order of how often they help:
+
+1. **Per-benchmark cache** (`/output/iter/per_bench/<name>.pt`)
+   Each benchmark's data is committed immediately after collection. If a
+   container crashes or is killed mid-collection, only that one benchmark's
+   in-flight work is lost; the others stay durable. A relaunch resumes from
+   wherever the cache stopped.
+
+2. **Per-round volume commit + archival** (`/output/iter/round_N/`)
+   After each complete round, the canonical checkpoints AND a per-round
+   snapshot are committed to the volume. If a run dies between rounds, all
+   completed rounds are preserved.
+
+3. **`nonpreemptible=True`**
+   Modal won't preempt the workers (previously the cause of mid-collection
+   restarts). Costs 3× CPU rate but eliminates the failure mode entirely.
+
+## Hyperparameter Cheat Sheet
+
+| Where | Knob | Default | When to change |
+|---|---|---|---|
+| `LKHPlacer.__init__` | `time_budget_s` | 60 | Raise for higher-quality placements at evaluation time |
+| `LKHPlacer.__init__` | `max_chain_length` | 8 | 5-10 reasonable; longer chains rarely help |
+| `LKHPlacer.__init__` | `stagnation_threshold` | 50 | Chains without improvement before random perturbation |
+| `LKHPlacer.__init__` | `perturb_macros` | 5 | How many macros to randomly move on stagnation |
+| `train.py` `--num-examples` | 1500 | Per-benchmark Phase 3 data count |
+| `train.py` `--epochs` | 60 | Phase 3 training epochs |
+| `train.py` `--hidden` | 64 | CostApproximator hidden dim |
+| `train_policy.py` `--iterations` | 200 | PPO iterations (1500-3000 for real runs) |
+| `train_policy.py` `--ent-coef` | 0.01 | Bump up if policy collapses too fast |
+| `train_iter.py` `--rounds` | 2 | Iterative refinement count |
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `INVALID (N overlaps)` from evaluator | Legalization didn't reach 0 | Check the legalization log line — if it stopped at >0 overlaps, bump `max_search_radius` in `placer._legalize` |
+| `rate=0.0/s` in old logs | Old format bug, fixed | Pull latest; format now shows `s/ex` for slow rates |
+| Modal "Worker preemption" message | Old runs without `nonpreemptible=True` | Already fixed in `modal_run.py` |
+| Modal "Cancellation signal" mid-collection | `.remote()` instead of `.spawn()` or attached `modal run` instead of `--detach` | Use the documented launch command (`.spawn()` + `--detach`) |
+| Modal `App ... has no attribute 'Mount'` | Modal 1.x removed `Mount.from_local_dir` | Already using `image.add_local_dir(...)` |
+| `modal call logs` errors with "No such command" | Modal 1.x uses `modal app logs`, not `modal call` | Use `modal app logs lkh-macro-place` |
+| Phase 3 Pearson stays low (< 0.6) | Not enough multi-benchmark data | Bump `--examples` |
+| PPO commit rate stuck at 0% | Entropy collapsed too fast | Increase `--ent-coef` to 0.05 |
+| Long benchmark hangs at "first call: > 100s" | `compute_proxy_cost` natural slowness on big designs (ibm17, ibm18) | Expected. Parallel mode bounds wall time. |
+
+## Deferred Work (Not Yet Used)
+
+- **Phase 2 GNN+CNN encoder.** `encoder.py` is implemented and smoke-tested
+  (3-layer message-passing GNN over the netlist + 3-channel canvas CNN), but
+  not wired into the rest of the pipeline. The current models use the
+  hand-crafted 16-dim feature vector from `placer._features_for_move` and
+  the global/macro/chain features from `chain_env.py`. To wire the encoder
+  in, replace those feature constructors with `encoder.encode_state(...)` and
+  bump the input dims on `CostApproximator` and `ChainPolicy`. See the
+  docstring in `encoder.py` for the exact recipe.
+
+- **Best-policy tracking in PPO.** PPO can collapse late in training; we
+  currently save the *last* policy. A "best by commit rate" tracker is a
+  small addition.
+
+- **Mid-PPO validation.** Currently we validate the policy only via the
+  per-round `evaluate_round` call. Periodic in-training eval would help
+  diagnose training dynamics.
+
+## Reference
+
+- Plan: `background/mvp_implementation_plan_lkh.md`
+- Macro Placement Challenge: `README.md`, `SETUP.md`, `SCORING.md`
+- Evaluator: `macro_place/evaluate.py`
+- Baseline placers: `submissions/examples/`, `submissions/will_seed/`
+- Modal compute guide: CS224R Modal Compute Guide PDF (see TA email)
