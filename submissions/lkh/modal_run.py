@@ -268,8 +268,11 @@ def collect_one_benchmark_modal(name: str, num_examples: int, seed: int) -> dict
 
     t0 = _time.time()
     print(f"[{name}] collecting {num_examples} examples...")
+    # _collect_one_benchmark signature: (benchmark_name, num_examples, seed, drift_prob).
+    # The outer `collect_data` renames this to `num_examples_per_benchmark`;
+    # don't conflate them here or Modal raises TypeError on the worker.
     feats, targets = _train._collect_one_benchmark(
-        name, num_examples_per_benchmark=num_examples, seed=seed,
+        name, num_examples=num_examples, seed=seed,
     )
     wall = _time.time() - t0
 
