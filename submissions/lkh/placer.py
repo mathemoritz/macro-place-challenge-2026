@@ -23,6 +23,7 @@ Usage:
 """
 
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -30,6 +31,12 @@ import numpy as np
 import torch
 
 from macro_place.benchmark import Benchmark
+
+# Make the sibling lkh_model.py importable when this file is loaded via
+# importlib.util.spec_from_file_location (the evaluate.py path).
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
 
 
 # ── HPWL edge graph extraction ─────────────────────────────────────────────
@@ -166,6 +173,15 @@ class PlacementState:
 
     # ── Candidate generation ──────────────────────────────────────────────
 
+    def count_within(self, idx: int, x: float, y: float, radius: float) -> int:
+        """Count macro centers (excluding ``idx``) within an axis-aligned box
+        of half-side ``radius`` around (x, y). Cheap proxy for local density."""
+        dx = np.abs(self.pos[:, 0] - x)
+        dy = np.abs(self.pos[:, 1] - y)
+        hits = (dx < radius) & (dy < radius)
+        hits[idx] = False
+        return int(hits.sum())
+
     def candidate_positions(self, idx: int, num_candidates: int = 16,
                             rng: random.Random | None = None) -> list[tuple[float, float]]:
         """Candidate centers for macro idx: HPWL-attractor + small grid jitter."""
@@ -199,17 +215,108 @@ class PlacementState:
         return cands[:num_candidates]
 
 
-# ── LK chain (greedy, non-learned) ─────────────────────────────────────────
+# ── Feature extraction (for Phase 3 cost approximator) ────────────────────
+
+FEATURE_DIM = 16
+
+
+def _features_for_move(state: "PlacementState", macro_idx: int,
+                        move_delta: np.ndarray) -> np.ndarray:
+    """16-dim feature vector for predicting Δproxy_cost of moving ``macro_idx``
+    by ``move_delta``. Mirrors the physical signals a GNN+CNN encoder would
+    surface: HPWL change, local density at source/target, overlap change,
+    neighbor-attraction change, and geometry."""
+    old_x = float(state.pos[macro_idx, 0])
+    old_y = float(state.pos[macro_idx, 1])
+    new_x = old_x + float(move_delta[0])
+    new_y = old_y + float(move_delta[1])
+    w = float(state.sizes[macro_idx, 0])
+    h = float(state.sizes[macro_idx, 1])
+
+    # HPWL surrogate Δ (analytic).
+    hpwl_before = state.hpwl()
+    saved = state.pos[macro_idx].copy()
+    state.pos[macro_idx, 0] = new_x
+    state.pos[macro_idx, 1] = new_y
+    hpwl_after = state.hpwl()
+    n_overlap_new = len(state.overlapping_with(macro_idx))
+    state.pos[macro_idx] = saved
+    n_overlap_old = len(state.overlapping_with(macro_idx))
+
+    # Local-density proxy: macro centers within 3·max(w,h) of each spot.
+    radius = max(w, h) * 3.0
+    n_local_old = state.count_within(macro_idx, old_x, old_y, radius)
+    n_local_new = state.count_within(macro_idx, new_x, new_y, radius)
+
+    # Neighbor-attraction signal (Manhattan).
+    nbrs = state.neighbors[macro_idx]
+    if nbrs:
+        cx = float(state.pos[nbrs, 0].mean())
+        cy = float(state.pos[nbrs, 1].mean())
+        attract_old = abs(old_x - cx) + abs(old_y - cy)
+        attract_new = abs(new_x - cx) + abs(new_y - cy)
+        deg = len(nbrs)
+    else:
+        attract_old = attract_new = 0.0
+        deg = 0
+
+    feats = np.array([
+        w, h, w * h,                                # macro geometry
+        float(move_delta[0]), float(move_delta[1]),
+        abs(float(move_delta[0])), abs(float(move_delta[1])),
+        new_x / state.cw, new_y / state.ch,         # normalized target
+        hpwl_after - hpwl_before,                    # HPWL Δ (surrogate)
+        float(n_overlap_old), float(n_overlap_new),  # local overlap counts
+        float(n_local_old), float(n_local_new),      # local density
+        attract_old - attract_new,                   # +ve = pulled toward neighbors
+        float(deg),                                  # macro degree
+    ], dtype=np.float32)
+    assert feats.shape == (FEATURE_DIM,), f"feature dim drift: {feats.shape}"
+    return feats
+
+
+# ── Cost approximator loading (Phase 3) ────────────────────────────────────
+
+def _load_cost_approximator(ckpt_path: Path):
+    """Returns (model, feat_mean, feat_std, target_mean, target_std) or None."""
+    if not ckpt_path.exists():
+        return None
+    try:
+        from lkh_model import CostApproximator
+    except ImportError:
+        return None
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    model = CostApproximator(
+        in_dim=ckpt.get("feature_dim", FEATURE_DIM),
+        hidden=ckpt.get("hidden", 64),
+    )
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    return {
+        "model": model,
+        "feat_mean": ckpt["feat_mean"].numpy(),
+        "feat_std": ckpt["feat_std"].numpy(),
+        "target_mean": float(ckpt["target_mean"]),
+        "target_std": float(ckpt["target_std"]),
+        "pearson_r_val": ckpt.get("pearson_r_val"),
+        "trained_on": ckpt.get("trained_on"),
+    }
+
+
+# ── LK chain (greedy, optionally approximator-guided) ──────────────────────
 
 class LKChain:
-    """Cascading move chain: pick seed; move to best HPWL candidate; follow
-    first displaced macro; cap at max_length; commit only if HPWL improves
-    and the final state has no overlaps."""
+    """Cascading move chain: pick seed; move to best candidate (by trained
+    approximator if available, else HPWL+overlap surrogate); follow first
+    displaced macro; cap at max_length; commit only on lex (overlap_pairs,
+    hpwl) improvement vs the chain's start state."""
 
-    def __init__(self, state: PlacementState, seed_macro: int, rng: random.Random):
+    def __init__(self, state: PlacementState, seed_macro: int,
+                 rng: random.Random, approximator: dict | None = None):
         self.state = state
         self.rng = rng
         self.seed = seed_macro
+        self.approx = approximator
 
     def run_greedy(self, max_length: int = 8) -> dict:
         st = self.state
@@ -227,23 +334,51 @@ class LKChain:
             if not cands:
                 break
 
-            # Score each candidate by HPWL surrogate + overlap penalty.
-            # The overlap penalty is keyed off the same units as HPWL so we
-            # don't need to retune across benchmarks.
+            # Score each candidate. With a trained approximator: predicted
+            # Δproxy_cost (lower is better). Without: HPWL surrogate + per-
+            # candidate overlap penalty (the pre-Phase-3 fallback).
             best_pos = None
             best_score = float("inf")
-            saved = st.pos[current].copy()
             hpwl_scale = max(st.cw, st.ch)
-            for (cx, cy) in cands:
-                st.pos[current, 0] = cx
-                st.pos[current, 1] = cy
-                # New overlaps introduced by THIS macro at the candidate spot:
-                new_overlaps = len(st.overlapping_with(current))
-                score = st.hpwl() + new_overlaps * hpwl_scale
-                if score < best_score:
-                    best_score = score
-                    best_pos = (cx, cy)
-            st.pos[current] = saved
+            old_x = float(st.pos[current, 0])
+            old_y = float(st.pos[current, 1])
+
+            if self.approx is not None:
+                feats = np.stack([
+                    _features_for_move(
+                        st, current,
+                        np.array([cx - old_x, cy - old_y], dtype=np.float64),
+                    )
+                    for (cx, cy) in cands
+                ])
+                norm = (feats - self.approx["feat_mean"]) / self.approx["feat_std"]
+                with torch.no_grad():
+                    pred = self.approx["model"](torch.tensor(norm, dtype=torch.float32))
+                pred_delta = pred.numpy() * self.approx["target_std"] + self.approx["target_mean"]
+
+                # Safety floor: candidates that would introduce extra hard-
+                # macro overlaps get penalized in the same units as proxy cost.
+                for k, (cx, cy) in enumerate(cands):
+                    st.pos[current, 0] = cx
+                    st.pos[current, 1] = cy
+                    new_ov = len(st.overlapping_with(current))
+                    st.pos[current, 0] = old_x
+                    st.pos[current, 1] = old_y
+                    score = float(pred_delta[k]) + 0.5 * new_ov
+                    if score < best_score:
+                        best_score = score
+                        best_pos = (cx, cy)
+            else:
+                saved = st.pos[current].copy()
+                for (cx, cy) in cands:
+                    st.pos[current, 0] = cx
+                    st.pos[current, 1] = cy
+                    new_ov = len(st.overlapping_with(current))
+                    score = st.hpwl() + new_ov * hpwl_scale
+                    if score < best_score:
+                        best_score = score
+                        best_pos = (cx, cy)
+                st.pos[current] = saved
 
             if best_pos is None:
                 break
@@ -288,11 +423,23 @@ class LKHPlacer:
     """Run many random-seed greedy LK chains under a wall-clock budget."""
 
     def __init__(self, seed: int = 42, time_budget_s: float = 60.0,
-                 max_chains: int = 5000, max_chain_length: int = 8):
+                 max_chains: int = 5000, max_chain_length: int = 8,
+                 checkpoint_path: str | None = None):
         self.seed = seed
         self.time_budget_s = time_budget_s
         self.max_chains = max_chains
         self.max_chain_length = max_chain_length
+        ckpt = Path(checkpoint_path) if checkpoint_path else (
+            _HERE / "checkpoints" / "cost_approximator.pt"
+        )
+        self.approximator = _load_cost_approximator(ckpt)
+        if self.approximator is not None:
+            r = self.approximator.get("pearson_r_val")
+            trained_on = self.approximator.get("trained_on")
+            print(f"[LKHPlacer] cost approximator loaded "
+                  f"(r={r:.3f}, trained on {trained_on})")
+        else:
+            print(f"[LKHPlacer] no approximator at {ckpt} — using HPWL surrogate")
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
         rng = random.Random(self.seed)
@@ -317,7 +464,8 @@ class LKHPlacer:
 
         while chains < self.max_chains and (time.time() - start) < self.time_budget_s:
             seed_macro = rng.choices(movable_idx, weights=seed_weights, k=1)[0]
-            result = LKChain(state, seed_macro, rng).run_greedy(self.max_chain_length)
+            result = LKChain(state, seed_macro, rng,
+                              approximator=self.approximator).run_greedy(self.max_chain_length)
             chains += 1
             if result["committed"]:
                 # Track best on the same lex criterion the chain commit gate uses.
