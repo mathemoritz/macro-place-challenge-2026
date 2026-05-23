@@ -192,7 +192,8 @@ def run_smoke() -> None:
 
 
 @app.function(image=image, volumes={"/output": volume},
-              cpu=8.0, memory=8192, timeout=6 * 3600)
+              cpu=8.0, memory=8192, timeout=6 * 3600,
+              nonpreemptible=True)
 def run_train(benchmark: str, num_examples: int, epochs: int, seed: int,
               force_recollect: bool) -> None:
     cmd = ["python", "submissions/lkh/train.py",
@@ -207,7 +208,8 @@ def run_train(benchmark: str, num_examples: int, epochs: int, seed: int,
 
 
 @app.function(image=image, volumes={"/output": volume},
-              cpu=8.0, memory=8192, timeout=12 * 3600)
+              cpu=8.0, memory=8192, timeout=12 * 3600,
+              nonpreemptible=True)
 def run_policy(benchmark: str, iterations: int, trajectories_per_iter: int,
                seed: int, initial_policy: str) -> None:
     cmd = ["python", "submissions/lkh/train_policy.py",
@@ -222,7 +224,8 @@ def run_policy(benchmark: str, iterations: int, trajectories_per_iter: int,
 
 
 @app.function(image=image, volumes={"/output": volume},
-              cpu=8.0, memory=16384, timeout=24 * 3600)
+              cpu=8.0, memory=16384, timeout=24 * 3600,
+              nonpreemptible=True)
 def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
              policy_iterations: int, trajectories_per_iter: int,
              eval_time_budget: float, seed: int, force_recollect: bool) -> None:
@@ -238,12 +241,22 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
     benchmarks = _train.parse_benchmarks(benchmark)
     output_root = Path("/output/iter")
     output_root.mkdir(parents=True, exist_ok=True)
+    per_benchmark_cache_dir = output_root / "per_bench"
+    per_benchmark_cache_dir.mkdir(parents=True, exist_ok=True)
     data_path = Path("/root/repo/submissions/lkh/data/chain_data.pt")
     cost_ckpt = Path("/root/repo/submissions/lkh/checkpoints/cost_approximator.pt")
     policy_ckpt = Path("/root/repo/submissions/lkh/checkpoints/chain_policy.pt")
 
     print(f"=== Phase 5 on Modal ===")
     print(f"  benchmarks={benchmarks}  rounds={rounds}  output={output_root}")
+    print(f"  per-benchmark cache: {per_benchmark_cache_dir}")
+
+    # After each benchmark's data is collected, commit the volume so the
+    # per-benchmark cache file is durable even if the worker is preempted
+    # mid-round.
+    def _commit_after_benchmark(name: str) -> None:
+        volume.commit()
+        print(f"[Modal] benchmark {name} cached + committed.", flush=True)
 
     history: list[dict] = []
     for r in range(rounds):
@@ -261,6 +274,8 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
             force_recollect=force_recollect,
             eval_time_budget_s=eval_time_budget,
             output_root=output_root,
+            per_benchmark_cache_dir=per_benchmark_cache_dir,
+            post_benchmark_callback=_commit_after_benchmark,
         )
         history.append(record)
         # Stream aggregated history + canonical-path snapshot, then commit so
@@ -298,14 +313,19 @@ def smoke() -> None:
 # ---------------------------------------------------------------------------
 
 def _print_spawn_handle(call, label: str) -> None:
-    """Print the FunctionCall ID + the commands to monitor / cancel."""
+    """Print the FunctionCall ID + the commands to monitor / cancel.
+
+    NOTE: Modal 1.x has no ``modal call`` CLI subcommand — function calls are
+    only accessible programmatically via the Python SDK. App-level commands
+    are the practical way to watch / stop a single-call app like ours.
+    """
     fid = getattr(call, "object_id", None) or str(call)
     print(f"\nSpawned {label} on Modal.")
-    print(f"  function_call_id: {fid}")
-    print(f"  monitor:  modal call logs {fid}")
-    print(f"  result:   modal call get {fid}")
-    print(f"  stop:     modal app stop lkh-macro-place")
-    print(f"  dashboard: https://modal.com/apps")
+    print(f"  function_call_id: {fid}      (handle, mostly informational)")
+    print(f"  see status:  modal app list | grep lkh-macro-place")
+    print(f"  stream logs: modal app logs lkh-macro-place")
+    print(f"  stop:        modal app stop lkh-macro-place")
+    print(f"  dashboard:   https://modal.com/apps")
 
 
 @app.local_entrypoint()

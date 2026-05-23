@@ -24,6 +24,7 @@ import importlib.util
 import sys
 import time
 from pathlib import Path
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -43,6 +44,37 @@ from lkh_model import CostApproximator, FEATURE_DIM
 
 from macro_place.loader import load_benchmark_from_dir
 from macro_place.objective import compute_proxy_cost
+
+
+# ── Log formatting helpers ─────────────────────────────────────────────────
+#
+# ``compute_proxy_cost`` ranges from sub-second on ibm01 to ~100 s per call on
+# ibm17, so a single ``{rate:.1f}/s`` format string is unreadable in the slow
+# regime (everything < 0.05 ex/s prints as ``0.0/s``). These helpers show the
+# more useful inverse (s/ex) when the rate is small, and convert wall-time
+# fields to ``Xh YYm`` / ``MMmSSs`` instead of raw seconds.
+
+def _fmt_time(seconds: float) -> str:
+    """Format wall time in human-friendly units."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        m = int(seconds // 60)
+        s = int(seconds % 60)
+        return f"{m}m{s:02d}s"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    return f"{h}h{m:02d}m"
+
+
+def _fmt_rate(examples: float, seconds: float) -> str:
+    """Show ex/s when fast, s/ex when slow. Avoids the ``0.0/s`` regime."""
+    if seconds <= 0 or examples <= 0:
+        return "—"
+    rate = examples / seconds
+    if rate >= 0.5:
+        return f"{rate:.2f}ex/s"
+    return f"{seconds / examples:.1f}s/ex"
 
 
 # ── Benchmark list parsing ─────────────────────────────────────────────────
@@ -153,28 +185,81 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
 
 
 def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
-                  seed: int, drift_prob: float = 0.3
+                  seed: int, drift_prob: float = 0.3,
+                  per_benchmark_cache_dir: Optional[Path] = None,
+                  post_benchmark_callback: Optional[Callable[[str], None]] = None,
                   ) -> tuple[np.ndarray, np.ndarray]:
     """Multi-benchmark wrapper. Concatenates per-benchmark arrays.
 
     Each benchmark contributes ``num_examples_per_benchmark`` samples; the
     seed is offset per benchmark so different benchmarks don't share the
     same RNG trajectory. Total dataset size = N × len(benchmark_names).
+
+    Preemption safety: if ``per_benchmark_cache_dir`` is set, each
+    benchmark's data is saved to ``<dir>/<name>.pt`` immediately after
+    collection. On a subsequent invocation (e.g. after Modal worker
+    preemption), benchmarks whose cache file already exists are loaded
+    from disk instead of re-collected. ``post_benchmark_callback(name)``
+    fires after each benchmark; Modal callers use it to ``volume.commit()``
+    so the cache file is durable.
     """
     if not benchmark_names:
         raise ValueError("collect_data: benchmark_names is empty")
 
+    cache_dir: Optional[Path] = (
+        Path(per_benchmark_cache_dir) if per_benchmark_cache_dir else None
+    )
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
     all_feats: list[np.ndarray] = []
     all_targets: list[np.ndarray] = []
     for b_idx, name in enumerate(benchmark_names):
-        print(f"\n  [{b_idx + 1}/{len(benchmark_names)}] benchmark = {name}")
-        feats, targets = _collect_one_benchmark(
-            name, num_examples_per_benchmark,
-            seed=seed + b_idx * 7919,   # arbitrary stride so offsets don't collide
-            drift_prob=drift_prob,
-        )
+        cache_file: Optional[Path] = (cache_dir / f"{name}.pt") if cache_dir else None
+        loaded_from_cache = False
+
+        if cache_file is not None and cache_file.exists():
+            try:
+                d = torch.load(str(cache_file), weights_only=False)
+                feats = d["features"]
+                targets = d["targets"]
+                print(f"\n  [{b_idx + 1}/{len(benchmark_names)}] cached: {name}  "
+                      f"({len(feats)} examples from {cache_file})")
+                loaded_from_cache = True
+            except Exception as exc:                              # noqa: BLE001
+                # Corrupted cache (e.g. interrupted write). Fall back to fresh collect.
+                print(f"  [{b_idx + 1}/{len(benchmark_names)}] cache load failed "
+                      f"({exc}); re-collecting {name}")
+
+        if not loaded_from_cache:
+            print(f"\n  [{b_idx + 1}/{len(benchmark_names)}] benchmark = {name}")
+            feats, targets = _collect_one_benchmark(
+                name, num_examples_per_benchmark,
+                seed=seed + b_idx * 7919,   # arbitrary stride so offsets don't collide
+                drift_prob=drift_prob,
+            )
+            if cache_file is not None:
+                # Atomic-ish: write to .tmp then rename, so a preemption
+                # during torch.save won't leave a half-written cache file
+                # that the next run would treat as valid.
+                tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
+                torch.save(
+                    {"features": feats, "targets": targets,
+                     "num_examples": num_examples_per_benchmark, "name": name},
+                    str(tmp),
+                )
+                tmp.replace(cache_file)
+                print(f"    cached -> {cache_file}")
+
         all_feats.append(feats)
         all_targets.append(targets)
+
+        if post_benchmark_callback is not None:
+            try:
+                post_benchmark_callback(name)
+            except Exception as exc:                              # noqa: BLE001
+                print(f"    post_benchmark_callback error for {name}: {exc}")
+
     return np.concatenate(all_feats, axis=0), np.concatenate(all_targets, axis=0)
 
 
