@@ -54,6 +54,20 @@ import train as _train          # Phase 3 trainer
 import train_policy as _trainp  # Phase 4 trainer
 from lkh_model import FEATURE_DIM
 
+# Local / non-Modal mirror of ``modal_run.LONG_RUN_12H`` (~12 h on 17 benchmarks).
+PRESETS: dict[str, dict[str, int | float]] = {
+    "long12h": {
+        "rounds": 5,
+        "examples": 240,
+        "cost_epochs": 100,
+        "policy_iterations": 3500,
+        "trajectories_per_iter": 16,
+        "eval_time_budget": 60.0,
+        "calibration_samples_per_bench": 75,
+        "calibration_time_budget": 15.0,
+    },
+}
+
 
 def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchmark: int,
               cost_epochs: int, policy_iterations: int,
@@ -295,6 +309,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--benchmark", default="ibm01",
                    help="Single name, comma-separated list, or 'all' for the 17 IBM benchmarks.")
+    p.add_argument("--preset", choices=sorted(PRESETS), default=None,
+                   help="Apply a hyperparameter bundle (overrides other training "
+                        "flags except --benchmark and paths). Use 'long12h' for "
+                        "~12 h Modal run; prefer modal_run.py::iter_12h on cloud.")
     p.add_argument("--rounds", type=int, default=2)
     p.add_argument("--examples", type=int, default=400,
                    help="Per-benchmark example count (Phase 3 data collection).")
@@ -343,6 +361,11 @@ def main():
                    help="C.3: seconds per-benchmark for the calibration "
                         "placer pass (default 10).")
     args = p.parse_args()
+
+    if args.preset is not None:
+        for key, val in PRESETS[args.preset].items():
+            setattr(args, key, val)
+        print(f"  preset={args.preset!r} applied")
 
     benchmarks = _train.parse_benchmarks(args.benchmark)
     output_root = Path(args.output_root) if args.output_root else None
