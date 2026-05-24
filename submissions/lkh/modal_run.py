@@ -462,6 +462,11 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
           f"{calibration_time_budget_s}s")
     print(f"  per-benchmark cache: {per_benchmark_cache_dir}")
 
+    # Parallel ``.starmap()`` above is the only collection pass on Modal.
+    # Do NOT pass ``force_recollect`` into ``run_round``: that flag makes
+    # ``load_per_benchmark_caches(..., force_recollect=True)`` ignore existing
+    # ``per_bench/*.pt`` and re-run ``compute_proxy_cost`` sequentially for
+    # every benchmark (~2× wall time, no better labels).
     history: list[dict] = []
     for r in range(rounds):
         record = _ti.run_round(
@@ -475,7 +480,7 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
             data_path=data_path,
             cost_ckpt=cost_ckpt,
             policy_ckpt=policy_ckpt,
-            force_recollect=force_recollect,
+            force_recollect=False,
             eval_time_budget_s=eval_time_budget,
             output_root=output_root,
             per_benchmark_cache_dir=per_benchmark_cache_dir,
