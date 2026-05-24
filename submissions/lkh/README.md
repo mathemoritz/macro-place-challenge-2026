@@ -219,8 +219,9 @@ uv run modal run --detach submissions/lkh/modal_run.py::iter_12h --force-recolle
 | calibration / bench | 50 @ 10 s | **75 @ 15 s** |
 
 **`--force-recollect`:** archives the current `iter/` tree to
-`iter/archives/<UTC-timestamp>/` on the volume (old `per_bench/`, rounds,
-`history.json`, checkpoints), then clears and rebuilds at 240 examples/bench.
+`iter/archives/<UTC-timestamp>/` on the volume, clears working files, then runs
+**parallel** `.starmap()` collection only. Iterative rounds **load** those caches
+(they do not re-collect sequentially on Modal).
 Use this when upgrading from a shorter run (e.g. 75-example caches).
 
 Omit `--force-recollect` only when `per_bench/*.pt` already matches the
