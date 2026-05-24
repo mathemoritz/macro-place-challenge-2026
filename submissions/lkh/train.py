@@ -105,18 +105,28 @@ def parse_benchmarks(arg: str) -> list[str]:
 # ── Data collection ────────────────────────────────────────────────────────
 
 def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
-                            drift_prob: float = 0.3
+                            drift_prob: float = 0.3,
+                            p_cascade: float = 0.5,
+                            cascade_min: int = 2,
+                            cascade_max: int = 4,
                             ) -> tuple[np.ndarray, np.ndarray]:
     """Single-benchmark state-drift sampler. Returns (features [N, F], targets [N]).
 
     The plc object is released when this function returns so the next
     benchmark in a multi-benchmark sweep doesn't accumulate memory.
+
+    C.2 (LKH critique fix): with probability ``p_cascade`` (default 0.5),
+    run a ``[cascade_min, cascade_max]``-step greedy mini-cascade before
+    sampling so the (features, Δproxy) pair sees a cascade-interior state
+    rather than always a near-initial one. This shifts the training
+    distribution toward what the approximator faces at chain inference time
+    and is a prerequisite for unifying the cost signal in Milestone E.
     """
     bench_dir = Path("external/MacroPlacement/Testcases/ICCAD04") / benchmark_name
     benchmark, plc = load_benchmark_from_dir(str(bench_dir))
 
-    edges, edge_weights = _placer._hard_macro_edges(benchmark)
-    state = _placer.PlacementState(benchmark, edges, edge_weights)
+    hpwl_edges = _placer._hard_macro_edges(benchmark)
+    state = _placer.PlacementState(benchmark, hpwl_edges)
     rng = np.random.RandomState(seed)
     py_rng_seed = int(rng.randint(0, 2**31 - 1))
 
@@ -138,37 +148,86 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
     import random as _random
     py_rng = _random.Random(py_rng_seed)
 
+    movable_list = movable.tolist()
+
+    def _do_preliminary_cascade(num_steps: int) -> list[tuple[int, float, float]]:
+        """C.2: greedy mini-cascade. Each step picks a random movable macro,
+        applies the lowest-HPWL of 4 candidates. Returns the undo list."""
+        saved: list[tuple[int, float, float]] = []
+        for _ in range(num_steps):
+            i = int(py_rng.choice(movable_list))
+            cands_cas = state.candidate_positions(i, num_candidates=4, rng=py_rng)
+            if not cands_cas:
+                continue
+            best_cx, best_cy = None, None
+            best_h = float("inf")
+            for cx, cy in cands_cas:
+                ox = float(state.pos[i, 0]); oy = float(state.pos[i, 1])
+                state.apply_move(i, cx, cy)
+                h = state.hpwl()
+                state.apply_move(i, ox, oy)
+                if h < best_h:
+                    best_h = h
+                    best_cx, best_cy = cx, cy
+            if best_cx is None:
+                continue
+            ox = float(state.pos[i, 0]); oy = float(state.pos[i, 1])
+            state.apply_move(i, best_cx, best_cy)
+            saved.append((i, ox, oy))
+        return saved
+
     t_collect = time.time()
     last_log = t_collect
+    n_cascade_samples = 0
     while len(feats_list) < num_examples:
+        # C.2: optionally pre-roll a 2-4 step cascade so this sampling round
+        # operates on a cascade-interior state. Reverted at end so the drift
+        # mechanic stays on the un-drifted base state.
+        cascade_saved: list[tuple[int, float, float]] = []
+        local_base = base_cost
+        if py_rng.random() < p_cascade:
+            n_steps = py_rng.randint(cascade_min, cascade_max)
+            cascade_saved = _do_preliminary_cascade(n_steps)
+            if cascade_saved:
+                local_base = exact_cost()
+                n_cascade_samples += 1
+
         macro_idx = int(rng.choice(movable))
         cands = state.candidate_positions(macro_idx, num_candidates=8, rng=py_rng)
         cand_costs: list[tuple[tuple[float, float], float]] = []
         for cx, cy in cands:
-            old = state.pos[macro_idx].copy()
-            delta = np.array([cx - old[0], cy - old[1]], dtype=np.float64)
+            old_x = float(state.pos[macro_idx, 0])
+            old_y = float(state.pos[macro_idx, 1])
+            delta = np.array([cx - old_x, cy - old_y], dtype=np.float64)
 
             feats = _placer._features_for_move(state, macro_idx, delta)
 
-            state.pos[macro_idx, 0] = cx
-            state.pos[macro_idx, 1] = cy
+            # B.3: incremental apply + revert; the caches stay coherent
+            # so subsequent _features_for_move calls read O(1) HPWL/area.
+            state.apply_move(macro_idx, cx, cy)
             new_cost = exact_cost()
-            state.pos[macro_idx] = old
+            state.apply_move(macro_idx, old_x, old_y)
 
             feats_list.append(feats)
-            targets_list.append(new_cost - base_cost)
+            targets_list.append(new_cost - local_base)
             cand_costs.append(((cx, cy), new_cost))
 
             if len(feats_list) >= num_examples:
                 break
 
-        # Maybe drift: commit the best candidate as the new base if it doesn't
-        # increase overlap pairs catastrophically.
+        # Revert the preliminary cascade so the drift mechanic and the next
+        # iteration's base_cost stay on the un-drifted state.
+        for (i, ox, oy) in reversed(cascade_saved):
+            state.apply_move(i, ox, oy)
+
+        # Maybe drift: commit the best candidate as the new base. After C.2
+        # the candidate's ``new_cost`` may have been measured in the cascade
+        # interior, so when a cascade ran we recompute the post-commit base
+        # explicitly rather than reuse the cascade-interior reading.
         if cand_costs and py_rng.random() < drift_prob:
             (cx, cy), new_cost = min(cand_costs, key=lambda t: t[1])
-            state.pos[macro_idx, 0] = cx
-            state.pos[macro_idx, 1] = cy
-            base_cost = new_cost
+            state.apply_move(macro_idx, cx, cy)
+            base_cost = exact_cost() if cascade_saved else new_cost
 
         if time.time() - last_log > 5.0:
             elapsed = time.time() - t_collect
@@ -184,7 +243,83 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
 
     elapsed = time.time() - t_collect
     print(f"  done in {_fmt_time(elapsed)} "
-          f"({_fmt_rate(len(feats_list), elapsed)})")
+          f"({_fmt_rate(len(feats_list), elapsed)})  "
+          f"cascade-interior rounds: {n_cascade_samples}")
+    return np.stack(feats_list), np.array(targets_list, dtype=np.float32)
+
+
+def collect_calibration_samples(benchmark_name: str, n_samples: int,
+                                 time_budget_s: float,
+                                 approximator_ckpt_path: str | None,
+                                 policy_ckpt_path: str | None,
+                                 seed: int) -> tuple[np.ndarray, np.ndarray]:
+    """C.3 (LKH critique fix): collect (features, true_Δproxy) pairs from
+    states the placer actually visits at inference time. Pre-fix the
+    approximator was trained only on near-initial-placement single moves;
+    by the time the placer commits a few chains the state distribution
+    drifts away from the training distribution, and the approximator's
+    Δproxy predictions silently diverge from the true Δproxy.
+
+    Run the current placer for ``time_budget_s`` to drive the state into
+    the inference-time distribution, then sample ``n_samples`` single-move
+    examples from the post-placement state with exact ``compute_proxy_cost``
+    targets. Caller appends these to the next round's training set so the
+    next-round approximator learns to predict Δproxy at the residual states.
+    """
+    bench_dir = Path("external/MacroPlacement/Testcases/ICCAD04") / benchmark_name
+    benchmark, plc = load_benchmark_from_dir(str(bench_dir))
+
+    placer = _placer.LKHPlacer(
+        seed=seed, time_budget_s=time_budget_s,
+        checkpoint_path=approximator_ckpt_path,
+        policy_path=policy_ckpt_path,
+        use_policy=policy_ckpt_path is not None,
+    )
+    placement = placer.place(benchmark)
+
+    # Re-instantiate the state at the post-placement positions and use that
+    # as the sampling base. The placer's internal state is gone after
+    # place() returns; we rebuild fresh.
+    hpwl_edges = _placer._hard_macro_edges(benchmark)
+    state = _placer.PlacementState(benchmark, hpwl_edges)
+    n_hard = state.n
+    state.pos[:] = placement[:n_hard].numpy().astype(state.pos.dtype)
+    state.rebuild_caches()
+
+    movable = np.where(state.movable)[0]
+    if len(movable) == 0:
+        return np.zeros((0, FEATURE_DIM), dtype=np.float32), \
+               np.zeros(0, dtype=np.float32)
+
+    rng = np.random.RandomState(seed + 7919)
+    import random as _random
+    py_rng = _random.Random(int(rng.randint(0, 2**31 - 1)))
+
+    full_placement = benchmark.macro_positions.clone()
+    def exact_cost() -> float:
+        full_placement[:n_hard] = torch.tensor(state.pos, dtype=torch.float32)
+        return float(compute_proxy_cost(full_placement, benchmark, plc)["proxy_cost"])
+
+    base_cost = exact_cost()
+    feats_list: list[np.ndarray] = []
+    targets_list: list[float] = []
+    while len(feats_list) < n_samples:
+        macro_idx = int(rng.choice(movable))
+        cands = state.candidate_positions(macro_idx, num_candidates=4, rng=py_rng)
+        if not cands:
+            continue
+        for cx, cy in cands:
+            old_x = float(state.pos[macro_idx, 0])
+            old_y = float(state.pos[macro_idx, 1])
+            delta = np.array([cx - old_x, cy - old_y], dtype=np.float64)
+            feats = _placer._features_for_move(state, macro_idx, delta)
+            state.apply_move(macro_idx, cx, cy)
+            new_cost = exact_cost()
+            state.apply_move(macro_idx, old_x, old_y)
+            feats_list.append(feats)
+            targets_list.append(new_cost - base_cost)
+            if len(feats_list) >= n_samples:
+                break
     return np.stack(feats_list), np.array(targets_list, dtype=np.float32)
 
 
@@ -225,12 +360,19 @@ def load_per_benchmark_caches(
     seed: int = 42,
     drift_prob: float = 0.3,
     post_benchmark_callback: Optional[Callable[[str], None]] = None,
+    force_recollect: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Load and concatenate per-benchmark ``<name>.pt`` caches.
 
   Used after parallel Modal collection (or any time all caches exist).
   Set ``collect_missing=True`` only for local runs that may lack a few
   cache files; never re-collects benchmarks whose cache already exists.
+
+  D.2 (LKH critique fix): set ``force_recollect=True`` to bypass existing
+  per-benchmark caches and re-collect each one. Pre-fix the Phase 5
+  iterative loop had ``--force-recollect-each-round`` only invalidating
+  the *aggregated* cache; per-benchmark caches were still loaded as-is,
+  silently bypassing the user's explicit "re-collect" request.
     """
     if not benchmark_names:
         raise ValueError("load_per_benchmark_caches: benchmark_names is empty")
@@ -244,7 +386,7 @@ def load_per_benchmark_caches(
         feats: np.ndarray
         targets: np.ndarray
 
-        if cache_file.exists():
+        if cache_file.exists() and not force_recollect:
             try:
                 d = torch.load(str(cache_file), weights_only=False)
                 feats = d["features"]
@@ -267,12 +409,14 @@ def load_per_benchmark_caches(
                     num_examples=num_examples_per_benchmark or len(feats),
                     name=name,
                 )
-        elif collect_missing:
+        elif collect_missing or force_recollect:
             if num_examples_per_benchmark is None:
                 raise ValueError(
-                    "num_examples_per_benchmark required when collect_missing=True"
+                    "num_examples_per_benchmark required when collect_missing or "
+                    "force_recollect is True"
                 )
-            print(f"  [{b_idx + 1}/{len(benchmark_names)}] missing cache; "
+            reason = "force_recollect=True" if force_recollect else "missing cache"
+            print(f"  [{b_idx + 1}/{len(benchmark_names)}] {reason}; "
                   f"collecting {name}")
             feats, targets = _collect_one_benchmark(
                 name, num_examples_per_benchmark,

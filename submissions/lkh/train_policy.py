@@ -62,8 +62,8 @@ def _load_benchmark_cache(benchmark_names: list[str]) -> dict[str, dict]:
         bench_dir = Path("external/MacroPlacement/Testcases/ICCAD04") / name
         benchmark, _plc = load_benchmark_from_dir(str(bench_dir))
         del _plc
-        edges, edge_weights = _placer._hard_macro_edges(benchmark)
-        state = _placer.PlacementState(benchmark, edges, edge_weights)
+        hpwl_edges = _placer._hard_macro_edges(benchmark)
+        state = _placer.PlacementState(benchmark, hpwl_edges)
         cache[name] = {
             "state": state,
             "init_pos": state.pos.copy(),
@@ -185,7 +185,8 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                         clip: float, ent_coef: float, vf_coef: float,
                         ppo_epochs: int, output_ckpt: Path,
                         initial_policy_ckpt: Path | None = None,
-                        log_every: int = 5) -> dict:
+                        log_every: int = 5,
+                        terminal_reward_mode: str = "committed_gain") -> dict:
     """PPO training across one or more benchmarks. Each trajectory samples
     a random benchmark from ``benchmarks`` (plan §4.3 semantics)."""
     import random as _random
@@ -225,13 +226,16 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         for _ in range(trajectories_per_iter):
             name = rng.choice(benchmarks)
             bc = bench_cache[name]
+            # B.3: per-rollout reset bypasses apply_move; rebuild caches.
             bc["state"].pos[:] = bc["init_pos"]
+            bc["state"].rebuild_caches()
             seed_macro = rng.choice(bc["movable"])
             env = ChainEnv(
                 bc["state"], seed_macro, rng=rng,
                 max_chain_length=max_chain_length,
                 max_candidates=max_candidates,
                 terminal_commit_bonus=terminal_commit_bonus,
+                terminal_reward_mode=terminal_reward_mode,
             )
             traj = collect_rollout(env, policy)
             per_bench_traj_count[name] += 1
@@ -239,17 +243,19 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                 continue
             traj = compute_gae(traj, gamma=gamma, lam=lam)
             all_transitions.extend(traj)
-            # env._finalize ran (env.done is True); inspect the resulting state.
+            # env._finalize ran (env.done is True); read its best-prefix
+            # outcome directly so the commit accounting matches the same
+            # lex (overlap_pairs, overlap_area, third) gate the env
+            # enforced. start_hpwl - state.hpwl() works for both gate
+            # modes because state.pos has been restored to the committed
+            # prefix; under predicted_proxy gate, best_key[2] would be
+            # cumulative predicted Δproxy, not HPWL, so subtracting it
+            # would give nonsense.
             length_total += env.chain_length
-            end_hpwl = env.state.hpwl()
-            end_overlaps = env.state.overlap_pairs()
-            committed = (
-                end_overlaps < env.start_overlaps
-                or (end_overlaps == env.start_overlaps and end_hpwl < env.start_hpwl)
-            )
+            committed = env.best_prefix_index > 0
             if committed:
                 commit_count += 1
-                gain_total += env.start_hpwl - end_hpwl
+                gain_total += env.start_hpwl - env.state.hpwl()
                 per_bench_commit_count[name] += 1
 
         metrics = ppo_update(policy, optimizer, all_transitions,
@@ -313,6 +319,12 @@ def main():
     p.add_argument("--max-chain-length", type=int, default=8)
     p.add_argument("--max-candidates", type=int, default=8)
     p.add_argument("--terminal-commit-bonus", type=float, default=0.0)
+    p.add_argument("--terminal-reward-mode",
+                   choices=["committed_gain", "hpwl_telescope_legacy"],
+                   default="committed_gain",
+                   help="D.1: 'committed_gain' = per-step 0 reward + terminal "
+                        "= best-prefix gain (recommended). 'hpwl_telescope_legacy' "
+                        "= per-step -Δhpwl + terminal commit bonus (pre-fix shape).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--gamma", type=float, default=0.99)
@@ -337,6 +349,7 @@ def main():
         max_chain_length=args.max_chain_length,
         max_candidates=args.max_candidates,
         terminal_commit_bonus=args.terminal_commit_bonus,
+        terminal_reward_mode=args.terminal_reward_mode,
         seed=args.seed, lr=args.lr, gamma=args.gamma, lam=args.lam,
         clip=args.clip, ent_coef=args.ent_coef, vf_coef=args.vf_coef,
         ppo_epochs=args.ppo_epochs,
