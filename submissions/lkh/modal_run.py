@@ -414,9 +414,9 @@ def _print_spawn_handle(call, label: str) -> None:
     fid = getattr(call, "object_id", None) or str(call)
     print(f"\nSpawned {label} on Modal.")
     print(f"  function_call_id: {fid}      (handle, mostly informational)")
-    print(f"  see status:  modal app list | grep lkh-macro-place")
-    print(f"  stream logs: modal app logs lkh-macro-place")
-    print(f"  stop:        modal app stop lkh-macro-place")
+    print(f"  see status:  modal app list")
+    print(f"  stream logs: modal app logs <APP_ID> -f   # ID from app list (e.g. ap-...)")
+    print(f"  stop:        modal app stop <APP_ID>")
     print(f"  dashboard:   https://modal.com/apps")
 
 

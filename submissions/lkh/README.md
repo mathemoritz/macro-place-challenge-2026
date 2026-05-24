@@ -9,6 +9,10 @@ non-learned Lin-Kernighan chain refinement with two learned models. Based on
 `background/mvp_implementation_plan_lkh.md`. All training infrastructure runs
 either locally or on Modal cloud.
 
+> **Two docs.** This `README.md` is the **operational guide** — commands,
+> tuning, troubleshooting. For the **architecture walkthrough** — what each
+> component does and why — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
 ## TL;DR — the 3 commands main commands:
 
 **1. Start a training run on Modal** (one-time `uv add modal && uv run modal setup` first):
@@ -25,7 +29,8 @@ You can close your laptop. Modal will email you when it finishes.
 **2. Watch progress** (from any terminal, anytime):
 
 ```bash
-modal app logs lkh-macro-place               # live log stream
+modal app list                               # copy the ap-... ID for your run
+modal app logs ap-XXXXXXXX -f                # live log stream (use ID, not app name)
 modal volume ls lkh-results /iter/per_bench  # which benchmarks finished collecting
 modal volume ls lkh-results /iter            # which rounds finished
 ```
@@ -58,7 +63,7 @@ PlacementState                                               Legalization
 (numpy arrays)                                               (outward spiral)
    |                                                              ^
    v                                                              |
-LK Chain ----score candidates-----> +-- ChainPolicy (PPO)          |
+LK Chain ----score candidates-----> +-- ChainPolicy (PPO)         |
 (cascading                          |   if checkpoint loaded      |
  macro moves)                       +-- CostApproximator (MLP)    |
    |                                |   if checkpoint loaded      |
@@ -230,12 +235,12 @@ Cost: `nonpreemptible=True` is set on long-running functions and bills at
 In another terminal (your laptop can sleep — the job won't die):
 
 ```bash
-# Confirm it's actually running
-modal app list | grep lkh-macro-place
-# Should show 'running' status
+# Confirm it's actually running (note the ap-... App ID column)
+modal app list
 
 # Live log stream (Ctrl-C just detaches the viewer, doesn't stop the run)
-modal app logs lkh-macro-place
+# Detached runs are looked up by App ID, not by name — copy ap-... from app list
+modal app logs ap-XXXXXXXX -f
 
 # Which benchmarks have finished data collection
 modal volume ls lkh-results /iter/per_bench
