@@ -227,6 +227,17 @@ Use this when upgrading from a shorter run (e.g. 75-example caches).
 Omit `--force-recollect` only when `per_bench/*.pt` already matches the
 target example count (saves ~7 h; rounds-only ~4–5 h).
 
+### Parallel medium run (<= 4 h, while `iter_12h` is running)
+
+Separate volume subtree — does **not** overwrite `/iter/checkpoints`:
+
+```bash
+uv run modal run --detach submissions/lkh/modal_run.py::iter_medium
+```
+
+Requires existing `lkh-results/iter/per_bench/*.pt` (240 examples). Writes to
+`lkh-results/iter_medium/`. Modal hard timeout = 4 h.
+
 Both `--detach` and `.spawn()` are needed:
 - `.spawn()` (in modal\_run.py) makes the call async — survives local terminal disconnect.
 - `--detach` keeps the App alive after `modal run` exits.
