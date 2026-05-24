@@ -386,7 +386,126 @@ LONG_RUN_12H: dict[str, Any] = {
     "calibration_time_budget_s": 15.0,
     "seed": 42,
     "force_recollect": False,
+    "output_tag": "iter",
+    "cache_read_dir": "",
+    "skip_collection": False,
 }
+
+MEDIUM_RUN_4H: dict[str, Any] = {
+    "benchmark": "all",
+    "rounds": 3,
+    "examples": 240,
+    "cost_epochs": 50,
+    "policy_iterations": 1000,
+    "trajectories_per_iter": 4,
+    "eval_time_budget": 25.0,
+    "calibration_samples_per_bench": 25,
+    "calibration_time_budget_s": 10.0,
+    "seed": 43,
+    "force_recollect": False,
+    "output_tag": "iter_medium",
+    "cache_read_dir": "/output/iter/per_bench",
+    "skip_collection": True,
+}
+
+
+def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
+                   policy_iterations: int, trajectories_per_iter: int,
+                   eval_time_budget: float, seed: int, force_recollect: bool,
+                   calibration_samples_per_bench: int,
+                   calibration_time_budget_s: float,
+                   output_tag: str, cache_read_dir: str,
+                   skip_collection: bool) -> None:
+    import json as _json
+    _setup_env()
+    import train as _train
+    import train_iter as _ti
+
+    benchmarks = _train.parse_benchmarks(benchmark)
+    output_root = Path(f"/output/{output_tag}")
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    if cache_read_dir:
+        per_benchmark_cache_dir = Path(cache_read_dir)
+        print(f"[Modal] cache read:  {per_benchmark_cache_dir}")
+        print(f"[Modal] cache write: {output_root}/ (not main iter/)")
+    else:
+        per_benchmark_cache_dir = output_root / "per_bench"
+        per_benchmark_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    data_path = output_root / "data" / "chain_data.pt"
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_chain = Path("/root/repo/submissions/lkh/data/chain_data.pt")
+    if stale_chain.exists() and stale_chain != data_path:
+        stale_chain.unlink()
+        print(f"[Modal] removed stale {stale_chain}")
+    cost_ckpt = Path("/root/repo/submissions/lkh/checkpoints/cost_approximator.pt")
+    policy_ckpt = Path("/root/repo/submissions/lkh/checkpoints/chain_policy.pt")
+
+    volume.reload()
+
+    if skip_collection:
+        missing = [n for n in benchmarks
+                   if not (per_benchmark_cache_dir / f"{n}.pt").exists()]
+        if missing:
+            raise RuntimeError(
+                f"skip_collection: missing caches {missing} under {per_benchmark_cache_dir}"
+            )
+        print(f"[Modal] skip_collection: {len(benchmarks)} caches OK.")
+    else:
+        if force_recollect:
+            archived = _archive_iter_output(output_root)
+            if archived is not None:
+                volume.commit()
+            _clear_iter_working_tree(output_root)
+            volume.commit()
+            print(f"[Modal] force_recollect: cleared {output_root}")
+        todo = [n for n in benchmarks
+                if not (per_benchmark_cache_dir / f"{n}.pt").exists()]
+        if todo:
+            configs = [(n, examples, seed + i * 7919) for i, n in enumerate(todo)]
+            print(f"[Modal] parallel collection: {len(todo)} benchmarks")
+            for res in collect_one_benchmark_modal.starmap(configs):
+                tag = "cached" if res.get("from_cache") else "collected"
+                print(f"  {tag}: {res['name']:>6}  n={res['n']:>4}  "
+                      f"wall={_train._fmt_time(res.get('wall_s', 0.0))}")
+            volume.reload()
+        else:
+            print(f"[Modal] all {len(benchmarks)} benchmarks already cached.")
+
+    print(f"=== Phase 5 on Modal ({output_tag}) ===")
+    print(f"  benchmarks={benchmarks}  rounds={rounds}  output={output_root}")
+    print(f"  examples/bench={examples}  cost_epochs={cost_epochs}  "
+          f"policy_iters={policy_iterations}  traj/iter={trajectories_per_iter}")
+    print(f"  eval_time_budget={eval_time_budget}s  "
+          f"calibration={calibration_samples_per_bench}/bench @ "
+          f"{calibration_time_budget_s}s")
+    print(f"  per-benchmark cache: {per_benchmark_cache_dir}")
+
+    history: list[dict] = []
+    for r in range(rounds):
+        record = _ti.run_round(
+            r, benchmarks=benchmarks,
+            num_examples_per_benchmark=examples,
+            cost_epochs=cost_epochs,
+            policy_iterations=policy_iterations,
+            trajectories_per_iter=trajectories_per_iter,
+            seed=seed, data_path=data_path,
+            cost_ckpt=cost_ckpt, policy_ckpt=policy_ckpt,
+            force_recollect=False,
+            eval_time_budget_s=eval_time_budget,
+            output_root=output_root,
+            per_benchmark_cache_dir=per_benchmark_cache_dir,
+            calibration_samples_per_bench=calibration_samples_per_bench,
+            calibration_time_budget_s=calibration_time_budget_s,
+        )
+        history.append(record)
+        (output_root / "history.json").write_text(
+            _json.dumps(history, indent=2, default=str)
+        )
+        _persist(output_tag)
+        volume.commit()
+        print(f"[Modal] round {r} committed ({len(history)} rounds done).")
 
 
 @app.function(image=image, volumes={"/output": volume},
@@ -396,106 +515,33 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
              policy_iterations: int, trajectories_per_iter: int,
              eval_time_budget: float, seed: int, force_recollect: bool,
              calibration_samples_per_bench: int = 50,
-             calibration_time_budget_s: float = 10.0) -> None:
-    """Crash-safe Phase 5 driver: imports ``train_iter`` in-process and calls
-    ``run_round`` in a loop, committing the volume after every round so a
-    detached run that dies at hour 9 still leaves rounds 0..N-1 persisted.
+             calibration_time_budget_s: float = 10.0,
+             output_tag: str = "iter", cache_read_dir: str = "",
+             skip_collection: bool = False) -> None:
+    _run_iter_impl(
+        benchmark, rounds, examples, cost_epochs, policy_iterations,
+        trajectories_per_iter, eval_time_budget, seed, force_recollect,
+        calibration_samples_per_bench, calibration_time_budget_s,
+        output_tag, cache_read_dir, skip_collection,
+    )
 
-    Before the rounds, dispatches parallel per-benchmark data collection via
-    ``collect_one_benchmark_modal.starmap()`` so the slow Phase 3 phase runs
-    on N containers in parallel (max wall time = single slowest benchmark
-    instead of the sum across all 17).
-    """
-    import json as _json
-    _setup_env()
-    import train as _train
-    import train_iter as _ti
 
-    benchmarks = _train.parse_benchmarks(benchmark)
-    output_root = Path("/output/iter")
-    output_root.mkdir(parents=True, exist_ok=True)
-    per_benchmark_cache_dir = output_root / "per_bench"
-    per_benchmark_cache_dir.mkdir(parents=True, exist_ok=True)
-    data_path = output_root / "data" / "chain_data.pt"
-    data_path.parent.mkdir(parents=True, exist_ok=True)
-    # Drop smoke-era aggregated file on the repo mount so it cannot shadow
-    # the volume-local chain_data.pt or force a full re-collect.
-    stale_chain = Path("/root/repo/submissions/lkh/data/chain_data.pt")
-    if stale_chain.exists() and stale_chain != data_path:
-        stale_chain.unlink()
-        print(f"[Modal] removed stale {stale_chain}")
-    cost_ckpt = Path("/root/repo/submissions/lkh/checkpoints/cost_approximator.pt")
-    policy_ckpt = Path("/root/repo/submissions/lkh/checkpoints/chain_policy.pt")
-
-    # ── Pre-pass: parallel per-benchmark data collection ───────────────────
-    if force_recollect:
-        archived = _archive_iter_output(output_root)
-        if archived is not None:
-            volume.commit()
-        _clear_iter_working_tree(output_root)
-        volume.commit()
-        print(f"[Modal] force_recollect: archived prior run (if any) and "
-              f"cleared {per_benchmark_cache_dir}")
-
-    todo = [name for name in benchmarks
-            if not (per_benchmark_cache_dir / f"{name}.pt").exists()]
-    if todo:
-        configs = [(name, examples, seed + i * 7919)
-                   for i, name in enumerate(todo)]
-        print(f"[Modal] parallel collection: {len(todo)} benchmarks via .starmap "
-              f"(skipping {len(benchmarks) - len(todo)} cached)")
-        for res in collect_one_benchmark_modal.starmap(configs):
-            tag = "cached" if res.get("from_cache") else "collected"
-            print(f"  {tag}: {res['name']:>6}  n={res['n']:>4}  "
-                  f"wall={_train._fmt_time(res.get('wall_s', 0.0))}")
-        print(f"[Modal] parallel collection complete.")
-        volume.reload()  # parent must see commits from .starmap workers
-    else:
-        print(f"[Modal] all {len(benchmarks)} benchmarks already cached.")
-
-    print(f"=== Phase 5 on Modal ===")
-    print(f"  benchmarks={benchmarks}  rounds={rounds}  output={output_root}")
-    print(f"  examples/bench={examples}  cost_epochs={cost_epochs}  "
-          f"policy_iters={policy_iterations}  traj/iter={trajectories_per_iter}")
-    print(f"  eval_time_budget={eval_time_budget}s  "
-          f"calibration={calibration_samples_per_bench}/bench @ "
-          f"{calibration_time_budget_s}s")
-    print(f"  per-benchmark cache: {per_benchmark_cache_dir}")
-
-    # Parallel ``.starmap()`` above is the only collection pass on Modal.
-    # Do NOT pass ``force_recollect`` into ``run_round``: that flag makes
-    # ``load_per_benchmark_caches(..., force_recollect=True)`` ignore existing
-    # ``per_bench/*.pt`` and re-run ``compute_proxy_cost`` sequentially for
-    # every benchmark (~2× wall time, no better labels).
-    history: list[dict] = []
-    for r in range(rounds):
-        record = _ti.run_round(
-            r,
-            benchmarks=benchmarks,
-            num_examples_per_benchmark=examples,
-            cost_epochs=cost_epochs,
-            policy_iterations=policy_iterations,
-            trajectories_per_iter=trajectories_per_iter,
-            seed=seed,
-            data_path=data_path,
-            cost_ckpt=cost_ckpt,
-            policy_ckpt=policy_ckpt,
-            force_recollect=False,
-            eval_time_budget_s=eval_time_budget,
-            output_root=output_root,
-            per_benchmark_cache_dir=per_benchmark_cache_dir,
-            calibration_samples_per_bench=calibration_samples_per_bench,
-            calibration_time_budget_s=calibration_time_budget_s,
-        )
-        history.append(record)
-        # Stream aggregated history + canonical-path snapshot, then commit so
-        # if the container dies on the NEXT round, rounds 0..r are durable.
-        (output_root / "history.json").write_text(
-            _json.dumps(history, indent=2, default=str)
-        )
-        _persist("iter")
-        volume.commit()
-        print(f"[Modal] round {r} committed ({len(history)} rounds done).")
+@app.function(image=image, volumes={"/output": volume},
+              cpu=8.0, memory=16384, timeout=4 * 3600,
+              nonpreemptible=True)
+def run_iter_medium(benchmark: str, rounds: int, examples: int,
+                    cost_epochs: int, policy_iterations: int,
+                    trajectories_per_iter: int, eval_time_budget: float,
+                    seed: int, force_recollect: bool,
+                    calibration_samples_per_bench: int,
+                    calibration_time_budget_s: float, output_tag: str,
+                    cache_read_dir: str, skip_collection: bool) -> None:
+    _run_iter_impl(
+        benchmark, rounds, examples, cost_epochs, policy_iterations,
+        trajectories_per_iter, eval_time_budget, seed, force_recollect,
+        calibration_samples_per_bench, calibration_time_budget_s,
+        output_tag, cache_read_dir, skip_collection,
+    )
 
 
 # ── Local entrypoints ──────────────────────────────────────────────────────
@@ -522,15 +568,16 @@ def smoke() -> None:
 # dashboard then shows the App as "stopped" with 0 calls).
 # ---------------------------------------------------------------------------
 
-def _spawn_iter(**kwargs: Any) -> None:
-    """Dispatch ``run_iter`` and print the hyperparameter summary."""
-    call = run_iter.spawn(**kwargs)
-    _print_spawn_handle(call, "run_iter")
+def _spawn_iter(fn: Any, label: str, **kwargs: Any) -> None:
+    """Dispatch a Phase-5 Modal function and print hyperparameters."""
+    call = fn.spawn(**kwargs)
+    _print_spawn_handle(call, label)
     print("\n--- Hyperparameters ---")
     for key in (
         "benchmark", "rounds", "examples", "cost_epochs", "policy_iterations",
         "trajectories_per_iter", "eval_time_budget", "calibration_samples_per_bench",
         "calibration_time_budget_s", "seed", "force_recollect",
+        "output_tag", "cache_read_dir", "skip_collection",
     ):
         if key in kwargs:
             print(f"  {key}: {kwargs[key]}")
@@ -613,6 +660,7 @@ def iter_(benchmark: str = "ibm01", rounds: int = 2, examples: int = 400,
     can actually execute.
     """
     _spawn_iter(
+        run_iter, "run_iter",
         benchmark=benchmark, rounds=rounds, examples=examples,
         cost_epochs=cost_epochs, policy_iterations=policy_iterations,
         trajectories_per_iter=trajectories_per_iter,
@@ -620,6 +668,7 @@ def iter_(benchmark: str = "ibm01", rounds: int = 2, examples: int = 400,
         calibration_samples_per_bench=calibration_samples_per_bench,
         calibration_time_budget_s=calibration_time_budget_s,
         seed=seed, force_recollect=force_recollect,
+        output_tag="iter", cache_read_dir="", skip_collection=False,
     )
 
 
@@ -648,4 +697,24 @@ def iter_12h(force_recollect: bool = False, seed: int = 42) -> None:
     """
     params = {**LONG_RUN_12H, "force_recollect": force_recollect, "seed": seed}
     print("=== iter_12h preset (~12 h target) ===")
-    _spawn_iter(**params)
+    _spawn_iter(run_iter, "run_iter", **params)
+
+
+@app.local_entrypoint()
+def iter_medium(seed: int = 43) -> None:
+    """~4 h parallel-safe training (separate ``/output/iter_medium/`` tree).
+
+    Reuses ``/output/iter/per_bench/*.pt`` from the main run (no collection).
+    Does **not** touch ``/output/iter/checkpoints`` or ``history.json``.
+    Safe to run while ``iter_12h`` is active on the same volume.
+
+        uv run modal run --detach submissions/lkh/modal_run.py::iter_medium
+
+    After completion::
+
+        modal volume get lkh-results /iter_medium ./modal_output_medium
+        cp modal_output_medium/checkpoints/*.pt submissions/lkh/checkpoints_medium/
+    """
+    params = {**MEDIUM_RUN_4H, "seed": seed}
+    print("=== iter_medium preset (<= 4 h, reads iter/per_bench) ===")
+    _spawn_iter(run_iter_medium, "run_iter_medium", **params)
