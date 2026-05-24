@@ -18,9 +18,13 @@ either locally or on Modal cloud.
 **1. Start a training run on Modal** (one-time `uv add modal && uv run modal setup` first):
 
 ```bash
+# ~3 h (modest data + short eval)
 uv run modal run --detach submissions/lkh/modal_run.py::iter_ \
     --benchmark all --rounds 4 --examples 75 \
     --policy-iterations 1500 --eval-time-budget 20
+
+# ~12 h overnight (more data, longer PPO, 60s eval) — first time add --force-recollect
+uv run modal run --detach submissions/lkh/modal_run.py::iter_12h --force-recollect
 ```
 
 Returns in ~10 seconds; the actual training runs in the background for ~3 hours.
@@ -41,8 +45,8 @@ modal volume ls lkh-results /iter            # which rounds finished
 # Pull everything from the volume
 modal volume get lkh-results /iter ./modal_output
 
-# Promote trained checkpoints to local
-cp modal_output/checkpoints/*.pt submissions/lkh/checkpoints/
+# Promote trained checkpoints to local (canonical path on the volume)
+cp modal_output/iter/checkpoints/*.pt submissions/lkh/checkpoints/
 
 # Verify the placer with the new models
 uv run python -m macro_place.evaluate submissions/lkh/placer.py --all
@@ -187,6 +191,8 @@ the environment still works.
 
 ### Full training run (the main workflow)
 
+**~3 h (default-scale):**
+
 ```bash
 uv run modal run --detach submissions/lkh/modal_run.py::iter_ \
     --benchmark all \
@@ -195,6 +201,30 @@ uv run modal run --detach submissions/lkh/modal_run.py::iter_ \
     --policy-iterations 1500 \
     --eval-time-budget 20
 ```
+
+**~12 h overnight preset** (`iter_12h` — see `LONG_RUN_12H` in `modal_run.py`):
+
+```bash
+uv run modal run --detach submissions/lkh/modal_run.py::iter_12h --force-recollect
+```
+
+| Knob | ~3 h run | `iter_12h` |
+|------|----------|------------|
+| `examples` / bench | 75 | **240** |
+| `rounds` | 4 | **5** |
+| `cost-epochs` | 60 | **100** |
+| `policy-iterations` | 1500 | **3500** |
+| `trajectories-per-iter` | 4 | **16** |
+| `eval-time-budget` | 20 s | **60 s** |
+| calibration / bench | 50 @ 10 s | **75 @ 15 s** |
+
+**`--force-recollect`:** archives the current `iter/` tree to
+`iter/archives/<UTC-timestamp>/` on the volume (old `per_bench/`, rounds,
+`history.json`, checkpoints), then clears and rebuilds at 240 examples/bench.
+Use this when upgrading from a shorter run (e.g. 75-example caches).
+
+Omit `--force-recollect` only when `per_bench/*.pt` already matches the
+target example count (saves ~7 h; rounds-only ~4–5 h).
 
 Both `--detach` and `.spawn()` are needed:
 - `.spawn()` (in modal\_run.py) makes the call async — survives local terminal disconnect.
@@ -213,7 +243,9 @@ your laptop; the run continues on Modal.
 | `--policy-iterations` | `1000` | PPO update count per round. 1500-3000 is reasonable. |
 | `--trajectories-per-iter` | `4` | Higher = better gradient estimates but slower PPO. |
 | `--eval-time-budget` | `20.0` | Seconds per benchmark during eval phase. Bigger = better placement quality. |
-| `--force-recollect-each-round` | off | Wipes per-benchmark cache; forces re-collection each round. Usually off. |
+| `--calibration-samples-per-bench` | `50` | C.3 samples after each round (Modal `iter_` / `iter_12h`). |
+| `--calibration-time-budget-s` | `10.0` | Placer seconds per benchmark during calibration. |
+| `--force-recollect` | off | Wipes per-benchmark cache before collection. Use on first `iter_12h` run. |
 
 ### Wall-time estimates on Modal
 
@@ -225,6 +257,7 @@ For `--benchmark all`:
 | 75 | ~2.2 h | ~7 min | 4 | ~3.0 h |
 | 100 | ~3.0 h | ~7 min | 4 | ~3.7 h |
 | 150 | ~4.5 h | ~7 min | 3 | ~5.0 h |
+| **240** (`iter_12h`) | **~7 h** | **~50 min** | **5** | **~11–12 h** |
 
 Parallel collection runs once; Round 0 then **loads** those caches (no second
 pass over ``compute_proxy_cost``). Subsequent rounds reuse ``chain_data.pt``.
@@ -283,9 +316,9 @@ You can also inspect or test the per-round snapshots:
 
 ```bash
 # Round 2 vs round 3 on ibm01
-cp modal_output/round_2/*.pt submissions/lkh/checkpoints/
+cp modal_output/iter/round_2/*.pt submissions/lkh/checkpoints/
 uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01
-cp modal_output/round_3/*.pt submissions/lkh/checkpoints/
+cp modal_output/iter/round_3/*.pt submissions/lkh/checkpoints/
 uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01
 ```
 
@@ -317,6 +350,12 @@ Three layers of resilience, in order of how often they help:
 3. **`nonpreemptible=True`**
    Modal won't preempt the workers (previously the cause of mid-collection
    restarts). Costs 3× CPU rate but eliminates the failure mode entirely.
+
+4. **`--force-recollect` archives before overwrite**
+   Prior `iter/` outputs are copied to `iter/archives/<UTC-timestamp>/`
+   (per-bench caches, rounds, `history.json`, checkpoints) before the
+   working tree is cleared. List archives with
+   ``modal volume ls lkh-results /iter/archives``.
 
 ## Hyperparameter Cheat Sheet
 
