@@ -226,7 +226,8 @@ For `--benchmark all`:
 | 100 | ~3.0 h | ~7 min | 4 | ~3.7 h |
 | 150 | ~4.5 h | ~7 min | 3 | ~5.0 h |
 
-The parallel collection runs once (cached after); subsequent rounds reuse it.
+Parallel collection runs once; Round 0 then **loads** those caches (no second
+pass over ``compute_proxy_cost``). Subsequent rounds reuse ``chain_data.pt``.
 Cost: `nonpreemptible=True` is set on long-running functions and bills at
 3× the list CPU rate — expect a few credits per full run.
 

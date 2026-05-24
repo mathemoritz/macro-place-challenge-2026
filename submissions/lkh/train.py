@@ -188,76 +188,114 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
     return np.stack(feats_list), np.array(targets_list, dtype=np.float32)
 
 
-def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
-                  seed: int, drift_prob: float = 0.3,
-                  per_benchmark_cache_dir: Optional[Path] = None,
-                  post_benchmark_callback: Optional[Callable[[str], None]] = None,
-                  ) -> tuple[np.ndarray, np.ndarray]:
-    """Multi-benchmark wrapper. Concatenates per-benchmark arrays.
+def _save_benchmark_cache(cache_file: Path, feats: np.ndarray, targets: np.ndarray,
+                          *, num_examples: int, name: str) -> None:
+    """Atomic write of one per-benchmark cache file."""
+    tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
+    torch.save(
+        {"features": feats, "targets": targets,
+         "num_examples": num_examples, "name": name},
+        str(tmp),
+    )
+    tmp.replace(cache_file)
 
-    Each benchmark contributes ``num_examples_per_benchmark`` samples; the
-    seed is offset per benchmark so different benchmarks don't share the
-    same RNG trajectory. Total dataset size = N × len(benchmark_names).
 
-    Preemption safety: if ``per_benchmark_cache_dir`` is set, each
-    benchmark's data is saved to ``<dir>/<name>.pt`` immediately after
-    collection. On a subsequent invocation (e.g. after Modal worker
-    preemption), benchmarks whose cache file already exists are loaded
-    from disk instead of re-collected. ``post_benchmark_callback(name)``
-    fires after each benchmark; Modal callers use it to ``volume.commit()``
-    so the cache file is durable.
+def per_bench_caches_complete(benchmark_names: list[str], cache_dir: Path) -> bool:
+    """True if every benchmark has a readable ``<name>.pt`` in ``cache_dir``."""
+    cache_dir = Path(cache_dir)
+    for name in benchmark_names:
+        path = cache_dir / f"{name}.pt"
+        if not path.exists():
+            return False
+        try:
+            d = torch.load(str(path), weights_only=False)
+            if len(d.get("features", [])) == 0:
+                return False
+        except Exception:                                       # noqa: BLE001
+            return False
+    return True
+
+
+def load_per_benchmark_caches(
+    benchmark_names: list[str],
+    cache_dir: Path,
+    *,
+    num_examples_per_benchmark: int | None = None,
+    collect_missing: bool = False,
+    seed: int = 42,
+    drift_prob: float = 0.3,
+    post_benchmark_callback: Optional[Callable[[str], None]] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load and concatenate per-benchmark ``<name>.pt`` caches.
+
+  Used after parallel Modal collection (or any time all caches exist).
+  Set ``collect_missing=True`` only for local runs that may lack a few
+  cache files; never re-collects benchmarks whose cache already exists.
     """
     if not benchmark_names:
-        raise ValueError("collect_data: benchmark_names is empty")
-
-    cache_dir: Optional[Path] = (
-        Path(per_benchmark_cache_dir) if per_benchmark_cache_dir else None
-    )
-    if cache_dir is not None:
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        raise ValueError("load_per_benchmark_caches: benchmark_names is empty")
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     all_feats: list[np.ndarray] = []
     all_targets: list[np.ndarray] = []
     for b_idx, name in enumerate(benchmark_names):
-        cache_file: Optional[Path] = (cache_dir / f"{name}.pt") if cache_dir else None
-        loaded_from_cache = False
+        cache_file = cache_dir / f"{name}.pt"
+        feats: np.ndarray
+        targets: np.ndarray
 
-        if cache_file is not None and cache_file.exists():
+        if cache_file.exists():
             try:
                 d = torch.load(str(cache_file), weights_only=False)
                 feats = d["features"]
                 targets = d["targets"]
-                print(f"\n  [{b_idx + 1}/{len(benchmark_names)}] cached: {name}  "
-                      f"({len(feats)} examples from {cache_file})")
-                loaded_from_cache = True
+                print(f"  [{b_idx + 1}/{len(benchmark_names)}] loaded: {name}  "
+                      f"({len(feats)} examples)")
             except Exception as exc:                              # noqa: BLE001
-                # Corrupted cache (e.g. interrupted write). Fall back to fresh collect.
-                print(f"  [{b_idx + 1}/{len(benchmark_names)}] cache load failed "
-                      f"({exc}); re-collecting {name}")
-
-        if not loaded_from_cache:
-            print(f"\n  [{b_idx + 1}/{len(benchmark_names)}] benchmark = {name}")
+                if not collect_missing:
+                    raise RuntimeError(
+                        f"cache load failed for {name} ({cache_file}): {exc}"
+                    ) from exc
+                print(f"  [{b_idx + 1}/{len(benchmark_names)}] cache unreadable "
+                      f"({exc}); collecting {name}")
+                feats, targets = _collect_one_benchmark(
+                    name, num_examples_per_benchmark or 0,
+                    seed=seed + b_idx * 7919, drift_prob=drift_prob,
+                )
+                _save_benchmark_cache(
+                    cache_file, feats, targets,
+                    num_examples=num_examples_per_benchmark or len(feats),
+                    name=name,
+                )
+        elif collect_missing:
+            if num_examples_per_benchmark is None:
+                raise ValueError(
+                    "num_examples_per_benchmark required when collect_missing=True"
+                )
+            print(f"  [{b_idx + 1}/{len(benchmark_names)}] missing cache; "
+                  f"collecting {name}")
             feats, targets = _collect_one_benchmark(
                 name, num_examples_per_benchmark,
-                seed=seed + b_idx * 7919,   # arbitrary stride so offsets don't collide
-                drift_prob=drift_prob,
+                seed=seed + b_idx * 7919, drift_prob=drift_prob,
             )
-            if cache_file is not None:
-                # Atomic-ish: write to .tmp then rename, so a preemption
-                # during torch.save won't leave a half-written cache file
-                # that the next run would treat as valid.
-                tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
-                torch.save(
-                    {"features": feats, "targets": targets,
-                     "num_examples": num_examples_per_benchmark, "name": name},
-                    str(tmp),
-                )
-                tmp.replace(cache_file)
-                print(f"    cached -> {cache_file}")
+            _save_benchmark_cache(
+                cache_file, feats, targets,
+                num_examples=num_examples_per_benchmark, name=name,
+            )
+        else:
+            raise FileNotFoundError(
+                f"per-benchmark cache missing: {cache_file}\n"
+                f"Run parallel collection first (Modal ``.starmap``) or "
+                f"``collect_data(..., collect_missing=True)``."
+            )
+
+        if (num_examples_per_benchmark is not None
+                and len(feats) < num_examples_per_benchmark):
+            print(f"  WARNING: {name} has {len(feats)} examples, "
+                  f"expected {num_examples_per_benchmark}")
 
         all_feats.append(feats)
         all_targets.append(targets)
-
         if post_benchmark_callback is not None:
             try:
                 post_benchmark_callback(name)
@@ -265,6 +303,41 @@ def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
                 print(f"    post_benchmark_callback error for {name}: {exc}")
 
     return np.concatenate(all_feats, axis=0), np.concatenate(all_targets, axis=0)
+
+
+def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
+                  seed: int, drift_prob: float = 0.3,
+                  per_benchmark_cache_dir: Optional[Path] = None,
+                  post_benchmark_callback: Optional[Callable[[str], None]] = None,
+                  ) -> tuple[np.ndarray, np.ndarray]:
+    """Collect (or load) per-benchmark data and concatenate.
+
+    Prefer ``load_per_benchmark_caches`` when caches already exist (e.g.
+    after Modal parallel collection). This function is for ``train.py`` CLI
+    runs that may need to populate missing caches via ``collect_missing``.
+    """
+    if not benchmark_names:
+        raise ValueError("collect_data: benchmark_names is empty")
+
+    if per_benchmark_cache_dir is None:
+        all_feats: list[np.ndarray] = []
+        all_targets: list[np.ndarray] = []
+        for b_idx, name in enumerate(benchmark_names):
+            print(f"\n  [{b_idx + 1}/{len(benchmark_names)}] benchmark = {name}")
+            feats, targets = _collect_one_benchmark(
+                name, num_examples_per_benchmark,
+                seed=seed + b_idx * 7919, drift_prob=drift_prob,
+            )
+            all_feats.append(feats)
+            all_targets.append(targets)
+        return np.concatenate(all_feats, axis=0), np.concatenate(all_targets, axis=0)
+
+    return load_per_benchmark_caches(
+        benchmark_names, Path(per_benchmark_cache_dir),
+        num_examples_per_benchmark=num_examples_per_benchmark,
+        collect_missing=True, seed=seed, drift_prob=drift_prob,
+        post_benchmark_callback=post_benchmark_callback,
+    )
 
 
 # ── Training ───────────────────────────────────────────────────────────────

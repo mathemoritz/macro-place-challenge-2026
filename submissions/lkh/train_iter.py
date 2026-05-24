@@ -1,9 +1,9 @@
 """Phase 5 — iterative training loop (single or multi-benchmark).
 
 Each round:
-    1. Collect (state, move, exact Δcost) triples across all configured
-       benchmarks; train the CostApproximator on the combined dataset
-       (Phase 3).
+    1. Load per-benchmark caches (``per_bench/<name>.pt``) and train the
+       CostApproximator on the combined dataset (Phase 3). Caches are
+       populated by Modal parallel collection or ``train.collect_data``.
     2. Train the ChainPolicy with PPO sampling rollouts uniformly across
        the same benchmark list (Phase 4).
     3. Run end-to-end placer evaluation on EACH benchmark and report
@@ -51,7 +51,8 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               force_recollect: bool, eval_time_budget_s: float,
               output_root: Optional[Path] = None,
               per_benchmark_cache_dir: Optional[Path] = None,
-              post_benchmark_callback: Optional[Callable[[str], None]] = None) -> dict:
+              post_benchmark_callback: Optional[Callable[[str], None]] = None,
+              collect_missing: bool = False) -> dict:
     """Run one round of Phase 3 + Phase 4 + per-benchmark evaluation.
 
     Canonical writes (so the placer can find the latest checkpoints) go to
@@ -60,41 +61,64 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
     plus a per-round JSON record — this is what makes detached Modal runs
     crash-safe and lets you compare rounds after the fact.
 
-    ``per_benchmark_cache_dir`` and ``post_benchmark_callback`` are forwarded
-    to ``collect_data`` so a preempted-and-restarted run can resume from the
-    last completed benchmark instead of starting over.
+    When ``per_benchmark_cache_dir`` is set, Step 1a only **loads** existing
+    ``<name>.pt`` caches (no re-collection). Populate caches via Modal
+    parallel collection or ``train.collect_data`` before calling this.
     """
     print(f"\n========== Round {round_idx} ==========")
     print(f"  benchmarks = {benchmarks}")
 
-    # ── Step 1: data collection + Phase 3 training ────────────────────────
+    # ── Step 1: load training data + Phase 3 training ─────────────────────
     use_cache = False
-    if not force_recollect and data_path.exists():
+    bench_cache_dir = (
+        Path(per_benchmark_cache_dir) if per_benchmark_cache_dir else None
+    )
+    per_bench_ready = (
+        bench_cache_dir is not None
+        and not force_recollect
+        and _train.per_bench_caches_complete(benchmarks, bench_cache_dir)
+    )
+
+    if per_bench_ready:
+        print(f"\n[Round {round_idx}] Step 1a: per-benchmark caches ready in "
+              f"{bench_cache_dir} (skipping stale chain_data.pt if any)")
+    elif not force_recollect and data_path.exists():
         cached = torch.load(data_path, weights_only=False)
         cached_benchmarks = cached.get("benchmarks")
         if cached_benchmarks is None:
             singleton = cached.get("benchmark")
             cached_benchmarks = [singleton] if singleton else []
         if set(cached_benchmarks) == set(benchmarks):
-            print(f"\n[Round {round_idx}] Step 1a: reusing cached data at {data_path}")
+            print(f"\n[Round {round_idx}] Step 1a: reusing aggregated data at "
+                  f"{data_path}")
             features, targets = cached["features"], cached["targets"]
             use_cache = True
         else:
-            print(f"\n[Round {round_idx}] Step 1a: cached data covers "
-                  f"{sorted(cached_benchmarks)} but request is {sorted(benchmarks)} "
-                  f"— re-collecting")
+            print(f"\n[Round {round_idx}] Step 1a: {data_path} covers "
+                  f"{sorted(cached_benchmarks)} but need {sorted(benchmarks)} "
+                  f"— will load or collect per-benchmark data")
 
     if not use_cache:
         total = num_examples_per_benchmark * len(benchmarks)
-        print(f"\n[Round {round_idx}] Step 1a: collect "
-              f"{num_examples_per_benchmark}/benchmark = {total} total")
-        features, targets = _train.collect_data(
-            benchmarks, num_examples_per_benchmark,
-            seed=seed + round_idx,
-            per_benchmark_cache_dir=per_benchmark_cache_dir,
-            post_benchmark_callback=post_benchmark_callback,
-        )
         data_path.parent.mkdir(parents=True, exist_ok=True)
+        if per_benchmark_cache_dir is not None:
+            print(f"\n[Round {round_idx}] Step 1a: load per-benchmark caches "
+                  f"({num_examples_per_benchmark}/bench × {len(benchmarks)} "
+                  f"= {total} total)")
+            features, targets = _train.load_per_benchmark_caches(
+                benchmarks, Path(per_benchmark_cache_dir),
+                num_examples_per_benchmark=num_examples_per_benchmark,
+                collect_missing=collect_missing,
+                seed=seed + round_idx,
+                post_benchmark_callback=post_benchmark_callback,
+            )
+        else:
+            print(f"\n[Round {round_idx}] Step 1a: collect "
+                  f"{num_examples_per_benchmark}/benchmark = {total} total")
+            features, targets = _train.collect_data(
+                benchmarks, num_examples_per_benchmark,
+                seed=seed + round_idx,
+            )
         torch.save({"features": features, "targets": targets,
                     "benchmarks": benchmarks, "feature_dim": FEATURE_DIM},
                    data_path)
@@ -231,8 +255,10 @@ def main():
                         "history.json). Set to empty string to disable.")
     p.add_argument("--per-benchmark-cache-dir",
                    default=str(_HERE / "data" / "per_bench"),
-                   help="Directory of per-benchmark cache files. A preemption "
-                        "or Ctrl-C resumes here on next run. Empty string disables.")
+                   help="Directory of per-benchmark cache files. Empty string disables.")
+    p.add_argument("--collect-missing", action="store_true",
+                   help="If a per-benchmark cache is missing, collect it instead "
+                        "of failing. Modal runs should leave this off.")
     args = p.parse_args()
 
     benchmarks = _train.parse_benchmarks(args.benchmark)
@@ -267,6 +293,7 @@ def main():
             eval_time_budget_s=args.eval_time_budget,
             output_root=output_root,
             per_benchmark_cache_dir=per_benchmark_cache_dir,
+            collect_missing=args.collect_missing,
         )
         history.append(record)
         # Stream the aggregated history to disk after every round so a crash

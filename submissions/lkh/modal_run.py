@@ -313,7 +313,14 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
     output_root.mkdir(parents=True, exist_ok=True)
     per_benchmark_cache_dir = output_root / "per_bench"
     per_benchmark_cache_dir.mkdir(parents=True, exist_ok=True)
-    data_path = Path("/root/repo/submissions/lkh/data/chain_data.pt")
+    data_path = output_root / "data" / "chain_data.pt"
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    # Drop smoke-era aggregated file on the repo mount so it cannot shadow
+    # the volume-local chain_data.pt or force a full re-collect.
+    stale_chain = Path("/root/repo/submissions/lkh/data/chain_data.pt")
+    if stale_chain.exists() and stale_chain != data_path:
+        stale_chain.unlink()
+        print(f"[Modal] removed stale {stale_chain}")
     cost_ckpt = Path("/root/repo/submissions/lkh/checkpoints/cost_approximator.pt")
     policy_ckpt = Path("/root/repo/submissions/lkh/checkpoints/chain_policy.pt")
 
@@ -336,19 +343,13 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
             print(f"  {tag}: {res['name']:>6}  n={res['n']:>4}  "
                   f"wall={_train._fmt_time(res.get('wall_s', 0.0))}")
         print(f"[Modal] parallel collection complete.")
+        volume.reload()  # parent must see commits from .starmap workers
     else:
         print(f"[Modal] all {len(benchmarks)} benchmarks already cached.")
 
     print(f"=== Phase 5 on Modal ===")
     print(f"  benchmarks={benchmarks}  rounds={rounds}  output={output_root}")
     print(f"  per-benchmark cache: {per_benchmark_cache_dir}")
-
-    # After each benchmark's data is collected, commit the volume so the
-    # per-benchmark cache file is durable even if the worker is preempted
-    # mid-round.
-    def _commit_after_benchmark(name: str) -> None:
-        volume.commit()
-        print(f"[Modal] benchmark {name} cached + committed.", flush=True)
 
     history: list[dict] = []
     for r in range(rounds):
@@ -367,7 +368,6 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
             eval_time_budget_s=eval_time_budget,
             output_root=output_root,
             per_benchmark_cache_dir=per_benchmark_cache_dir,
-            post_benchmark_callback=_commit_after_benchmark,
         )
         history.append(record)
         # Stream aggregated history + canonical-path snapshot, then commit so
