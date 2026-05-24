@@ -1,13 +1,20 @@
 """Phase 5 — iterative training loop (single or multi-benchmark).
 
 Each round:
-    1. Load per-benchmark caches (``per_bench/<name>.pt``) and train the
-       CostApproximator on the combined dataset (Phase 3). Caches are
-       populated by Modal parallel collection or ``train.collect_data``.
+    1. Load (or re-collect) per-benchmark caches (``per_bench/<name>.pt``)
+       and train the CostApproximator on the combined dataset (Phase 3).
+       Caches are populated by Modal parallel collection or
+       ``train.collect_data``. After D.2 of the LKH critique fix plan,
+       data is RE-COLLECTED EACH ROUND by default — the iterative loop's
+       stated purpose is to drift training data toward the inference
+       distribution, and the pre-fix loop silently bypassed
+       ``--force-recollect-each-round`` for per-benchmark caches.
     2. Train the ChainPolicy with PPO sampling rollouts uniformly across
        the same benchmark list (Phase 4).
     3. Run end-to-end placer evaluation on EACH benchmark and report
        proxy / overlaps / wall-time.
+    4. (C.3) Calibration sampling: capture (features, true_Δproxy) at
+       inference-time states and stash for next round's training data.
 
 Multi-benchmark training addresses the generalization gap noted in the
 review — both models otherwise overfit to whichever single benchmark they
@@ -17,6 +24,10 @@ Usage:
     uv run python submissions/lkh/train_iter.py --rounds 3 --examples 500
     uv run python submissions/lkh/train_iter.py --benchmark ibm01,ibm02,ibm07
     uv run python submissions/lkh/train_iter.py --benchmark all --rounds 1
+
+    # Reuse round-0 caches (e.g. when Modal pre-populated them) but still
+    # re-collect rounds 1+:
+    uv run python submissions/lkh/train_iter.py --rounds 3 --reuse-round-0-data
 """
 
 from __future__ import annotations
@@ -52,7 +63,10 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               output_root: Optional[Path] = None,
               per_benchmark_cache_dir: Optional[Path] = None,
               post_benchmark_callback: Optional[Callable[[str], None]] = None,
-              collect_missing: bool = False) -> dict:
+              collect_missing: bool = False,
+              enable_calibration: bool = True,
+              calibration_samples_per_bench: int = 50,
+              calibration_time_budget_s: float = 10.0) -> dict:
     """Run one round of Phase 3 + Phase 4 + per-benchmark evaluation.
 
     Canonical writes (so the placer can find the latest checkpoints) go to
@@ -102,7 +116,8 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         total = num_examples_per_benchmark * len(benchmarks)
         data_path.parent.mkdir(parents=True, exist_ok=True)
         if per_benchmark_cache_dir is not None:
-            print(f"\n[Round {round_idx}] Step 1a: load per-benchmark caches "
+            action = "force-recollect" if force_recollect else "load"
+            print(f"\n[Round {round_idx}] Step 1a: {action} per-benchmark caches "
                   f"({num_examples_per_benchmark}/bench × {len(benchmarks)} "
                   f"= {total} total)")
             features, targets = _train.load_per_benchmark_caches(
@@ -111,6 +126,7 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
                 collect_missing=collect_missing,
                 seed=seed + round_idx,
                 post_benchmark_callback=post_benchmark_callback,
+                force_recollect=force_recollect,
             )
         else:
             print(f"\n[Round {round_idx}] Step 1a: collect "
@@ -119,6 +135,18 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
                 benchmarks, num_examples_per_benchmark,
                 seed=seed + round_idx,
             )
+        # C.3: prepend the previous round's calibration samples (if any).
+        # Calibration captures (features, true_Δproxy) at inference-time
+        # states; mixing them into the next round's training distribution
+        # closes the §5.4 within-round calibration gap.
+        if enable_calibration and round_idx > 0 and output_root is not None:
+            prev_cal = output_root / f"round_{round_idx - 1}_calibration.pt"
+            if prev_cal.exists():
+                cal = torch.load(prev_cal, weights_only=False)
+                features = np.concatenate([cal["features"], features], axis=0)
+                targets = np.concatenate([cal["targets"], targets], axis=0)
+                print(f"  prepended {len(cal['features'])} calibration "
+                      f"samples from {prev_cal.name}")
         torch.save({"features": features, "targets": targets,
                     "benchmarks": benchmarks, "feature_dim": FEATURE_DIM},
                    data_path)
@@ -167,6 +195,42 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
     for name in benchmarks:
         print(f"  -- {name} --")
         per_bench_eval[name] = evaluate_round(name, time_budget_s=eval_time_budget_s)
+
+    # ── Step 4 (C.3): calibration sampling ─────────────────────────────────
+    # Capture (features, true_Δproxy) pairs at the placer's inference-time
+    # states so the next round's approximator sees the residual distribution
+    # that single-move + cascade-interior sampling alone misses.
+    if enable_calibration and output_root is not None:
+        cal_path = output_root / f"round_{round_idx}_calibration.pt"
+        all_cal_features: list[np.ndarray] = []
+        all_cal_targets: list[np.ndarray] = []
+        print(f"\n[Round {round_idx}] Step 4: calibration sampling "
+              f"({calibration_samples_per_bench} samples × {len(benchmarks)} "
+              f"benchmarks)")
+        for b_idx, name in enumerate(benchmarks):
+            try:
+                cal_f, cal_t = _train.collect_calibration_samples(
+                    name,
+                    n_samples=calibration_samples_per_bench,
+                    time_budget_s=calibration_time_budget_s,
+                    approximator_ckpt_path=str(cost_ckpt) if cost_ckpt.exists() else None,
+                    policy_ckpt_path=str(policy_ckpt) if policy_ckpt.exists() else None,
+                    seed=seed + round_idx * 1009 + b_idx * 7919,
+                )
+                all_cal_features.append(cal_f)
+                all_cal_targets.append(cal_t)
+                print(f"  {name}: collected {len(cal_f)} calibration samples")
+            except Exception as exc:                                # noqa: BLE001
+                # Calibration is best-effort; a failure on one benchmark
+                # shouldn't crash the whole round.
+                print(f"  {name}: calibration failed ({exc}); skipping")
+        if all_cal_features:
+            cal_features = np.concatenate(all_cal_features, axis=0)
+            cal_targets = np.concatenate(all_cal_targets, axis=0)
+            torch.save({"features": cal_features, "targets": cal_targets,
+                        "benchmarks": benchmarks, "round": round_idx},
+                       cal_path)
+            print(f"  saved {len(cal_features)} calibration samples -> {cal_path}")
 
     record = {
         "round": round_idx,
@@ -240,9 +304,19 @@ def main():
     p.add_argument("--eval-time-budget", type=float, default=20.0,
                    help="Seconds per benchmark during the per-round evaluation step.")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--force-recollect-each-round", action="store_true",
-                   help="By default, data is re-collected only when missing or when the "
-                        "cached benchmark set doesn't match. Set this to refresh data each round.")
+    # D.2 (LKH critique fix): the iterative loop's stated purpose is to
+    # drift training data toward the inference distribution, so re-collect
+    # is the right default. The new flag invalidates per-benchmark caches
+    # too, not just the aggregated cache.
+    p.add_argument("--force-recollect-each-round",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="Re-collect training data every round. Default: True. "
+                        "Pass --no-force-recollect-each-round to keep all rounds "
+                        "on the original cache (legacy behavior).")
+    p.add_argument("--reuse-round-0-data", action="store_true",
+                   help="Override --force-recollect-each-round for round 0 only "
+                        "(reuse pre-existing per-benchmark caches in round 0). "
+                        "Useful when round 0 was populated by a Modal pre-fetch.")
     p.add_argument("--data-path",
                    default=str(_HERE / "data" / "chain_data.pt"))
     p.add_argument("--cost-ckpt",
@@ -259,6 +333,15 @@ def main():
     p.add_argument("--collect-missing", action="store_true",
                    help="If a per-benchmark cache is missing, collect it instead "
                         "of failing. Modal runs should leave this off.")
+    p.add_argument("--no-calibration", action="store_true",
+                   help="Disable C.3 within-round calibration sampling. "
+                        "Default: calibration is on.")
+    p.add_argument("--calibration-samples-per-bench", type=int, default=50,
+                   help="C.3: per-benchmark calibration samples after each "
+                        "round's eval (default 50).")
+    p.add_argument("--calibration-time-budget", type=float, default=10.0,
+                   help="C.3: seconds per-benchmark for the calibration "
+                        "placer pass (default 10).")
     args = p.parse_args()
 
     benchmarks = _train.parse_benchmarks(args.benchmark)
@@ -278,6 +361,11 @@ def main():
 
     history: list[dict] = []
     for r in range(args.rounds):
+        # D.2: round 0 may opt back into cache reuse via --reuse-round-0-data.
+        # Rounds >= 1 always honor --force-recollect-each-round (default True).
+        force_recollect_r = args.force_recollect_each_round and not (
+            r == 0 and args.reuse_round_0_data
+        )
         record = run_round(
             r,
             benchmarks=benchmarks,
@@ -289,11 +377,14 @@ def main():
             data_path=Path(args.data_path),
             cost_ckpt=Path(args.cost_ckpt),
             policy_ckpt=Path(args.policy_ckpt),
-            force_recollect=args.force_recollect_each_round,
+            force_recollect=force_recollect_r,
             eval_time_budget_s=args.eval_time_budget,
             output_root=output_root,
             per_benchmark_cache_dir=per_benchmark_cache_dir,
             collect_missing=args.collect_missing,
+            enable_calibration=not args.no_calibration,
+            calibration_samples_per_bench=args.calibration_samples_per_bench,
+            calibration_time_budget_s=args.calibration_time_budget,
         )
         history.append(record)
         # Stream the aggregated history to disk after every round so a crash

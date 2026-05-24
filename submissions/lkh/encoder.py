@@ -271,8 +271,8 @@ def _smoke_test():
 
     from macro_place.loader import load_benchmark_from_dir
     benchmark, _ = load_benchmark_from_dir("external/MacroPlacement/Testcases/ICCAD04/ibm01")
-    edges, weights = placer._hard_macro_edges(benchmark)
-    state = placer.PlacementState(benchmark, edges, weights)
+    hpwl_edges = placer._hard_macro_edges(benchmark)
+    state = placer.PlacementState(benchmark, hpwl_edges)
 
     print(f"=== Phase 2 encoder smoke test ===")
     print(f"  benchmark = {benchmark.name}")
