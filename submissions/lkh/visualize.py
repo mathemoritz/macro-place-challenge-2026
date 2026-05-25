@@ -9,6 +9,7 @@ Usage:
     uv run python submissions/lkh/visualize.py --benchmark ibm03 --time-budget 30
     uv run python submissions/lkh/visualize.py --benchmark ibm01,ibm07
     uv run python submissions/lkh/visualize.py --benchmark all --no-arrows
+    uv run python submissions/lkh/visualize.py --benchmark ibm13 --initial legalized --time-budget 60
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import torch
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
@@ -38,6 +40,21 @@ from train import parse_benchmarks  # comma-separated / "all" CLI helper
 
 from macro_place.loader import load_benchmark_from_dir
 from macro_place.objective import compute_proxy_cost
+
+
+def legalize_initial_placement(benchmark) -> torch.Tensor:
+    """Return overlap-free hard-macro positions (spiral legalization)."""
+    hpwl_edges = placer_mod._hard_macro_edges(benchmark)
+    state = placer_mod.PlacementState(benchmark, hpwl_edges)
+    n_before = state.overlap_pairs()
+    if n_before > 0:
+        state.pos[:] = placer_mod._legalize(state)
+        state.rebuild_caches()
+    n = benchmark.num_hard_macros
+    out = benchmark.macro_positions.clone()
+    out[:n] = torch.tensor(state.pos, dtype=torch.float32)
+    print(f"  legalized initial: {n_before} -> {state.overlap_pairs()} overlap pairs")
+    return out
 
 
 # ── Rendering ──────────────────────────────────────────────────────────────
@@ -117,7 +134,9 @@ def _draw_arrows(ax, benchmark, initial, final,
 
 
 def visualize_initial_vs_final(benchmark, plc, initial, final, save_path: str,
-                                show_arrows: bool = True) -> dict:
+                                show_arrows: bool = True,
+                                initial_label: str = "Initial",
+                                arrow_baseline=None) -> dict:
     """Two-panel figure: initial.plc on the left, placer output on the right.
 
     Metrics in each title come from ``compute_proxy_cost`` so the comparison
@@ -128,7 +147,7 @@ def visualize_initial_vs_final(benchmark, plc, initial, final, save_path: str,
 
     fig, axes = plt.subplots(1, 2, figsize=(20, 10))
 
-    title_l = (f"Initial — {benchmark.name}\n"
+    title_l = (f"{initial_label} — {benchmark.name}\n"
                f"proxy={initial_costs['proxy_cost']:.4f}  "
                f"wl={initial_costs['wirelength_cost']:.3f}  "
                f"den={initial_costs['density_cost']:.3f}  "
@@ -144,11 +163,17 @@ def visualize_initial_vs_final(benchmark, plc, initial, final, save_path: str,
                f"overlap_pairs={int(final_costs['overlap_count'])}")
     _draw_panel(axes[1], benchmark, final, title_r)
 
-    n_arrows = _draw_arrows(axes[1], benchmark, initial, final) if show_arrows else 0
+    arrow_from = initial if arrow_baseline is None else arrow_baseline
+    n_arrows = _draw_arrows(axes[1], benchmark, arrow_from, final) if show_arrows else 0
     if show_arrows and n_arrows > 0:
+        arrow_note = (
+            "arrows: initial.plc → LKH"
+            if arrow_baseline is not None
+            else "arrows: left panel → LKH"
+        )
         axes[1].text(
             0.02, 0.98,
-            f"{n_arrows} macros moved\n(arrow color = displacement)",
+            f"{n_arrows} macros moved\n({arrow_note})",
             transform=axes[1].transAxes, va="top", ha="left", fontsize=9,
             bbox=dict(facecolor="white", alpha=0.7, edgecolor="gray"),
         )
@@ -181,6 +206,13 @@ def main():
     p.add_argument("--out-dir", default="vis")
     p.add_argument("--no-arrows", action="store_true",
                    help="Hide the per-macro displacement arrows.")
+    p.add_argument("--initial", choices=("raw", "legalized"), default="raw",
+                   help="'raw' = initial.plc as shipped; 'legalized' = spiral-"
+                   "legalized start (0 overlap pairs) for fair proxy comparison.")
+    p.add_argument("--arrows-from", choices=("same", "raw"), default="same",
+                   help="Displacement arrows on the right panel: 'same' = from "
+                   "the left-panel placement; 'raw' = from shipped initial.plc "
+                   "(use with --initial legalized to show total motion).")
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmark)
@@ -192,7 +224,23 @@ def main():
         print(f"\n=== {name} ===")
         bench_dir = Path("external/MacroPlacement/Testcases/ICCAD04") / name
         bench, plc = load_benchmark_from_dir(str(bench_dir))
-        initial = bench.macro_positions.clone()
+        raw_initial = bench.macro_positions.clone()
+        if args.initial == "legalized":
+            initial = legalize_initial_placement(bench)
+            bench.macro_positions[: bench.num_hard_macros] = initial[
+                : bench.num_hard_macros
+            ]
+            initial_label = "Legalized initial"
+        else:
+            initial = raw_initial.clone()
+            initial_label = "Initial.plc"
+
+        arrow_baseline = None
+        if args.arrows_from == "raw":
+            arrow_baseline = raw_initial
+        elif args.initial == "legalized" and not args.no_arrows:
+            print("  hint: with --initial legalized the placer often moves few "
+                  "macros; add --arrows-from raw to show motion from initial.plc")
 
         placer = placer_mod.LKHPlacer(
             seed=args.seed,
@@ -209,6 +257,8 @@ def main():
         metrics = visualize_initial_vs_final(
             bench, plc, initial, final, str(save_path),
             show_arrows=not args.no_arrows,
+            initial_label=initial_label,
+            arrow_baseline=arrow_baseline,
         )
         metrics["benchmark"] = name
         metrics["wall_s"] = wall
