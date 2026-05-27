@@ -813,6 +813,74 @@ def _load_chain_policy(ckpt_path: Path):
     }
 
 
+# ── Proxy cost encoder loading (Phase 2.5) ─────────────────────────────────
+
+# Lazy-load encoder helpers on first call to _load_proxy_cost_encoder so
+# loading placer.py for a HPWL-only run doesn't pay the torch.nn import cost.
+_encoder_helpers: dict | None = None
+
+def _get_encoder_helpers() -> dict:
+    global _encoder_helpers
+    if _encoder_helpers is not None:
+        return _encoder_helpers
+    import importlib.util as _ilu
+    enc_spec = _ilu.spec_from_file_location(
+        "lkh_encoder", str(_HERE / "model" / "encoder.py")
+    )
+    enc_mod = _ilu.module_from_spec(enc_spec)
+    enc_spec.loader.exec_module(enc_mod)
+    _encoder_helpers = {
+        "_build_anchors": enc_mod._build_anchors,
+        "build_node_features": enc_mod.build_node_features,
+        "build_edge_index_and_attr": enc_mod.build_edge_index_and_attr,
+        "build_metadata_features": enc_mod.build_metadata_features,
+        "rasterize_canvas": enc_mod.rasterize_canvas,
+    }
+    return _encoder_helpers
+
+
+def _load_proxy_cost_encoder(ckpt_path: Path):
+    """Load a ProxyCostPredictor checkpoint. Returns a bundle dict or None.
+
+    The returned bundle includes:
+        model         ProxyCostPredictor (eval mode)
+        norm_stats    {bench_name: {wl_mean, wl_std, den_mean, den_std, ...}}
+        proxy_weights {wl: α, den: α, cong: α}
+        trained_on    list[str]
+
+    If the checkpoint does not carry ``"type": "proxy_cost_encoder"`` it is an
+    old MLP checkpoint and is ignored here (handled by _load_cost_approximator).
+    """
+    if not ckpt_path.exists():
+        return None
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    if ckpt.get("type") != "proxy_cost_encoder":
+        return None
+    try:
+        from lkh_model import ProxyCostPredictor
+    except ImportError:
+        return None
+    model = ProxyCostPredictor(
+        hidden_dim=ckpt["hidden_dim"],
+        num_gnn_layers=ckpt["num_gnn_layers"],
+        edge_fc_layers=ckpt.get("edge_fc_layers", 1),
+        grid_size=ckpt.get("grid_size", 128),
+        use_cnn=ckpt.get("use_cnn", True),
+    )
+    model.encoder.load_state_dict(ckpt["encoder_state"])
+    model.proxy_head.load_state_dict(ckpt["head_state"])
+    model.eval()
+    return {
+        "model": model,
+        "norm_stats": ckpt.get("norm_stats", {}),
+        "proxy_weights": ckpt.get("proxy_weights", {"wl": 1.0, "den": 0.5, "cong": 0.5}),
+        "pearson_r_wl": ckpt.get("pearson_r_wl"),
+        "pearson_r_den": ckpt.get("pearson_r_den"),
+        "pearson_r_cong": ckpt.get("pearson_r_cong"),
+        "trained_on": ckpt.get("trained_on"),
+    }
+
+
 # ── LK chain (greedy, optionally approximator-guided) ──────────────────────
 
 class LKChain:
@@ -830,7 +898,8 @@ class LKChain:
     def __init__(self, state: PlacementState, seed_macro: int,
                  rng: random.Random, approximator: dict | None = None,
                  policy_bundle: dict | None = None,
-                 gate_mode: str = "hpwl"):
+                 gate_mode: str = "hpwl",
+                 proxy_encoder: dict | None = None):
         """``gate_mode`` selects the third lex-coordinate of the commit gate:
 
         * ``"hpwl"`` (default): ``(overlap_pairs, overlap_area, hpwl)``.
@@ -845,6 +914,10 @@ class LKChain:
         self.approx = approximator
         self.policy_bundle = policy_bundle
         self.gate_mode = gate_mode
+        # proxy_encoder bundle includes {model, effective_weights, ...} for encoder scoring.
+        # effective_weights = {wl: α_wl * wl_std, den: α_den * den_std, cong: α_cong * cong_std}
+        # so delta scoring avoids denormalization arithmetic per candidate.
+        self.proxy_encoder = proxy_encoder
         if gate_mode not in ("hpwl", "predicted_proxy"):
             raise ValueError(
                 f"unknown gate_mode={gate_mode!r}; expected 'hpwl' or 'predicted_proxy'"
@@ -942,6 +1015,21 @@ class LKChain:
         # the same two macros under combined-score follow.
         visited: set[int] = {self.seed}
 
+        # Phase 2.5: build encoder inputs once at chain start. Topology
+        # (edge_index, edge_attr, metadata) is static; node_feats and canvas
+        # are updated after each committed move.
+        _enc_nf = _enc_ei = _enc_ea = _enc_canvas = _enc_md = _enc_hp = None
+        if self.proxy_encoder is not None:
+            _eh = _get_encoder_helpers()
+            _enc_anchors, _enc_anchor_inv = _eh["_build_anchors"](st)
+            _enc_nf = _eh["build_node_features"](st, _enc_anchors)
+            _enc_ei, _enc_ea = _eh["build_edge_index_and_attr"](st, _enc_anchor_inv)
+            _enc_md = _eh["build_metadata_features"](st, _enc_anchor_inv)
+            _enc_canvas = _eh["rasterize_canvas"](
+                st, grid_size=self.proxy_encoder["model"].encoder.grid_size
+            )
+            _enc_hp = float(st.cw + st.ch)
+
         for step in range(max_length):
             # A.3: candidate_positions returns up to 16 (1 centroid + 4
             # connected-partner offsets + 7 grid jitter + 4 random jumps).
@@ -964,7 +1052,45 @@ class LKChain:
             old_y = float(st.pos[current, 1])
 
             best_predicted_delta = 0.0  # used iff gate_mode == "predicted_proxy"
-            if self.approx is not None:
+            if self.proxy_encoder is not None:
+                # Phase 2.5: encoder scoring. Score each candidate by the
+                # encoder-predicted delta-proxy (before minus after). Canvas is
+                # stale for candidate evaluation (too expensive to recompute per
+                # candidate); updated after the committed move.
+                enc_model = self.proxy_encoder["model"]
+                ew = self.proxy_encoder["effective_weights"]
+                n_hard_enc = st.n
+                with torch.no_grad():
+                    pred_before = enc_model(
+                        _enc_nf, _enc_ei, _enc_ea, _enc_canvas, _enc_md, n_hard_enc
+                    )
+                cost_before = (
+                    ew["wl"] * pred_before[0]
+                    + ew["den"] * pred_before[1]
+                    + ew["cong"] * pred_before[2]
+                ).item()
+                for cx, cy in cands:
+                    nf_after = _enc_nf.clone()
+                    nf_after[current, 0] = cx / _enc_hp
+                    nf_after[current, 1] = cy / _enc_hp
+                    with torch.no_grad():
+                        pred_after = enc_model(
+                            nf_after, _enc_ei, _enc_ea, _enc_canvas, _enc_md, n_hard_enc
+                        )
+                    delta = (
+                        ew["wl"] * pred_after[0]
+                        + ew["den"] * pred_after[1]
+                        + ew["cong"] * pred_after[2]
+                    ).item() - cost_before
+                    st.apply_move(current, cx, cy)
+                    new_ov = len(st.overlapping_with(current))
+                    st.apply_move(current, old_x, old_y)
+                    score = delta + 0.5 * new_ov
+                    if score < best_score:
+                        best_score = score
+                        best_pos = (cx, cy)
+                        best_predicted_delta = delta
+            elif self.approx is not None:
                 feats = np.stack([
                     _features_for_move(
                         st, current,
@@ -1010,6 +1136,16 @@ class LKChain:
             length += 1
             if self.gate_mode == "predicted_proxy":
                 predicted_cumulative += best_predicted_delta
+
+            # Update encoder inputs to reflect committed position (canvas is
+            # expensive; recompute it only once per committed move, not per
+            # candidate). node_feats update is O(1).
+            if self.proxy_encoder is not None:
+                _enc_nf[current, 0] = best_pos[0] / _enc_hp
+                _enc_nf[current, 1] = best_pos[1] / _enc_hp
+                _enc_canvas = _get_encoder_helpers()["rasterize_canvas"](
+                    st, grid_size=self.proxy_encoder["model"].encoder.grid_size
+                )
 
             # Best-prefix snapshot (A.1): the state *after* this move is a
             # candidate commit point. If it lex-beats the current best, take
@@ -1112,16 +1248,35 @@ class LKHPlacer:
         # ``"predicted_proxy"`` requires a cascade-aware approximator from C.
         self.gate_mode = gate_mode
 
+        # Phase 2.5: try loading the proxy cost encoder first. If its checkpoint
+        # carries type=="proxy_cost_encoder", it supersedes the MLP approximator
+        # for candidate scoring. The MLP is still loaded as a fallback in case
+        # the encoder hasn't been trained yet (no checkpoint, or untrained).
+        enc_ckpt = Path(checkpoint_path) if checkpoint_path else (
+            _HERE / "checkpoints" / "proxy_cost_encoder.pt"
+        )
+        self.proxy_encoder = _load_proxy_cost_encoder(enc_ckpt)
+        if self.proxy_encoder is not None:
+            r_wl = self.proxy_encoder.get("pearson_r_wl")
+            r_den = self.proxy_encoder.get("pearson_r_den")
+            r_cong = self.proxy_encoder.get("pearson_r_cong")
+            trained_on = self.proxy_encoder.get("trained_on")
+            print(f"[LKHPlacer] proxy cost encoder loaded "
+                  f"(r_wl={r_wl}, r_den={r_den}, r_cong={r_cong}, "
+                  f"trained on {trained_on})")
+
         approx_ckpt = Path(checkpoint_path) if checkpoint_path else (
             _HERE / "checkpoints" / "cost_approximator.pt"
         )
-        self.approximator = _load_cost_approximator(approx_ckpt)
+        # Only load MLP approximator if encoder isn't available (it's superseded).
+        self.approximator = None if self.proxy_encoder is not None else \
+            _load_cost_approximator(approx_ckpt)
         if self.approximator is not None:
             r = self.approximator.get("pearson_r_val")
             trained_on = self.approximator.get("trained_on")
             print(f"[LKHPlacer] cost approximator loaded "
                   f"(r={r:.3f}, trained on {trained_on})")
-        else:
+        elif self.proxy_encoder is None:
             print(f"[LKHPlacer] no approximator at {approx_ckpt} — using HPWL surrogate")
 
         self.policy_bundle = None
@@ -1176,6 +1331,25 @@ class LKHPlacer:
         if not movable_idx:
             return benchmark.macro_positions.clone()
 
+        # Phase 2.5: resolve benchmark-specific encoder effective weights.
+        # effective_weights = {wl: α_wl * wl_std, den: α_den * den_std, cong: α_cong * cong_std}
+        # so per-candidate delta scoring avoids per-term denormalization.
+        bench_proxy_encoder: dict | None = None
+        if self.proxy_encoder is not None:
+            bench_name = benchmark.name
+            ns = self.proxy_encoder["norm_stats"].get(bench_name)
+            if ns is not None:
+                pw = self.proxy_encoder["proxy_weights"]
+                bench_proxy_encoder = dict(self.proxy_encoder)  # shallow copy
+                bench_proxy_encoder["effective_weights"] = {
+                    "wl":   pw["wl"]  * ns["wl_std"],
+                    "den":  pw["den"] * ns["den_std"],
+                    "cong": pw["cong"] * ns["cong_std"],
+                }
+            else:
+                print(f"[LKHPlacer] encoder has no norm_stats for {bench_name!r} "
+                      f"— falling back to HPWL surrogate")
+
         # Cost-weighted seed sampling: macros with highest neighbor-displacement
         # are sampled more often. Falls back to uniform if no edges.
         seed_weights = self._seed_weights(state, movable_idx)
@@ -1216,6 +1390,7 @@ class LKHPlacer:
                               approximator=self.approximator,
                               policy_bundle=self.policy_bundle,
                               gate_mode=self.gate_mode,
+                              proxy_encoder=bench_proxy_encoder,
                               ).run(self.max_chain_length)
             chains += 1
             if result["committed"]:

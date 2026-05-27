@@ -8,10 +8,13 @@ with three deviations noted inline:
      already placed, so `is_node_placed` is always 1 and carries no signal.
   3. Pure-PyTorch; no TF dependency.
 
-The encoder produces:
-    per_node  [n_hard, hidden_dim]      — one embedding per hard macro
-    global    [6 * hidden_dim]          — without current_node
-              [8 * hidden_dim]          — with current_node (+ attended + current)
+StateEncoder.forward produces three tensors:
+    per_node   [n_hard, H]    — one embedding per hard macro
+    gnn_global [5H or 7H]     — GNN-only global summary (without / with current_node)
+    cnn_global [H]            — CNN canvas features (exposed separately for ablation)
+
+encode_state() concatenates gnn_global + cnn_global → [6H or 8H] for callers
+that want the full global vector without caring about the CNN split.
 
 Components:
     GNNLayer:      One edge-centric message-passing step.
@@ -22,6 +25,8 @@ Components:
 Integration path (see ARCHITECTURE.md §2):
     encode_state(state, encoder, current_node=None)
         → (per_node [n_hard, H], global [6H or 8H])
+    StateEncoder.forward returns (per_node, gnn_global, cnn_global) separately;
+    encode_state concatenates them so callers see the same [6H/8H] shape as before.
 
 Smoke test:
     uv run python submissions/lkh/encoder.py
@@ -184,15 +189,16 @@ class StateEncoder(nn.Module):
     Matches Google's CircuitTrainingModel (model_lib.py) with the CNN added
     as a complementary canvas-level global view.
 
-    Output global vector components (matching model_lib.py:551-584):
-        h_metadata      [H]   — netlist-level circuit properties
-        h_edges_mean    [H]   — mean edge embedding (global wiring summary)
-        h_edges_var     [H]   — variance (spread of wire costs)
-        h_edges_max     [H]   — max (worst-case wires)
-        h_edges_min     [H]   — min
-        h_cnn           [H]   — canvas density/congestion (our addition)
-        h_attended      [H]   — current node's attention over all nodes (optional)
-        h_current_node  [H]   — current node's own embedding (optional)
+    Output (per_node, gnn_global, cnn_global):
+        gnn_global components (matching model_lib.py:551-584):
+            h_metadata      [H]   — netlist-level circuit properties
+            h_edges_mean    [H]   — mean edge embedding (global wiring summary)
+            h_edges_var     [H]   — variance (spread of wire costs)
+            h_edges_max     [H]   — max (worst-case wires)
+            h_edges_min     [H]   — min
+            h_attended      [H]   — current node's attention over all nodes (optional)
+            h_current_node  [H]   — current node's own embedding (optional)
+        cnn_global: [H]  — canvas density/congestion (returned separately for ablation)
     """
 
     NODE_DIM = 8
@@ -245,18 +251,21 @@ class StateEncoder(nn.Module):
         metadata: torch.Tensor,  # [12]
         n_hard: int,
         current_node: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             n_hard: number of hard macro nodes (first n_hard rows of node_features).
                     Anchor nodes follow after; per_node output is sliced to n_hard.
             current_node: index into node_features for the macro currently being
                     considered. When provided, adds h_attended and h_current_node
-                    to the global vector.
+                    to gnn_global.
 
         Returns:
-            per_node: [n_hard, H]
-            global:   [6H] without current_node, [8H] with current_node
+            per_node:   [n_hard, H]
+            gnn_global: [5H] without current_node, [7H] with current_node
+                        = concat(h_meta, h_edges_mean, h_edges_var, h_edges_max,
+                                 h_edges_min [, h_attended, h_current_node])
+            cnn_global: [H]  — CNN canvas features (exposed separately for ablation)
         """
         h_nodes, h_edges = self.gnn(node_features, edge_index, edge_attr)
         h_meta = self.metadata_encoder(metadata)
@@ -275,14 +284,14 @@ class StateEncoder(nn.Module):
             h_edges_max = torch.zeros(H, dtype=h_nodes.dtype, device=h_nodes.device)
             h_edges_min = torch.zeros(H, dtype=h_nodes.dtype, device=h_nodes.device)
 
-        global_parts = [h_meta, h_edges_mean, h_edges_var, h_edges_max, h_edges_min, h_cnn]
+        gnn_parts = [h_meta, h_edges_mean, h_edges_var, h_edges_max, h_edges_min]
 
         if current_node is not None:
             h_curr = h_nodes[current_node]
             h_attended = self._self_attention(h_curr, h_nodes)
-            global_parts.extend([h_attended, h_curr])
+            gnn_parts.extend([h_attended, h_curr])
 
-        return h_nodes[:n_hard], torch.cat(global_parts, dim=-1)
+        return h_nodes[:n_hard], torch.cat(gnn_parts, dim=-1), h_cnn
 
 
 # ── Feature builders (from PlacementState) ─────────────────────────────────
@@ -482,7 +491,7 @@ def encode_state(
     metadata = build_metadata_features(state, anchor_inverse)
     canvas = rasterize_canvas(state, grid_size=encoder.grid_size)
     with torch.no_grad():
-        return encoder(
+        per_node, gnn_global, cnn_global = encoder(
             node_feats,
             edge_index,
             edge_attr,
@@ -491,15 +500,17 @@ def encode_state(
             n_hard=state.n,
             current_node=current_node,
         )
+    return per_node, torch.cat([gnn_global, cnn_global], dim=-1)
 
 
 # ── Smoke test ─────────────────────────────────────────────────────────────
 
 
 def _smoke_test():
+    # _HERE = submissions/lkh/model; project root is _HERE.parent.parent
     sys.path.insert(0, str(_HERE.parent.parent))
 
-    spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer.py"))
+    spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE.parent / "placer.py"))
     placer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(placer)
 
@@ -543,29 +554,40 @@ def _smoke_test():
     t = time.time()
     with torch.no_grad():
         for _ in range(n_runs):
-            per_node, global_vec = encoder(nf, ei, ea, cv, md, n_hard=state.n)
+            per_node, gnn_global, cnn_global = encoder(nf, ei, ea, cv, md, n_hard=state.n)
     fwd_ms = (time.time() - t) * 1000 / n_runs
     print(f"\n  forward (no current_node): {fwd_ms:.1f} ms avg over {n_runs}")
-    print(f"    per_node : {tuple(per_node.shape)}   expected ({state.n}, 128)")
-    print(f"    global   : {tuple(global_vec.shape)}  expected (768,)  [6×128]")
+    print(f"    per_node   : {tuple(per_node.shape)}   expected ({state.n}, 128)")
+    print(f"    gnn_global : {tuple(gnn_global.shape)}  expected (640,)  [5×128]")
+    print(f"    cnn_global : {tuple(cnn_global.shape)}  expected (128,)  [1×128]")
 
     with torch.no_grad():
-        per_node_c, global_c = encoder(nf, ei, ea, cv, md, n_hard=state.n, current_node=0)
+        per_node_c, gnn_global_c, cnn_global_c = encoder(
+            nf, ei, ea, cv, md, n_hard=state.n, current_node=0
+        )
     print(f"\n  forward (current_node=0):")
-    print(f"    per_node : {tuple(per_node_c.shape)}   expected ({state.n}, 128)")
-    print(f"    global   : {tuple(global_c.shape)}  expected (1024,) [8×128]")
+    print(f"    per_node   : {tuple(per_node_c.shape)}   expected ({state.n}, 128)")
+    print(f"    gnn_global : {tuple(gnn_global_c.shape)}  expected (896,)  [7×128]")
+    print(f"    cnn_global : {tuple(cnn_global_c.shape)}  expected (128,)  [1×128]")
+
+    # encode_state still returns the concatenated form for backward compat
+    p2, g2 = encode_state(state, encoder, current_node=None)
+    assert g2.shape == (768,), f"encode_state global shape (no current): {g2.shape}"
+    p3, g3 = encode_state(state, encoder, current_node=0)
+    assert g3.shape == (1024,), f"encode_state global shape (with current): {g3.shape}"
 
     # Gradient flow
     encoder.train()
-    per_node2, global2 = encoder(nf, ei, ea, cv, md, n_hard=state.n, current_node=0)
-    loss = per_node2.pow(2).mean() + global2.pow(2).mean()
+    per_node2, gnn2, cnn2 = encoder(nf, ei, ea, cv, md, n_hard=state.n, current_node=0)
+    loss = per_node2.pow(2).mean() + gnn2.pow(2).mean() + cnn2.pow(2).mean()
     loss.backward()
     grad_ok = all(p.grad is not None and torch.isfinite(p.grad).all() for p in encoder.parameters())
     print(f"\n  backward pass   : gradients finite = {grad_ok}")
 
     assert per_node.shape == (state.n, 128), f"per_node shape mismatch: {per_node.shape}"
-    assert global_vec.shape == (768,), f"global shape mismatch (no current): {global_vec.shape}"
-    assert global_c.shape == (1024,), f"global shape mismatch (with current): {global_c.shape}"
+    assert gnn_global.shape == (640,), f"gnn_global shape mismatch: {gnn_global.shape}"
+    assert cnn_global.shape == (128,), f"cnn_global shape mismatch: {cnn_global.shape}"
+    assert gnn_global_c.shape == (896,), f"gnn_global shape (current) mismatch: {gnn_global_c.shape}"
     assert grad_ok, "gradient flow broken"
     print("\n  All assertions passed.")
 

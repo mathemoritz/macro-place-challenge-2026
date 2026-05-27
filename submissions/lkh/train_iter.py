@@ -51,6 +51,7 @@ sys.path.insert(0, str(_HERE.parent.parent))
 # Load helper modules without dragging the macro_place package init through
 # importlib for a second time.
 import train as _train          # Phase 3 trainer
+import train_encoder as _train_enc  # Phase 2.5 encoder pre-trainer
 import train_policy as _trainp  # Phase 4 trainer
 from lkh_model import FEATURE_DIM
 
@@ -360,6 +361,19 @@ def main():
     p.add_argument("--calibration-time-budget", type=float, default=10.0,
                    help="C.3: seconds per-benchmark for the calibration "
                         "placer pass (default 10).")
+    # ── Phase 2.5: encoder pre-training ────────────────────────────────────
+    p.add_argument("--encoder-ckpt",
+                   default=str(_HERE / "checkpoints" / "proxy_cost_encoder.pt"),
+                   help="Path for ProxyCostPredictor checkpoint.")
+    p.add_argument("--encoder-samples", type=int, default=200,
+                   help="Random placement samples per benchmark for encoder training.")
+    p.add_argument("--encoder-epochs", type=int, default=100)
+    p.add_argument("--encoder-cache-dir",
+                   default=str(_HERE / "data" / "encoder" / "per_bench"),
+                   help="Cache dir for per-benchmark encoder data.")
+    p.add_argument("--skip-encoder-training", action="store_true",
+                   help="Skip Phase 2.5 encoder pre-training (use if checkpoint "
+                        "already exists or if you want MLP-only scoring).")
     args = p.parse_args()
 
     if args.preset is not None:
@@ -381,6 +395,50 @@ def main():
           f"policy_iters={args.policy_iterations}")
     if output_root is not None:
         print(f"  output_root={output_root}")
+
+    # ── Phase 2.5: encoder pre-training (once, before iterative rounds) ────
+    enc_ckpt = Path(args.encoder_ckpt)
+    if not args.skip_encoder_training:
+        if enc_ckpt.exists():
+            print(f"\n[Phase 2.5] encoder checkpoint already exists at {enc_ckpt} — skipping")
+        else:
+            print(f"\n[Phase 2.5] ProxyCostPredictor encoder pre-training "
+                  f"({args.encoder_samples} samples/benchmark, {args.encoder_epochs} epochs)...")
+            bench_data = _train_enc.load_all_caches(
+                benchmarks,
+                cache_dir=Path(args.encoder_cache_dir),
+                n_samples=args.encoder_samples,
+                seed=args.seed,
+                grid_size=128,
+                force_recollect=False,
+            )
+            enc_model, enc_info = _train_enc.train_proxy_encoder(
+                bench_data,
+                epochs=args.encoder_epochs,
+                seed=args.seed,
+            )
+            enc_ckpt.parent.mkdir(parents=True, exist_ok=True)
+            import torch as _torch
+            _torch.save({
+                "type": "proxy_cost_encoder",
+                "encoder_state": enc_model.encoder.state_dict(),
+                "head_state": enc_model.proxy_head.state_dict(),
+                "hidden_dim": enc_model.hidden_dim,
+                "num_gnn_layers": enc_model.encoder.gnn.layers.__len__(),
+                "edge_fc_layers": 1,
+                "grid_size": enc_model.encoder.grid_size,
+                "use_cnn": enc_model.use_cnn,
+                "norm_stats": enc_info["norm_stats"],
+                "proxy_weights": _train_enc.PROXY_WEIGHTS,
+                "pearson_r_wl": enc_info["pearson_r_wl"],
+                "pearson_r_den": enc_info["pearson_r_den"],
+                "pearson_r_cong": enc_info["pearson_r_cong"],
+                "best_val_r_mean": enc_info["best_val_r_mean"],
+                "trained_on": benchmarks,
+                "n_train": enc_info["n_train"],
+                "n_val": enc_info["n_val"],
+            }, enc_ckpt)
+            print(f"  encoder checkpoint -> {enc_ckpt}")
 
     history: list[dict] = []
     for r in range(args.rounds):

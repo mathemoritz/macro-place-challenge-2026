@@ -297,6 +297,34 @@ def run_train(benchmark: str, num_examples: int, epochs: int, seed: int,
 
 
 @app.function(image=image, volumes={"/output": volume},
+              gpu="A10G", memory=16384, timeout=4 * 3600,
+              nonpreemptible=True)
+def run_train_encoder(benchmarks: str, n_samples: int, epochs: int,
+                      seed: int = 42, force_recollect: bool = False) -> None:
+    """Phase 2.5: train ProxyCostPredictor on GPU.
+
+    Args:
+        benchmarks: single name, comma-separated list, or 'all'.
+        n_samples: random placement samples per benchmark.
+        epochs: training epochs.
+        seed: random seed.
+        force_recollect: re-collect data even if per-benchmark caches exist.
+    """
+    _setup_env()
+    cmd = ["python", "submissions/lkh/train_encoder.py",
+           "--benchmarks", benchmarks,
+           "--samples", str(n_samples),
+           "--epochs", str(epochs),
+           "--seed", str(seed),
+           "--cache-dir", "/output/iter/encoder/per_bench",
+           "--checkpoint-out", "/output/iter/checkpoints/proxy_cost_encoder.pt"]
+    if force_recollect:
+        cmd.append("--force-recollect")
+    _run(cmd)
+    _persist("encoder")
+
+
+@app.function(image=image, volumes={"/output": volume},
               cpu=8.0, memory=8192, timeout=12 * 3600,
               nonpreemptible=True)
 def run_policy(benchmark: str, iterations: int, trajectories_per_iter: int,
