@@ -29,6 +29,7 @@ from typing import Callable, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))                       # for lkh_model
@@ -486,16 +487,118 @@ def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
 
 # ── Training ───────────────────────────────────────────────────────────────
 
+def _synthesize_group_ids(n: int, n_calibration_samples: int,
+                          main_group_size: int = 8,
+                          calibration_group_size: int = 4) -> np.ndarray:
+    """Synthesize group_ids for the standard data layout ``[cal | main]``.
+
+    Tier-1 Fix B: existing per-benchmark caches don't store group_ids, but
+    ``_collect_one_benchmark`` and ``collect_calibration_samples`` both lay
+    out their samples in contiguous (macro_idx, base_state) groups — 8
+    candidates per main-group, 4 per calibration-group. The pairwise rank
+    loss only needs to know which examples are siblings (collected from the
+    same parent state), so we reconstruct group_ids from this layout.
+
+    Layout assumption: when calibration data is prepended (``train_iter``
+    Step 1a does this), ``features[:n_calibration_samples]`` is the
+    calibration block and the rest is the main block.
+    """
+    if n == 0:
+        return np.zeros(0, dtype=np.int64)
+    ids = np.zeros(n, dtype=np.int64)
+    cur = 0
+    if n_calibration_samples > 0:
+        cal_n = min(n_calibration_samples, n)
+        ids[:cal_n] = np.arange(cal_n) // calibration_group_size
+        cur = int(ids[:cal_n].max()) + 1
+    if n > n_calibration_samples:
+        rest = n - n_calibration_samples
+        ids[n_calibration_samples:] = (np.arange(rest) // main_group_size) + cur
+    return ids
+
+
+def _pairwise_rank_loss(pred: torch.Tensor, true: torch.Tensor,
+                        pair_left: torch.Tensor, pair_right: torch.Tensor,
+                        pair_sign: torch.Tensor, margin: float = 0.1) -> torch.Tensor:
+    """Margin ranking loss over within-group pairs (Fix B).
+
+    For each pair ``(i, j)`` where ``true[i] - true[j]`` has known sign
+    ``s``, penalize predictions that disagree: ``ReLU(margin - s * (pred[i]
+    - pred[j]))``. Pre-computed pair indices and signs allow vectorized
+    evaluation. ``pred`` and ``true`` are the network output and targets
+    for a flat set of examples (positions referenced by ``pair_*``).
+    """
+    if len(pair_left) == 0:
+        return torch.tensor(0.0, dtype=pred.dtype)
+    diff_pred = pred[pair_left] - pred[pair_right]
+    return F.relu(margin - pair_sign * diff_pred).mean()
+
+
+def _spearman_corr(pred: np.ndarray, true: np.ndarray) -> float:
+    """Rank correlation, the metric the placer actually cares about
+    (argmin-over-candidates is a ranking decision)."""
+    if len(pred) < 2:
+        return 0.0
+    return float(np.corrcoef(np.argsort(np.argsort(pred)),
+                              np.argsort(np.argsort(true)))[0, 1])
+
+
 def train_model(features: np.ndarray, targets: np.ndarray, *,
                 epochs: int, batch_size: int, lr: float, hidden: int,
-                val_frac: float, seed: int) -> tuple[nn.Module, dict]:
-    """Standard supervised regression with normalized features and targets."""
+                val_frac: float, seed: int,
+                n_calibration_samples: int = 0,
+                rank_loss_enabled: bool = True,
+                rank_weight: float = 1.0,
+                rank_margin: float = 0.1,
+                main_group_size: int = 8,
+                calibration_group_size: int = 4,
+                patience: int | None = None) -> tuple[nn.Module, dict]:
+    """Supervised regression with optional pairwise rank loss.
+
+    Tier-1 Fix A: best checkpoint is selected by **val Spearman ρ**, not
+    val Smooth-L1. The placer uses the model as an argmin-over-candidates
+    scorer, so rank correlation is the relevant metric. Pre-fix Smooth-L1
+    selection preferred amplitude-correct but rank-poor checkpoints; the
+    100-epoch ``long12h`` run showed train_loss → 0.003 with Spearman
+    plateauing at ~0.83, then degrading.
+
+    Tier-1 Fix B: when ``rank_loss_enabled`` is True (default) and groups
+    can be synthesized from the standard data layout, a pairwise margin
+    ranking loss is added. Within-group pairs are pre-computed once and
+    evaluated as a single tensor op per epoch.
+
+    Early stopping kicks in after ``patience`` epochs without Spearman
+    improvement (default ``max(10, epochs // 5)``).
+    """
     rng = np.random.RandomState(seed)
     n = len(features)
-    perm = rng.permutation(n)
-    n_val = int(n * val_frac)
-    val_idx = perm[:n_val]
-    train_idx = perm[n_val:]
+
+    if patience is None:
+        patience = max(10, epochs // 5)
+
+    # Group ids drive both the train/val split and rank-loss pair construction.
+    # Splitting by group prevents within-group pairs from straddling the split,
+    # which would leak rank information into the val Spearman metric.
+    if rank_loss_enabled:
+        group_ids = _synthesize_group_ids(
+            n, n_calibration_samples,
+            main_group_size=main_group_size,
+            calibration_group_size=calibration_group_size,
+        )
+        unique_groups = np.unique(group_ids)
+        group_perm = rng.permutation(unique_groups)
+        n_val_groups = max(1, int(len(unique_groups) * val_frac))
+        val_group_set = set(int(g) for g in group_perm[:n_val_groups].tolist())
+        is_val = np.fromiter((int(g) in val_group_set for g in group_ids),
+                              dtype=bool, count=n)
+        val_idx = np.where(is_val)[0]
+        train_idx = np.where(~is_val)[0]
+    else:
+        perm = rng.permutation(n)
+        n_val = int(n * val_frac)
+        val_idx = perm[:n_val]
+        train_idx = perm[n_val:]
+        group_ids = None
 
     X = torch.tensor(features, dtype=torch.float32)
     y = torch.tensor(targets, dtype=torch.float32)
@@ -516,10 +619,49 @@ def train_model(features: np.ndarray, targets: np.ndarray, *,
     X_val, y_val_norm = X[val_idx], y_norm[val_idx]
     y_val_raw = y[val_idx]
 
+    # Pre-compute within-group pair tensors (train side only). Pairs are
+    # referenced by position within X_train, not by original cache index.
+    train_pair_left = train_pair_right = train_pair_sign = None
+    if rank_loss_enabled and group_ids is not None:
+        orig_to_train_pos: dict[int, int] = {int(o): pos
+                                              for pos, o in enumerate(train_idx)}
+        # Bucket positions in X_train by their group id.
+        train_groups: dict[int, list[int]] = {}
+        for orig in train_idx:
+            g = int(group_ids[orig])
+            train_groups.setdefault(g, []).append(orig_to_train_pos[int(orig)])
+
+        left, right, sign = [], [], []
+        for positions in train_groups.values():
+            k = len(positions)
+            if k < 2:
+                continue
+            for i in range(k):
+                for j in range(i + 1, k):
+                    a, b = positions[i], positions[j]
+                    diff = float(y_train[a].item() - y_train[b].item())
+                    if abs(diff) < 1e-9:
+                        continue
+                    left.append(a)
+                    right.append(b)
+                    sign.append(1.0 if diff > 0 else -1.0)
+        if left:
+            train_pair_left = torch.tensor(left, dtype=torch.long)
+            train_pair_right = torch.tensor(right, dtype=torch.long)
+            train_pair_sign = torch.tensor(sign, dtype=torch.float32)
+            print(f"  rank loss: {len(left):,} pairs from "
+                  f"{len(train_groups)} groups "
+                  f"(weight={rank_weight}, margin={rank_margin})")
+        else:
+            print(f"  rank loss: no usable pairs (group_size too small)")
+
     best_state = None
-    best_val_loss = float("inf")
+    best_spearman = -float("inf")
+    best_epoch = 0
+    epochs_since_improvement = 0
 
     for epoch in range(epochs):
+        # ── Smooth-L1 pass over mini-batches ──────────────────────────────
         model.train()
         idx = torch.randperm(len(X_train))
         total = 0.0
@@ -533,23 +675,71 @@ def train_model(features: np.ndarray, targets: np.ndarray, *,
             total += loss.item() * len(b)
         train_loss = total / len(X_train)
 
+        # ── Pairwise rank pass (full-data, chunked for memory) ────────────
+        rank_loss_avg = 0.0
+        if train_pair_left is not None:
+            n_pairs = len(train_pair_left)
+            # Cap pair evaluations per epoch to bound time on huge datasets.
+            max_pairs_per_epoch = 30_000
+            if n_pairs > max_pairs_per_epoch:
+                sub = torch.randperm(n_pairs)[:max_pairs_per_epoch]
+                pl = train_pair_left[sub]
+                pr = train_pair_right[sub]
+                ps = train_pair_sign[sub]
+            else:
+                pl, pr, ps = train_pair_left, train_pair_right, train_pair_sign
+            chunk = 4096
+            n_used = 0
+            for k in range(0, len(pl), chunk):
+                la = pl[k:k + chunk]
+                ra = pr[k:k + chunk]
+                sa = ps[k:k + chunk]
+                # Forward each leg separately so backward through both
+                # contributes to model params.
+                pred_l = model(X_train[la])
+                pred_r = model(X_train[ra])
+                rank_loss = F.relu(rank_margin - sa * (pred_l - pred_r)).mean()
+                opt.zero_grad()
+                (rank_weight * rank_loss).backward()
+                opt.step()
+                rank_loss_avg += float(rank_loss.item()) * len(la)
+                n_used += len(la)
+            rank_loss_avg /= max(n_used, 1)
+
+        # ── Evaluation ────────────────────────────────────────────────────
         model.eval()
         with torch.no_grad():
             val_pred = model(X_val)
         val_loss = float(loss_fn(val_pred, y_val_norm))
         val_pred_raw = val_pred.numpy() * target_std + target_mean
-        pearson = float(np.corrcoef(val_pred_raw, y_val_raw.numpy())[0, 1])
+        y_val_np = y_val_raw.numpy()
+        pearson = float(np.corrcoef(val_pred_raw, y_val_np)[0, 1])
+        spearman_val = _spearman_corr(val_pred_raw, y_val_np)
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # Best by Spearman — the placer ranks candidates, so this is the
+        # metric that actually predicts downstream proxy improvement.
+        if spearman_val > best_spearman:
+            best_spearman = spearman_val
+            best_epoch = epoch
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            epochs_since_improvement = 0
+        else:
+            epochs_since_improvement += 1
 
         if epoch % 5 == 0 or epoch == epochs - 1:
+            extra = f"  rank={rank_loss_avg:.4f}" if train_pair_left is not None else ""
             print(f"  epoch {epoch:3d}  train={train_loss:.4f}  val={val_loss:.4f}  "
-                  f"pearson_r={pearson:.3f}")
+                  f"pearson_r={pearson:.3f}  spearman_ρ={spearman_val:.3f}{extra}")
+
+        if epochs_since_improvement >= patience:
+            print(f"  early-stop at epoch {epoch} "
+                  f"(best Spearman={best_spearman:.3f} @ epoch {best_epoch}, "
+                  f"patience={patience})")
+            break
 
     if best_state is not None:
         model.load_state_dict(best_state)
+        print(f"  loaded best-Spearman checkpoint from epoch {best_epoch}")
 
     model.eval()
     with torch.no_grad():
