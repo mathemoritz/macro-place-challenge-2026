@@ -216,6 +216,25 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     per_bench_traj_count = {n: 0 for n in benchmarks}
     per_bench_commit_count = {n: 0 for n in benchmarks}
 
+    # Tier-1 Fix C: track the best policy by EMA-smoothed commit rate, not
+    # the last iteration's weights. PPO can collapse late in training
+    # (entropy → 0, policy outputs the same action everywhere) and the
+    # last-iter checkpoint then ships that collapsed policy. The README
+    # explicitly lists "best-policy tracking" as deferred work; this is it.
+    #
+    # Commit rate (per-iter fraction of trajectories that committed an
+    # improvement) is the right proxy for "how often is this policy doing
+    # useful work" — higher = better. Smooth with an EMA so a single
+    # lucky iteration doesn't pin the best checkpoint.
+    best_commit_ema = -float("inf")
+    best_state_dict = {k: v.detach().clone() for k, v in policy.state_dict().items()}
+    best_iter = 0
+    commit_ema: float | None = None
+    EMA_ALPHA = 0.1
+    # Skip the first few iterations so the EMA isn't pinned to a noisy
+    # warm-start. 20 iters is ~2-5% of typical runs.
+    WARMUP_ITERS = 20
+
     history = []
     t_start = time.time()
     for it in range(n_iterations):
@@ -268,11 +287,23 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         commit_rate = commit_count / max(trajectories_per_iter, 1)
         avg_gain = gain_total / max(commit_count, 1)
 
+        # Tier-1 Fix C: smooth commit rate via EMA, and snapshot the policy
+        # at the running peak. After WARMUP_ITERS we treat the EMA as
+        # stable enough to act on; before that we just initialize it.
+        commit_ema = (commit_rate if commit_ema is None
+                       else EMA_ALPHA * commit_rate + (1 - EMA_ALPHA) * commit_ema)
+        if it >= WARMUP_ITERS and commit_ema > best_commit_ema:
+            best_commit_ema = commit_ema
+            best_iter = it
+            best_state_dict = {k: v.detach().clone()
+                               for k, v in policy.state_dict().items()}
+
         record = {
             "iter": it,
             "avg_reward_per_traj": avg_traj_reward,
             "avg_length": avg_traj_length,
             "commit_rate": commit_rate,
+            "commit_ema": commit_ema,
             "avg_gain": avg_gain,
             **metrics,
         }
@@ -280,8 +311,10 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
 
         if it % log_every == 0 or it == n_iterations - 1:
             elapsed = time.time() - t_start
+            star = " *" if it == best_iter else ""
             print(f"  it {it:4d}  R/traj={avg_traj_reward:+.4f}  "
-                  f"len={avg_traj_length:.1f}  commit={commit_rate:.0%}  "
+                  f"len={avg_traj_length:.1f}  commit={commit_rate:.0%}"
+                  f"(ema={commit_ema:.0%}){star}  "
                   f"gain={avg_gain:+.4f}  "
                   f"pi={metrics['policy_loss']:+.3f}  "
                   f"vf={metrics['value_loss']:.3f}  "
@@ -297,12 +330,26 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
             rate = n_commit / max(n_traj, 1)
             print(f"    {name:>10}  {n_commit}/{n_traj} = {rate:.0%}")
 
+    # Tier-1 Fix C: ship the best-by-commit-EMA snapshot, not the last
+    # iteration's weights. Fall back to the last state only if we never
+    # cleared the warmup gate (very short training runs).
+    if best_commit_ema > -float("inf"):
+        policy.load_state_dict(best_state_dict)
+        ship_state_dict = best_state_dict
+        print(f"  shipping best-by-commit-EMA policy "
+              f"(iter {best_iter}, EMA={best_commit_ema:.0%})")
+    else:
+        ship_state_dict = policy.state_dict()
+        print(f"  shipping last-iter policy (no warmup-cleared best yet)")
+
     output_ckpt.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
-        "state_dict": policy.state_dict(),
+        "state_dict": ship_state_dict,
         "trained_on": benchmarks,
         "n_iterations": n_iterations,
         "hidden": 64,
+        "best_commit_ema": best_commit_ema,
+        "best_iter": best_iter,
     }, output_ckpt)
     print(f"  policy -> {output_ckpt}")
     return {"history": history, "policy": policy}
