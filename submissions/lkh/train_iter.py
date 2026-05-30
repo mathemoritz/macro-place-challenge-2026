@@ -54,7 +54,7 @@ import train as _train          # Phase 3 trainer
 import train_policy as _trainp  # Phase 4 trainer
 from lkh_model import FEATURE_DIM
 
-# Local / non-Modal mirror of ``modal_run.LONG_RUN_12H`` (~12 h on 17 benchmarks).
+# Mirror of ``modal_run.ITER_PRESETS`` (training knobs only; no output_tag).
 PRESETS: dict[str, dict[str, int | float]] = {
     "long12h": {
         "rounds": 5,
@@ -65,6 +65,16 @@ PRESETS: dict[str, dict[str, int | float]] = {
         "eval_time_budget": 60.0,
         "calibration_samples_per_bench": 75,
         "calibration_time_budget": 15.0,
+    },
+    "medium4h": {
+        "rounds": 3,
+        "examples": 240,
+        "cost_epochs": 50,
+        "policy_iterations": 1000,
+        "trajectories_per_iter": 4,
+        "eval_time_budget": 25.0,
+        "calibration_samples_per_bench": 25,
+        "calibration_time_budget": 10.0,
     },
 }
 
@@ -153,23 +163,32 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         # Calibration captures (features, true_Δproxy) at inference-time
         # states; mixing them into the next round's training distribution
         # closes the §5.4 within-round calibration gap.
+        n_calibration_samples = 0
         if enable_calibration and round_idx > 0 and output_root is not None:
             prev_cal = output_root / f"round_{round_idx - 1}_calibration.pt"
             if prev_cal.exists():
                 cal = torch.load(prev_cal, weights_only=False)
                 features = np.concatenate([cal["features"], features], axis=0)
                 targets = np.concatenate([cal["targets"], targets], axis=0)
-                print(f"  prepended {len(cal['features'])} calibration "
+                n_calibration_samples = int(len(cal["features"]))
+                print(f"  prepended {n_calibration_samples} calibration "
                       f"samples from {prev_cal.name}")
         torch.save({"features": features, "targets": targets,
-                    "benchmarks": benchmarks, "feature_dim": FEATURE_DIM},
+                    "benchmarks": benchmarks, "feature_dim": FEATURE_DIM,
+                    "n_calibration_samples": n_calibration_samples},
                    data_path)
+    else:
+        # Cached aggregated chain_data.pt; recover the prepend count for the
+        # rank-loss group synthesizer. Falls back to 0 if the cache is older
+        # than Fix B (the rank loss then treats the whole array as main).
+        n_calibration_samples = int(cached.get("n_calibration_samples", 0))
 
     print(f"\n[Round {round_idx}] Step 1b: train CostApproximator "
           f"({len(features)} examples, {cost_epochs} epochs)")
     model, info = _train.train_model(
         features, targets, epochs=cost_epochs, batch_size=64,
         lr=1e-3, hidden=64, val_frac=0.2, seed=seed + round_idx,
+        n_calibration_samples=n_calibration_samples,
     )
     cost_ckpt.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
@@ -312,7 +331,7 @@ def main():
     p.add_argument("--preset", choices=sorted(PRESETS), default=None,
                    help="Apply a hyperparameter bundle (overrides other training "
                         "flags except --benchmark and paths). Use 'long12h' for "
-                        "~12 h Modal run; prefer modal_run.py::iter_12h on cloud.")
+                        "~12 h Modal run; prefer modal_run.py::iter_ --preset long12h on cloud.")
     p.add_argument("--rounds", type=int, default=2)
     p.add_argument("--examples", type=int, default=400,
                    help="Per-benchmark example count (Phase 3 data collection).")

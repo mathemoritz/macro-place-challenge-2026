@@ -48,7 +48,8 @@ persisted to the Modal Volume ``lkh-results``. Download with:
 
 Reference (CS224R Modal Compute Guide, sections 4-5).
 
-12-hour overnight preset (``iter_12h``) — see ``LONG_RUN_12H`` and ``iter_12h`` below.
+Phase 5 presets (``ITER_PRESETS``) and ``iter_ --preset <name>`` for parallel runs
+with different hyperparameters / output trees.
 """
 
 from __future__ import annotations
@@ -371,19 +372,54 @@ def collect_one_benchmark_modal(name: str, num_examples: int, seed: int) -> dict
             "wall_s": float(wall), "from_cache": False}
 
 
-# Budgeted for ~12 h wall time on 17 IBM benchmarks (parallel collection +
-# 5 iterative rounds). Scales roughly linearly in ``examples`` and in
-# ``policy_iterations * trajectories_per_iter``.
-LONG_RUN_12H: dict[str, Any] = {
-    "benchmark": "all",
-    "rounds": 5,
-    "examples": 240,
-    "cost_epochs": 100,
-    "policy_iterations": 3500,
-    "trajectories_per_iter": 16,
-    "eval_time_budget": 60.0,
-    "calibration_samples_per_bench": 75,
-    "calibration_time_budget_s": 15.0,
+# Named hyperparameter bundles for ``iter_ --preset <name>``. Override any field
+# on the CLI (e.g. ``--output-tag iter_exp2``). Use distinct ``output_tag`` values
+# when launching parallel jobs on the same volume.
+ITER_PRESETS: dict[str, dict[str, Any]] = {
+    "long12h": {
+        "benchmark": "all",
+        "rounds": 5,
+        "examples": 240,
+        "cost_epochs": 100,
+        "policy_iterations": 3500,
+        "trajectories_per_iter": 16,
+        "eval_time_budget": 60.0,
+        "calibration_samples_per_bench": 75,
+        "calibration_time_budget_s": 15.0,
+        "seed": 42,
+        "force_recollect": False,
+        "output_tag": "iter",
+        "cache_read_dir": "",
+        "skip_collection": False,
+    },
+    "medium4h": {
+        "benchmark": "all",
+        "rounds": 3,
+        "examples": 240,
+        "cost_epochs": 50,
+        "policy_iterations": 1000,
+        "trajectories_per_iter": 4,
+        "eval_time_budget": 25.0,
+        "calibration_samples_per_bench": 25,
+        "calibration_time_budget_s": 10.0,
+        "seed": 43,
+        "force_recollect": False,
+        "output_tag": "iter_medium",
+        "cache_read_dir": "/output/iter/per_bench",
+        "skip_collection": True,
+    },
+}
+
+_DEFAULT_ITER_KWARGS: dict[str, Any] = {
+    "benchmark": "ibm01",
+    "rounds": 2,
+    "examples": 400,
+    "cost_epochs": 60,
+    "policy_iterations": 1000,
+    "trajectories_per_iter": 4,
+    "eval_time_budget": 20.0,
+    "calibration_samples_per_bench": 50,
+    "calibration_time_budget_s": 10.0,
     "seed": 42,
     "force_recollect": False,
     "output_tag": "iter",
@@ -391,22 +427,62 @@ LONG_RUN_12H: dict[str, Any] = {
     "skip_collection": False,
 }
 
-MEDIUM_RUN_4H: dict[str, Any] = {
-    "benchmark": "all",
-    "rounds": 3,
-    "examples": 240,
-    "cost_epochs": 50,
-    "policy_iterations": 1000,
-    "trajectories_per_iter": 4,
-    "eval_time_budget": 25.0,
-    "calibration_samples_per_bench": 25,
-    "calibration_time_budget_s": 10.0,
-    "seed": 43,
-    "force_recollect": False,
-    "output_tag": "iter_medium",
-    "cache_read_dir": "/output/iter/per_bench",
-    "skip_collection": True,
-}
+
+def _resolve_iter_kwargs(
+    *,
+    preset: str = "",
+    benchmark: str = "",
+    rounds: int = 0,
+    examples: int = 0,
+    cost_epochs: int = 0,
+    policy_iterations: int = 0,
+    trajectories_per_iter: int = 0,
+    eval_time_budget: float = 0.0,
+    calibration_samples_per_bench: int = 0,
+    calibration_time_budget_s: float = 0.0,
+    seed: int = 0,
+    force_recollect: bool = False,
+    output_tag: str = "",
+    cache_read_dir: str = "",
+    skip_collection: bool = False,
+) -> dict[str, Any]:
+    """Merge defaults, optional preset, then explicit CLI overrides (non-zero / non-empty)."""
+    if preset and preset not in ITER_PRESETS:
+        raise ValueError(
+            f"unknown preset {preset!r}; choose from {sorted(ITER_PRESETS)}"
+        )
+    out = dict(_DEFAULT_ITER_KWARGS)
+    if preset:
+        out.update(ITER_PRESETS[preset])
+    if benchmark:
+        out["benchmark"] = benchmark
+    if rounds > 0:
+        out["rounds"] = rounds
+    if examples > 0:
+        out["examples"] = examples
+    if cost_epochs > 0:
+        out["cost_epochs"] = cost_epochs
+    if policy_iterations > 0:
+        out["policy_iterations"] = policy_iterations
+    if trajectories_per_iter > 0:
+        out["trajectories_per_iter"] = trajectories_per_iter
+    if eval_time_budget > 0:
+        out["eval_time_budget"] = eval_time_budget
+    if calibration_samples_per_bench > 0:
+        out["calibration_samples_per_bench"] = calibration_samples_per_bench
+    if calibration_time_budget_s > 0:
+        out["calibration_time_budget_s"] = calibration_time_budget_s
+    if seed != 0:
+        out["seed"] = seed
+    if output_tag:
+        out["output_tag"] = output_tag
+    if cache_read_dir:
+        out["cache_read_dir"] = cache_read_dir
+    if force_recollect:
+        out["force_recollect"] = True
+    if skip_collection:
+        out["skip_collection"] = True
+    return out
 
 
 def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
@@ -526,24 +602,6 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
     )
 
 
-@app.function(image=image, volumes={"/output": volume},
-              cpu=8.0, memory=16384, timeout=4 * 3600,
-              nonpreemptible=True)
-def run_iter_medium(benchmark: str, rounds: int, examples: int,
-                    cost_epochs: int, policy_iterations: int,
-                    trajectories_per_iter: int, eval_time_budget: float,
-                    seed: int, force_recollect: bool,
-                    calibration_samples_per_bench: int,
-                    calibration_time_budget_s: float, output_tag: str,
-                    cache_read_dir: str, skip_collection: bool) -> None:
-    _run_iter_impl(
-        benchmark, rounds, examples, cost_epochs, policy_iterations,
-        trajectories_per_iter, eval_time_budget, seed, force_recollect,
-        calibration_samples_per_bench, calibration_time_budget_s,
-        output_tag, cache_read_dir, skip_collection,
-    )
-
-
 # ── Local entrypoints ──────────────────────────────────────────────────────
 
 @app.local_entrypoint()
@@ -634,87 +692,45 @@ def policy(benchmark: str = "ibm01", iterations: int = 1000,
 
 
 @app.local_entrypoint()
-def iter_(benchmark: str = "ibm01", rounds: int = 2, examples: int = 400,
-          cost_epochs: int = 60, policy_iterations: int = 1000,
-          trajectories_per_iter: int = 4, eval_time_budget: float = 20.0,
-          calibration_samples_per_bench: int = 50,
-          calibration_time_budget_s: float = 10.0,
-          seed: int = 42, force_recollect: bool = False) -> None:
-    """Phase 5 — iterative training loop, dispatched as a background job.
+def iter_(preset: str = "", benchmark: str = "", rounds: int = 0,
+          examples: int = 0, cost_epochs: int = 0, policy_iterations: int = 0,
+          trajectories_per_iter: int = 0, eval_time_budget: float = 0.0,
+          calibration_samples_per_bench: int = 0,
+          calibration_time_budget_s: float = 0.0,
+          seed: int = 0, force_recollect: bool = False,
+          output_tag: str = "", cache_read_dir: str = "",
+          skip_collection: bool = False) -> None:
+    """Phase 5 — iterative training (background spawn). All knobs configurable.
 
-    Examples:
-        # Quick: 1 round, 3 benchmarks, modest data
-        modal run --detach modal_run.py::iter_ --benchmark ibm01,ibm02,ibm07 \\
-            --rounds 1 --examples 200 --policy-iterations 500
+    Presets: ``long12h``, ``medium4h`` (see ``ITER_PRESETS``). Override any CLI
+    flag after ``--preset``. Use a distinct ``--output-tag`` per parallel job.
 
-        # Full: all benchmarks, multiple rounds
-        modal run --detach modal_run.py::iter_ --benchmark all \\
-            --rounds 3 --examples 200 --policy-iterations 1500
+    Examples::
 
-        # ~12 h overnight preset (see ``iter_12h``)
-        modal run --detach modal_run.py::iter_12h --force-recollect
+        modal run --detach submissions/lkh/modal_run.py::iter_ \\
+            --preset long12h --force-recollect
 
-    Always launch with ``--detach``: ``.spawn()`` makes the call asynchronous
-    but the App itself shuts down when ``modal run`` exits, taking the
-    spawned function with it. ``--detach`` keeps the App alive so the spawn
-    can actually execute.
+        modal run --detach submissions/lkh/modal_run.py::iter_ \\
+            --preset medium4h --output-tag iter_exp2 --seed 44
+
+        modal run --detach submissions/lkh/modal_run.py::iter_ \\
+            --benchmark all --rounds 3 --examples 240 \\
+            --output-tag iter_custom --skip-collection \\
+            --cache-read-dir /output/iter/per_bench
+
+    Always use ``--detach`` with ``.spawn()`` so the job survives CLI exit.
     """
-    _spawn_iter(
-        run_iter, "run_iter",
-        benchmark=benchmark, rounds=rounds, examples=examples,
+    params = _resolve_iter_kwargs(
+        preset=preset, benchmark=benchmark, rounds=rounds, examples=examples,
         cost_epochs=cost_epochs, policy_iterations=policy_iterations,
         trajectories_per_iter=trajectories_per_iter,
         eval_time_budget=eval_time_budget,
         calibration_samples_per_bench=calibration_samples_per_bench,
         calibration_time_budget_s=calibration_time_budget_s,
         seed=seed, force_recollect=force_recollect,
-        output_tag="iter", cache_read_dir="", skip_collection=False,
+        output_tag=output_tag, cache_read_dir=cache_read_dir,
+        skip_collection=skip_collection,
     )
-
-
-@app.local_entrypoint()
-def iter_12h(force_recollect: bool = False, seed: int = 42) -> None:
-    """~12-hour overnight training preset (17 benchmarks, parallel collection).
-
-    Wall-time budget (typical):
-        - Parallel data collection @ 240 examples/bench  ~7 h
-        - 5 rounds × (PPO + eval + calibration + cost train)  ~4.5 h
-        - Total  ~11–12 h
-
-    First run on a volume that has an older sweep (e.g. 75-example caches),
-    pass ``--force-recollect``. Prior artifacts are copied to
-    ``lkh-results/iter/archives/<UTC-timestamp>/`` on the volume, then the
-    working tree is cleared and rebuilt at 240 examples/bench::
-
-        uv run modal run --detach submissions/lkh/modal_run.py::iter_12h \\
-            --force-recollect
-
-    Re-runs **without** ``--force-recollect`` reuse existing ``per_bench/*.pt``
-    (must match the target example count) and finish in ~4–5 h (rounds only).
-
-    Tuning vs this preset: use ``iter_`` with explicit flags, or edit
-    ``LONG_RUN_12H`` in this file.
-    """
-    params = {**LONG_RUN_12H, "force_recollect": force_recollect, "seed": seed}
-    print("=== iter_12h preset (~12 h target) ===")
-    _spawn_iter(run_iter, "run_iter", **params)
-
-
-@app.local_entrypoint()
-def iter_medium(seed: int = 43) -> None:
-    """~4 h parallel-safe training (separate ``/output/iter_medium/`` tree).
-
-    Reuses ``/output/iter/per_bench/*.pt`` from the main run (no collection).
-    Does **not** touch ``/output/iter/checkpoints`` or ``history.json``.
-    Safe to run while ``iter_12h`` is active on the same volume.
-
-        uv run modal run --detach submissions/lkh/modal_run.py::iter_medium
-
-    After completion::
-
-        modal volume get lkh-results /iter_medium ./modal_output_medium
-        cp modal_output_medium/checkpoints/*.pt submissions/lkh/checkpoints_medium/
-    """
-    params = {**MEDIUM_RUN_4H, "seed": seed}
-    print("=== iter_medium preset (<= 4 h, reads iter/per_bench) ===")
-    _spawn_iter(run_iter_medium, "run_iter_medium", **params)
+    label = f"run_iter ({preset or 'custom'})"
+    print(f"=== iter_ → /output/{params['output_tag']} ===")
+    _spawn_iter(run_iter, label, **params)

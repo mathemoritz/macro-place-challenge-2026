@@ -24,7 +24,7 @@ uv run modal run --detach submissions/lkh/modal_run.py::iter_ \
     --policy-iterations 1500 --eval-time-budget 20
 
 # ~12 h overnight (more data, longer PPO, 60s eval) — first time add --force-recollect
-uv run modal run --detach submissions/lkh/modal_run.py::iter_12h --force-recollect
+uv run modal run --detach submissions/lkh/modal_run.py::iter_ --preset long12h --force-recollect
 ```
 
 Returns in ~10 seconds; the actual training runs in the background for ~3 hours.
@@ -202,13 +202,13 @@ uv run modal run --detach submissions/lkh/modal_run.py::iter_ \
     --eval-time-budget 20
 ```
 
-**~12 h overnight preset** (`iter_12h` — see `LONG_RUN_12H` in `modal_run.py`):
+**~12 h overnight preset** (`--preset long12h` — see `ITER_PRESETS` in `modal_run.py`):
 
 ```bash
-uv run modal run --detach submissions/lkh/modal_run.py::iter_12h --force-recollect
+uv run modal run --detach submissions/lkh/modal_run.py::iter_ --preset long12h --force-recollect
 ```
 
-| Knob | ~3 h run | `iter_12h` |
+| Knob | ~3 h run | `long12h` |
 |------|----------|------------|
 | `examples` / bench | 75 | **240** |
 | `rounds` | 4 | **5** |
@@ -227,16 +227,27 @@ Use this when upgrading from a shorter run (e.g. 75-example caches).
 Omit `--force-recollect` only when `per_bench/*.pt` already matches the
 target example count (saves ~7 h; rounds-only ~4–5 h).
 
-### Parallel medium run (<= 4 h, while `iter_12h` is running)
+### Parallel runs (different hyperparameters / output trees)
 
-Separate volume subtree — does **not** overwrite `/iter/checkpoints`:
+Use a **unique `--output-tag`** per job on the same volume. Presets: `long12h`, `medium4h`.
 
 ```bash
-uv run modal run --detach submissions/lkh/modal_run.py::iter_medium
+# Main overnight run
+uv run modal run --detach submissions/lkh/modal_run.py::iter_ --preset long12h
+
+# Parallel experiment: reuse iter/per_bench caches, separate output
+uv run modal run --detach submissions/lkh/modal_run.py::iter_ \
+  --preset medium4h --output-tag iter_exp_a --seed 44
+
+# Fully custom (no preset)
+uv run modal run --detach submissions/lkh/modal_run.py::iter_ \
+  --benchmark all --rounds 2 --examples 240 \
+  --output-tag iter_custom --skip-collection \
+  --cache-read-dir /output/iter/per_bench
 ```
 
-Requires existing `lkh-results/iter/per_bench/*.pt` (240 examples). Writes to
-`lkh-results/iter_medium/`. Modal hard timeout = 4 h.
+`medium4h` skips collection and reads `/output/iter/per_bench`. All jobs use one
+`run_iter` worker (24 h Modal timeout); plan wall time from calibration volume.
 
 Both `--detach` and `.spawn()` are needed:
 - `.spawn()` (in modal\_run.py) makes the call async — survives local terminal disconnect.
@@ -255,9 +266,13 @@ your laptop; the run continues on Modal.
 | `--policy-iterations` | `1000` | PPO update count per round. 1500-3000 is reasonable. |
 | `--trajectories-per-iter` | `4` | Higher = better gradient estimates but slower PPO. |
 | `--eval-time-budget` | `20.0` | Seconds per benchmark during eval phase. Bigger = better placement quality. |
-| `--calibration-samples-per-bench` | `50` | C.3 samples after each round (Modal `iter_` / `iter_12h`). |
+| `--preset` | (none) | `long12h` or `medium4h`; base hyperparameters from `ITER_PRESETS`. |
+| `--output-tag` | `iter` | Volume subtree `/output/<tag>/` (required for parallel jobs). |
+| `--cache-read-dir` | `` | e.g. `/output/iter/per_bench` to reuse another run's caches. |
+| `--skip-collection` | off | Require existing per-bench `.pt` under `cache-read-dir`. |
+| `--calibration-samples-per-bench` | `50` | C.3 samples after each round. |
 | `--calibration-time-budget-s` | `10.0` | Placer seconds per benchmark during calibration. |
-| `--force-recollect` | off | Wipes per-benchmark cache before collection. Use on first `iter_12h` run. |
+| `--force-recollect` | off | Wipes per-benchmark cache before collection. Use on first `long12h` run. |
 
 ### Wall-time estimates on Modal
 
@@ -269,7 +284,7 @@ For `--benchmark all`:
 | 75 | ~2.2 h | ~7 min | 4 | ~3.0 h |
 | 100 | ~3.0 h | ~7 min | 4 | ~3.7 h |
 | 150 | ~4.5 h | ~7 min | 3 | ~5.0 h |
-| **240** (`iter_12h`) | **~7 h** | **~50 min** | **5** | **~11–12 h** |
+| **240** (`long12h`) | **~7 h** | **~50 min** | **5** | **~11–12 h** |
 
 Parallel collection runs once; Round 0 then **loads** those caches (no second
 pass over ``compute_proxy_cost``). Subsequent rounds reuse ``chain_data.pt``.
