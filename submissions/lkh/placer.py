@@ -1188,10 +1188,28 @@ class LKHPlacer:
             legalization_reserve = float(self.legalization_reserve_s)
         else:
             probe_estimate = _probe_legalization_cost(state, n_probe=10)
+            # Tier-1 Fix D: density-aware scaling. The probe runs a fixed
+            # 3-ring sweep on 10 macros — calibrated for sparse states. On
+            # dense designs (ibm17/18 routinely hit chain-loop end with 50+
+            # overlap pairs) real legalization needs up to 150 rings per
+            # macro, so the 3-ring probe undershoots by ~10x. Without this
+            # scaling, ibm17 wall time hit 127s on a 60s budget — chain
+            # loop ran its 57s, then legalization ran free for ~70s.
+            #
+            # Heuristic: count initial overlap pairs and ramp the reserve
+            # linearly above 20 pairs, capped at 8x. ibm01 typically has
+            # ~70 initial pairs → 3.5x; ibm17 ~150-300 → 7-8x.
+            initial_overlaps = state.overlap_pairs()
+            density_multiplier = max(1.0, min(8.0, initial_overlaps / 20.0))
             floor = self.legalization_reserve_frac * self.time_budget_s
-            legalization_reserve = max(probe_estimate * 1.5, floor, 1.0)
+            legalization_reserve = max(
+                probe_estimate * 1.5 * density_multiplier, floor, 1.0
+            )
             print(f"[LKHPlacer] legalization reserve: probe={probe_estimate:.2f}s "
-                  f"-> reserved {legalization_reserve:.2f}s of {self.time_budget_s:.1f}s budget")
+                  f"× density {density_multiplier:.1f}x "
+                  f"(initial_overlaps={initial_overlaps}) "
+                  f"-> reserved {legalization_reserve:.2f}s of "
+                  f"{self.time_budget_s:.1f}s budget")
         # Cap the reserve at half the budget so the chain loop still gets
         # meaningful time even on a wildly mis-estimating probe.
         legalization_reserve = min(legalization_reserve, self.time_budget_s * 0.5)
