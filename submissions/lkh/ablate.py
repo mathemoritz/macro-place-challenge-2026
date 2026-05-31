@@ -78,50 +78,66 @@ def _eval_placement(name: str, placement, benchmark, plc, runtime: float):
 
 
 # Per-milestone config: (label, approx_path, policy_path, use_policy,
-# gate_mode, reg_weight). ``None`` for an approximator/policy path means
-# "skip" (we pass _BOGUS_CKPT). reg_weight is Task 1b's MaskRegulate blend.
+# gate_mode, reg_weight, use_wiremask, use_position_mask). ``None`` for an
+# approximator/policy path means "skip" (we pass _BOGUS_CKPT).
 _MILESTONE_CONFIG = {
-    "A": ("A: Milestone-A surrogate", None, None, False, "hpwl", 0.0),
-    "B": ("B: Milestone-B surrogate", None, None, False, "hpwl", 0.0),
-    "C": ("C: Milestone-C +approx", _APPROX_CKPT, None, False, "hpwl", 0.0),
-    "D": ("D: Milestone-D +policy", _APPROX_CKPT, _POLICY_CKPT, True, "hpwl", 0.0),
-    "E": ("E: Milestone-E predproxy", _APPROX_CKPT, _POLICY_CKPT, True, "predicted_proxy", 0.0),
-    # MaskRegulate Task 1b: regularity blended into the lex gate's third
-    # coordinate. F mirrors D's checkpoints+gate but with reg_weight=0.5;
-    # use --reg-weight to override (e.g. for a sweep).
-    "F": ("F: + regularity (reg_weight=0.5)", _APPROX_CKPT, _POLICY_CKPT, True, "hpwl", 0.5),
+    "A": ("A: Milestone-A surrogate", None, None, False, "hpwl", 0.0, False, False),
+    "B": ("B: Milestone-B surrogate", None, None, False, "hpwl", 0.0, False, False),
+    "C": ("C: Milestone-C +approx", _APPROX_CKPT, None, False, "hpwl", 0.0, False, False),
+    "D": ("D: Milestone-D +policy", _APPROX_CKPT, _POLICY_CKPT, True, "hpwl", 0.0, False, False),
+    "E": ("E: Milestone-E predproxy", _APPROX_CKPT, _POLICY_CKPT, True, "predicted_proxy", 0.0, False, False),
+    # MaskRegulate Task 1b: regularity blended into the lex gate's third coord.
+    "F": ("F: + regularity (reg_weight=0.5)", _APPROX_CKPT, _POLICY_CKPT, True, "hpwl", 0.5, False, False),
+    # MaskRegulate Task 2: WireMask analytic candidates replace 3 random
+    # jumps. Defaults to greedy chain (no policy) so the candidate-set
+    # change is isolated from the learned scorer.
+    "G": ("G: + wiremask (greedy)", _APPROX_CKPT, None, False, "hpwl", 0.0, True, False),
+    # MaskRegulate Task 3: WireMask + legality filter. Without the filter,
+    # WireMask cells can be HPWL-best but heavily clustered → legalization
+    # can't recover (empirically on ibm01, Task 2 alone left 53 overlaps).
+    "H": ("H: + wiremask + posmask", _APPROX_CKPT, None, False, "hpwl", 0.0, True, True),
 }
 
 
 def _build_placer(*, milestone: str, seed: int, time_budget_s: float,
                   max_chains: int, max_chain_length: int,
-                  reg_weight_override: float | None = None):
+                  reg_weight_override: float | None = None,
+                  use_wiremask_override: bool | None = None,
+                  use_position_mask_override: bool | None = None):
     """Instantiate an LKHPlacer for the requested milestone config.
 
-    ``reg_weight_override`` lets callers (e.g. a CLI sweep) replace the
-    milestone's default regularity weight without editing the table.
+    Overrides let callers (e.g. CLI sweep) replace the milestone's defaults
+    without editing the table.
     """
     if milestone not in _MILESTONE_CONFIG:
         raise ValueError(f"unknown milestone {milestone!r}; "
                          f"expected one of {sorted(_MILESTONE_CONFIG)}")
-    _, approx, policy, use_policy, gate_mode, default_rw = _MILESTONE_CONFIG[milestone]
+    (_, approx, policy, use_policy, gate_mode,
+     default_rw, default_wm, default_pm) = _MILESTONE_CONFIG[milestone]
     approx_path = str(approx) if approx is not None else str(_BOGUS_CKPT)
     policy_path = str(policy) if policy is not None else str(_BOGUS_CKPT)
     reg_weight = (default_rw if reg_weight_override is None
                   else reg_weight_override)
+    use_wiremask = (default_wm if use_wiremask_override is None
+                    else use_wiremask_override)
+    use_position_mask = (default_pm if use_position_mask_override is None
+                         else use_position_mask_override)
     return placer_mod.LKHPlacer(
         seed=seed, time_budget_s=time_budget_s,
         max_chains=max_chains, max_chain_length=max_chain_length,
         checkpoint_path=approx_path, policy_path=policy_path,
         use_policy=use_policy, gate_mode=gate_mode,
-        reg_weight=reg_weight,
+        reg_weight=reg_weight, use_wiremask=use_wiremask,
+        use_position_mask=use_position_mask,
     )
 
 
 def run_milestone(milestone: str, benchmark_names: list[str], *,
                   time_budget_s: float, max_chains: int,
                   max_chain_length: int, seed: int,
-                  reg_weight_override: float | None = None) -> dict:
+                  reg_weight_override: float | None = None,
+                  use_wiremask_override: bool | None = None,
+                  use_position_mask_override: bool | None = None) -> dict:
     """Run one milestone config across multiple benchmarks.
 
     Returns a dict shaped for ``--history-file`` consumption::
@@ -146,7 +162,9 @@ def run_milestone(milestone: str, benchmark_names: list[str], *,
                                time_budget_s=time_budget_s,
                                max_chains=max_chains,
                                max_chain_length=max_chain_length,
-                               reg_weight_override=reg_weight_override)
+                               reg_weight_override=reg_weight_override,
+                               use_wiremask_override=use_wiremask_override,
+                               use_position_mask_override=use_position_mask_override)
         t0 = time.time()
         placement = placer.place(benchmark)
         runtime = time.time() - t0
@@ -344,6 +362,19 @@ def main():
                         "default regularity weight (blend coefficient in the "
                         "lex gate's third coord). 0 = pure hpwl gate. Only "
                         "consulted in --milestone mode.")
+    p.add_argument("--use-wiremask",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="MaskRegulate Task 2: override the milestone's "
+                        "default use_wiremask flag. Replaces 3 random-jump "
+                        "candidate slots with analytic HPWL-best cells. "
+                        "Only consulted in --milestone mode.")
+    p.add_argument("--use-position-mask",
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="MaskRegulate Task 3: override the milestone's "
+                        "default use_position_mask flag. Filters WireMask "
+                        "candidates to legal cells. Only effective when "
+                        "use_wiremask is also on. Only consulted in "
+                        "--milestone mode.")
     args = p.parse_args()
 
     if args.milestone is None:
@@ -371,6 +402,8 @@ def main():
         max_chain_length=args.max_chain_length,
         seed=args.seed,
         reg_weight_override=args.reg_weight,
+        use_wiremask_override=args.use_wiremask,
+        use_position_mask_override=args.use_position_mask,
     )
     history_path = Path(args.history_file) if args.history_file else None
     _print_milestone_summary(record, history_path)

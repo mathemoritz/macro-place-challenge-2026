@@ -527,6 +527,176 @@ class PlacementState:
             f"overlap_area cache drift: cached={cached_area} true={true_area}"
         )
 
+    # ── PositionMask (MaskRegulate Task 3) ────────────────────────────────
+    # A boolean grid_size × grid_size mask: True where placing macro ``idx``
+    # creates **no** AABB overlap against any other macro. Cell semantics
+    # match ``self.sep_x`` / ``self.sep_y``: a center separation strictly
+    # less than the sum-of-half-sides means an overlap. Strict-overlap test
+    # mirrors ``_DEFAULT_GAP`` semantics (1e-6) used elsewhere.
+
+    def position_mask(self, idx: int, grid_size: int = 64) -> np.ndarray:
+        """Return a ``[grid_size, grid_size]`` bool grid: True iff placing
+        macro ``idx`` at the cell center yields **no** overlap with any
+        other macro. Axis order matches WireMask: ``mask[gy, gx]``.
+
+        Cost: ``O(N × grid_size)`` for N hard macros — the per-cell test is
+        vectorized over the grid, but iterated over macros (early-skips on
+        macros that lie entirely outside the legal box for ``idx``). For
+        the IBM benchmarks (N=246–537, grid=64) this is microseconds.
+        """
+        # Legal placement box for this macro.
+        x_lo = float(self.half_w[idx])
+        x_hi = float(self.cw - self.half_w[idx])
+        y_lo = float(self.half_h[idx])
+        y_hi = float(self.ch - self.half_h[idx])
+        if x_hi <= x_lo or y_hi <= y_lo:
+            return np.zeros((grid_size, grid_size), dtype=bool)
+        gx = np.linspace(x_lo, x_hi, grid_size)
+        gy = np.linspace(y_lo, y_hi, grid_size)
+        sep_x_row = self.sep_x[idx]
+        sep_y_row = self.sep_y[idx]
+        forbidden = np.zeros((grid_size, grid_size), dtype=bool)
+        for j in range(self.n):
+            if j == idx:
+                continue
+            ox = float(self.pos[j, 0])
+            oy = float(self.pos[j, 1])
+            sx = float(sep_x_row[j]) - self._DEFAULT_GAP
+            sy = float(sep_y_row[j]) - self._DEFAULT_GAP
+            if sx <= 0 or sy <= 0:
+                continue
+            # 1-D blocked tests; if either axis has no blocked cell, the
+            # outer product is empty and we can skip the OR.
+            x_block = np.abs(gx - ox) < sx
+            if not x_block.any():
+                continue
+            y_block = np.abs(gy - oy) < sy
+            if not y_block.any():
+                continue
+            forbidden |= y_block[:, None] & x_block[None, :]
+        return ~forbidden
+
+    def _filter_cells_through_mask(self, idx: int,
+                                   cells: list[tuple[float, float]],
+                                   grid_size: int = 64,
+                                   ) -> list[tuple[float, float]]:
+        """Drop cells from ``cells`` that the ``position_mask`` reports
+        illegal (overlapping). Order preserved. Cells outside the
+        ``position_mask``'s legal box are conservatively kept (they don't
+        index a mask entry anyway). Used by ``candidate_positions`` when
+        ``use_position_mask=True`` to gate WireMask candidates pre-scoring.
+        """
+        if not cells:
+            return cells
+        mask = self.position_mask(idx, grid_size=grid_size)
+        x_lo = float(self.half_w[idx])
+        x_hi = float(self.cw - self.half_w[idx])
+        y_lo = float(self.half_h[idx])
+        y_hi = float(self.ch - self.half_h[idx])
+        if x_hi <= x_lo or y_hi <= y_lo:
+            return cells
+        # Map each cell back to its nearest grid index and consult the mask.
+        out: list[tuple[float, float]] = []
+        for cx, cy in cells:
+            gxi = int(round((cx - x_lo) / (x_hi - x_lo) * (grid_size - 1)))
+            gyi = int(round((cy - y_lo) / (y_hi - y_lo) * (grid_size - 1)))
+            gxi = max(0, min(grid_size - 1, gxi))
+            gyi = max(0, min(grid_size - 1, gyi))
+            if mask[gyi, gxi]:
+                out.append((cx, cy))
+        return out
+
+    # ── WireMask (MaskRegulate Task 2) ────────────────────────────────────
+    # Analytic HPWL-optimal candidate cells for one macro. The macro's added
+    # HPWL contribution at cell (x, y) is sum over incident edges of
+    # ``w * (|x - anchor_x| + |y - anchor_y|)``, which is **separable** in
+    # x and y. That lets us compute the full grid map in O(grid × degree)
+    # by summing two 1-D cost arrays via an outer sum, instead of the naive
+    # O(grid² × degree). The minima of that grid are the HPWL-best cells.
+
+    def wire_mask_best(self, idx: int, grid_size: int = 64,
+                       top_k: int = 3) -> list[tuple[float, float]]:
+        """Top-``top_k`` cell centers minimizing macro ``idx``'s HPWL
+        contribution, evaluated on a ``grid_size × grid_size`` raster of the
+        legal placement box for this macro. Returns ``[]`` if the macro has
+        no incident edges (then there is no analytic optimum to recommend).
+
+        Cells are returned in best-first order, clamped to the legal canvas
+        and de-duplicated (so they don't clash with adjacent grid neighbors
+        when ``top_k`` is small).
+        """
+        # Gather anchors and weights from both edge sets.
+        incident_hh = self.macro_edge_indices[idx]
+        incident_hf = self.macro_hf_indices[idx]
+        if len(incident_hh) == 0 and len(incident_hf) == 0:
+            return []
+
+        anchors_x_parts = []
+        anchors_y_parts = []
+        weights_parts = []
+        if len(incident_hh) > 0:
+            ie = self.edges[incident_hh]
+            # The "other endpoint" is whichever of (i, j) is not ``idx``.
+            other = np.where(ie[:, 0] == idx, ie[:, 1], ie[:, 0])
+            anchors_x_parts.append(self.pos[other, 0])
+            anchors_y_parts.append(self.pos[other, 1])
+            weights_parts.append(self.edge_weights[incident_hh])
+        if len(incident_hf) > 0:
+            anchors_x_parts.append(self.hf_anchors[incident_hf, 0])
+            anchors_y_parts.append(self.hf_anchors[incident_hf, 1])
+            weights_parts.append(self.hf_weights[incident_hf])
+
+        anchors_x = np.concatenate(anchors_x_parts)
+        anchors_y = np.concatenate(anchors_y_parts)
+        weights = np.concatenate(weights_parts).astype(np.float64)
+
+        # Legal placement box for this macro (centers must stay >= half_w
+        # from the boundary so the macro fits entirely inside the canvas).
+        x_lo = float(self.half_w[idx])
+        x_hi = float(self.cw - self.half_w[idx])
+        y_lo = float(self.half_h[idx])
+        y_hi = float(self.ch - self.half_h[idx])
+        # Edge case: tight canvas → 1-D grid collapses. Fall back gracefully.
+        if x_hi <= x_lo or y_hi <= y_lo:
+            return []
+
+        x_centers = np.linspace(x_lo, x_hi, grid_size)
+        y_centers = np.linspace(y_lo, y_hi, grid_size)
+
+        # cost_x[gx] = sum_k w_k * |x_centers[gx] - anchors_x[k]|
+        # Compute via broadcasting; memory O(grid × degree).
+        cost_x = (weights[:, None] *
+                  np.abs(x_centers[None, :] - anchors_x[:, None])).sum(axis=0)
+        cost_y = (weights[:, None] *
+                  np.abs(y_centers[None, :] - anchors_y[:, None])).sum(axis=0)
+        # Total cost at (gy, gx) = cost_y[gy] + cost_x[gx]  — outer sum.
+        cost_grid = cost_y[:, None] + cost_x[None, :]
+
+        # k smallest cells. argpartition is O(N) vs sort's O(N log N).
+        flat = cost_grid.ravel()
+        k_eff = min(top_k, flat.size)
+        # Slightly oversample (top_k * 4) so de-dup after clamp still yields
+        # ``top_k`` distinct cells if the grid is coarse.
+        oversample = min(flat.size, max(top_k * 4, top_k))
+        part = np.argpartition(flat, oversample - 1)[:oversample]
+        # Sort just the oversample slice.
+        part = part[np.argsort(flat[part])]
+        seen: set[tuple[float, float]] = set()
+        out: list[tuple[float, float]] = []
+        for fi in part:
+            gy, gx = divmod(int(fi), grid_size)
+            cx, cy = self.clamp(idx,
+                                 float(x_centers[gx]),
+                                 float(y_centers[gy]))
+            key = (round(cx, 6), round(cy, 6))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((cx, cy))
+            if len(out) >= top_k:
+                break
+        return out
+
     # ── Candidate generation ──────────────────────────────────────────────
 
     def count_within(self, idx: int, x: float, y: float, radius: float) -> int:
@@ -539,7 +709,13 @@ class PlacementState:
         return int(hits.sum())
 
     def candidate_positions(self, idx: int, num_candidates: int = 16,
-                            rng: random.Random | None = None) -> list[tuple[float, float]]:
+                            rng: random.Random | None = None,
+                            use_wiremask: bool = False,
+                            wiremask_k: int = 3,
+                            wiremask_grid_size: int = 64,
+                            use_position_mask: bool = False,
+                            position_mask_grid_size: int = 64,
+                            ) -> list[tuple[float, float]]:
         """Candidate centers for macro ``idx``: connected centroid + top-K
         connected partners + grid jitter + random jumps.
 
@@ -547,7 +723,13 @@ class PlacementState:
         12 grid jitter + 4 random — only 1/16 carried connectivity signal.
         We now spend 4 of the 16 slots on positions stepping toward each of
         the macro's top-4 most strongly-connected partners (alpha-nearness
-        analog), keeping 7 grid-jitter and 4 random."""
+        analog), keeping 7 grid-jitter and 4 random.
+
+        Task 2 (MaskRegulate WireMask): when ``use_wiremask=True``, replace
+        the last ``wiremask_k`` random-jump slots with the analytic HPWL-best
+        cells from ``wire_mask_best``. Total slot count is unchanged so
+        downstream policy ``cand_dim`` and per-step compute stay constant.
+        """
         r = rng or random
         cands: list[tuple[float, float]] = []
 
@@ -592,12 +774,31 @@ class PlacementState:
                               cur_y + dym * step)
             cands.append((x, y))
 
-        # Random canvas jumps (open-region proxy without expensive search).
-        for _ in range(4):
+        # Random canvas jumps. Task 2: when use_wiremask is on, reserve the
+        # last ``wiremask_k`` slots for the analytic HPWL-optimal cells
+        # instead. The wire_mask_best() call is O(grid * degree); on ibm01
+        # at grid=64, degree~30, that's ~2k ops per macro per chain step.
+        n_random = max(0, 4 - wiremask_k) if use_wiremask else 4
+        for _ in range(n_random):
             x, y = self.clamp(idx,
                               r.uniform(self.half_w[idx], self.cw - self.half_w[idx]),
                               r.uniform(self.half_h[idx], self.ch - self.half_h[idx]))
             cands.append((x, y))
+
+        if use_wiremask:
+            wm = self.wire_mask_best(idx, grid_size=wiremask_grid_size,
+                                     top_k=wiremask_k)
+            # Task 3: pre-score legality filter. WireMask cells are HPWL-
+            # optimal but ignore overlap — a fully-clustered design can
+            # have its WireMask minima inside other macros. Filtering them
+            # away here is cheaper than letting the chain score and reject
+            # them (the surrogate's per-overlap penalty isn't always large
+            # enough to disqualify them, as Task 2's ibm01 run showed).
+            if use_position_mask:
+                wm = self._filter_cells_through_mask(
+                    idx, wm, grid_size=position_mask_grid_size,
+                )
+            cands.extend(wm)
 
         return cands[:num_candidates]
 
@@ -897,7 +1098,9 @@ class LKChain:
                  rng: random.Random, approximator: dict | None = None,
                  policy_bundle: dict | None = None,
                  gate_mode: str = "hpwl",
-                 reg_weight: float = 0.0):
+                 reg_weight: float = 0.0,
+                 use_wiremask: bool = False,
+                 use_position_mask: bool = False):
         """``gate_mode`` selects the third lex-coordinate of the commit gate:
 
         * ``"hpwl"`` (default): ``(overlap_pairs, overlap_area, hpwl)``.
@@ -922,6 +1125,14 @@ class LKChain:
         self.policy_bundle = policy_bundle
         self.gate_mode = gate_mode
         self.reg_weight = float(reg_weight)
+        # MaskRegulate Task 2: substitute analytic HPWL-best cells for some
+        # random-jump slots. ``self.use_wiremask`` is consulted at every
+        # candidate_positions() call from ``run_greedy`` and ``ChainEnv``.
+        self.use_wiremask = bool(use_wiremask)
+        # MaskRegulate Task 3: pre-filter WireMask cells through the
+        # legality mask. Pair with use_wiremask=True to get safe analytic
+        # candidates; with use_wiremask=False the flag is a no-op.
+        self.use_position_mask = bool(use_position_mask)
         if gate_mode not in ("hpwl", "predicted_proxy"):
             raise ValueError(
                 f"unknown gate_mode={gate_mode!r}; expected 'hpwl' or 'predicted_proxy'"
@@ -967,7 +1178,9 @@ class LKChain:
                         max_chain_length=max_length, max_candidates=8,
                         gate_mode=self.gate_mode,
                         approximator=self.approx,
-                        reg_weight=self.reg_weight)
+                        reg_weight=self.reg_weight,
+                        use_wiremask=self.use_wiremask,
+                        use_position_mask=self.use_position_mask)
         import torch.nn.functional as _F
         final_info: dict = {}
         while not env.done:
@@ -1048,7 +1261,10 @@ class LKChain:
             # the chain lost its canvas-jump diversifier. Ask for 16 so the
             # random jumps are preserved; per-candidate cost is O(degree+N)
             # so the 33% extra calls is bounded.
-            cands = st.candidate_positions(current, num_candidates=16, rng=self.rng)
+            cands = st.candidate_positions(current, num_candidates=16,
+                                            rng=self.rng,
+                                            use_wiremask=self.use_wiremask,
+                                            use_position_mask=self.use_position_mask)
             if not cands:
                 break
 
@@ -1187,7 +1403,9 @@ class LKHPlacer:
                  legalization_reserve_frac: float = 0.05,
                  seed_refresh_interval: int = 100,
                  gate_mode: str = "hpwl",
-                 reg_weight: float = 0.0):
+                 reg_weight: float = 0.0,
+                 use_wiremask: bool = False,
+                 use_position_mask: bool = False):
         self.seed = seed
         self.time_budget_s = time_budget_s
         self.max_chains = max_chains
@@ -1212,6 +1430,10 @@ class LKHPlacer:
         self.gate_mode = gate_mode
         # MaskRegulate Task 1b: regularity blend weight (0.0 = unchanged).
         self.reg_weight = float(reg_weight)
+        # MaskRegulate Task 2: WireMask candidate injection.
+        self.use_wiremask = bool(use_wiremask)
+        # MaskRegulate Task 3: legality filter on WireMask candidates.
+        self.use_position_mask = bool(use_position_mask)
 
         approx_ckpt = Path(checkpoint_path) if checkpoint_path else (
             _HERE / "checkpoints" / "cost_approximator.pt"
@@ -1347,6 +1569,8 @@ class LKHPlacer:
                               policy_bundle=self.policy_bundle,
                               gate_mode=self.gate_mode,
                               reg_weight=self.reg_weight,
+                              use_wiremask=self.use_wiremask,
+                              use_position_mask=self.use_position_mask,
                               ).run(self.max_chain_length)
             chains += 1
             if result["committed"]:

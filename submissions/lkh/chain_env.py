@@ -91,7 +91,9 @@ class ChainEnv:
                  terminal_reward_mode: str = "committed_gain",
                  gate_mode: str = "hpwl",
                  approximator: dict | None = None,
-                 reg_weight: float = 0.0):
+                 reg_weight: float = 0.0,
+                 use_wiremask: bool = False,
+                 use_position_mask: bool = False):
         """
         D.1 (LKH critique fix): ``terminal_reward_mode`` selects the PPO
         reward shape.
@@ -146,6 +148,11 @@ class ChainEnv:
         # ``_finalize``. predicted_proxy path is intentionally untouched
         # (per the implementation brief) until Task 1c retrains the model.
         self.reg_weight = float(reg_weight)
+        # MaskRegulate Task 2: WireMask candidate injection in
+        # ``state_for_policy``. Mirrors LKChain.use_wiremask.
+        self.use_wiremask = bool(use_wiremask)
+        # MaskRegulate Task 3: legality filter on WireMask candidates.
+        self.use_position_mask = bool(use_position_mask)
         # Pre-compute scales so per-step ``_compute_third`` is allocation-
         # free; both are constants for this env's lifetime.
         self._hpwl_scale = max(state.cw, state.ch)
@@ -229,6 +236,8 @@ class ChainEnv:
             self.current_macro,
             num_candidates=self.max_candidates,
             rng=self.rng,
+            use_wiremask=self.use_wiremask,
+            use_position_mask=self.use_position_mask,
         )
         # Task 1c: policy candidate features follow the approximator's schema
         # (so the PPO policy sees the same dim downstream code expects).
