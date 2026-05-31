@@ -330,6 +330,37 @@ class PlacementState:
         """Total HPWL surrogate (B.1 cached). Pre-fix this was O(E) per call."""
         return self._total_hpwl
 
+    # ── Regularity (MaskRegulate Task 1) ──────────────────────────────────
+    # Distance-to-nearest-edge proxy: low = edge-ward = good. Domain practice
+    # is to push macros toward the canvas perimeter so the core stays open
+    # for routing. Cheap (O(1) per macro) and analytic, so it gives a
+    # zero-variance signal alongside the noisy learned approximator —
+    # particularly useful for the congestion term, which the MLP ranks badly.
+
+    def regularity_of(self, idx: int, x: float, y: float) -> float:
+        """Distance from (x, y) to the nearest canvas edge along x + along y.
+
+        Lower is better (edge-ward). Independent of macro size / orientation;
+        evaluator semantics are positional, not corner-based.
+        """
+        return min(x, self.cw - x) + min(y, self.ch - y)
+
+    def total_regularity(self) -> float:
+        """Sum of ``regularity_of`` over **movable** macros.
+
+        Used as the regularity term in the chain's blended commit gate /
+        PPO reward. Fixed macros are excluded because they don't contribute
+        to the optimization signal — including them would inflate the term
+        and disguise improvements coming from movable repositioning.
+        """
+        if self.n == 0 or not self.movable.any():
+            return 0.0
+        xs = self.pos[self.movable, 0]
+        ys = self.pos[self.movable, 1]
+        dx_edge = np.minimum(xs, self.cw - xs)
+        dy_edge = np.minimum(ys, self.ch - ys)
+        return float((dx_edge + dy_edge).sum())
+
     # ── Incremental cache machinery (B.1 + B.2) ───────────────────────────
 
     def rebuild_caches(self) -> None:
@@ -574,14 +605,27 @@ class PlacementState:
 # ── Feature extraction (for Phase 3 cost approximator) ────────────────────
 
 FEATURE_DIM = 16
+# Task 1c (MaskRegulate): augmented schema with a regularity-Δ feature
+# appended. Kept as a SEPARATE constant so existing 16-dim checkpoints
+# remain loadable without modification — the approximator's ``in_dim`` is
+# read from the checkpoint and ``_features_for_move`` is invoked with
+# ``use_reg_feature`` matching that ``in_dim``.
+FEATURE_DIM_WITH_REG = 17
 
 
 def _features_for_move(state: "PlacementState", macro_idx: int,
-                        move_delta: np.ndarray) -> np.ndarray:
-    """16-dim feature vector for predicting Δproxy_cost of moving ``macro_idx``
-    by ``move_delta``. Mirrors the physical signals a GNN+CNN encoder would
-    surface: HPWL change, local density at source/target, overlap change,
-    neighbor-attraction change, and geometry."""
+                        move_delta: np.ndarray,
+                        use_reg_feature: bool = False) -> np.ndarray:
+    """Feature vector for predicting Δproxy_cost of moving ``macro_idx``
+    by ``move_delta``. 16-dim by default; 17-dim with ``use_reg_feature=True``
+    (Task 1c — appends signed regularity Δ).
+
+    Mirrors the physical signals a GNN+CNN encoder would surface: HPWL
+    change, local density at source/target, overlap change, neighbor-
+    attraction change, and geometry. The optional 17th feature is
+    ``reg_before - reg_after`` (positive = pushed edge-ward = good per
+    MaskRegulate's regularity term).
+    """
     old_x = float(state.pos[macro_idx, 0])
     old_y = float(state.pos[macro_idx, 1])
     new_x = old_x + float(move_delta[0])
@@ -615,7 +659,7 @@ def _features_for_move(state: "PlacementState", macro_idx: int,
         attract_old = attract_new = 0.0
         deg = 0
 
-    feats = np.array([
+    base = [
         w, h, w * h,                                # macro geometry
         float(move_delta[0]), float(move_delta[1]),
         abs(float(move_delta[0])), abs(float(move_delta[1])),
@@ -625,8 +669,17 @@ def _features_for_move(state: "PlacementState", macro_idx: int,
         float(n_local_old), float(n_local_new),      # local density
         attract_old - attract_new,                   # +ve = pulled toward neighbors
         float(deg),                                  # macro degree
-    ], dtype=np.float32)
-    assert feats.shape == (FEATURE_DIM,), f"feature dim drift: {feats.shape}"
+    ]
+    if use_reg_feature:
+        # Task 1c: regularity Δ. Positive = pushed toward edge.
+        reg_before = state.regularity_of(macro_idx, old_x, old_y)
+        reg_after = state.regularity_of(macro_idx, new_x, new_y)
+        base.append(reg_before - reg_after)
+
+    feats = np.array(base, dtype=np.float32)
+    expected_dim = FEATURE_DIM_WITH_REG if use_reg_feature else FEATURE_DIM
+    assert feats.shape == (expected_dim,), \
+        f"feature dim drift: {feats.shape} expected ({expected_dim},)"
     return feats
 
 
@@ -769,8 +822,15 @@ def _load_cost_approximator(ckpt_path: Path):
     except ImportError:
         return None
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    feat_dim = int(ckpt.get("feature_dim", FEATURE_DIM))
+    # Task 1c: infer ``use_reg_feature`` from the ckpt. Prefer an explicit
+    # field; otherwise fall back to a dim check so older 16-d checkpoints
+    # still resolve correctly even if they predate the field.
+    use_reg_feature = bool(
+        ckpt.get("use_reg_feature", feat_dim == FEATURE_DIM_WITH_REG)
+    )
     model = CostApproximator(
-        in_dim=ckpt.get("feature_dim", FEATURE_DIM),
+        in_dim=feat_dim,
         hidden=ckpt.get("hidden", 64),
     )
     model.load_state_dict(ckpt["state_dict"])
@@ -783,6 +843,7 @@ def _load_cost_approximator(ckpt_path: Path):
         "target_std": float(ckpt["target_std"]),
         "pearson_r_val": ckpt.get("pearson_r_val"),
         "trained_on": ckpt.get("trained_on"),
+        "use_reg_feature": use_reg_feature,
     }
 
 
@@ -802,7 +863,12 @@ def _load_chain_policy(ckpt_path: Path):
     env_mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(env_mod)
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    policy = ChainPolicy(hidden=ckpt.get("hidden", 64))
+    # Task 1c: ChainPolicy accepts a non-default cand_dim. Older 16-d
+    # checkpoints don't carry the field; fall back to FEATURE_DIM.
+    policy = ChainPolicy(
+        hidden=ckpt.get("hidden", 64),
+        cand_dim=int(ckpt.get("cand_dim", FEATURE_DIM)),
+    )
     policy.load_state_dict(ckpt["state_dict"])
     policy.eval()
     return {
@@ -830,7 +896,8 @@ class LKChain:
     def __init__(self, state: PlacementState, seed_macro: int,
                  rng: random.Random, approximator: dict | None = None,
                  policy_bundle: dict | None = None,
-                 gate_mode: str = "hpwl"):
+                 gate_mode: str = "hpwl",
+                 reg_weight: float = 0.0):
         """``gate_mode`` selects the third lex-coordinate of the commit gate:
 
         * ``"hpwl"`` (default): ``(overlap_pairs, overlap_area, hpwl)``.
@@ -838,6 +905,15 @@ class LKChain:
         * ``"predicted_proxy"``: ``(overlap_pairs, overlap_area,
           cumulative_predicted_Δproxy)``. Requires an approximator. Milestone E
           (LKH critique fix §3.3 deferred).
+
+        MaskRegulate Task 1b: ``reg_weight`` (default 0.0 → unchanged) blends
+        an analytic regularity term into the third lex coordinate. When
+        ``reg_weight > 0``, the third coord becomes
+        ``base_norm + reg_weight * reg_norm`` where ``base_norm`` is HPWL
+        (or predicted Δproxy) divided by ``max(cw, ch)`` and ``reg_norm`` is
+        ``total_regularity()`` divided by ``cw + ch``. The two scales are
+        chosen so the unweighted (`reg_weight=1`) coords carry comparable
+        magnitudes — MaskRegulate's ablation found this matters.
         """
         self.state = state
         self.rng = rng
@@ -845,6 +921,7 @@ class LKChain:
         self.approx = approximator
         self.policy_bundle = policy_bundle
         self.gate_mode = gate_mode
+        self.reg_weight = float(reg_weight)
         if gate_mode not in ("hpwl", "predicted_proxy"):
             raise ValueError(
                 f"unknown gate_mode={gate_mode!r}; expected 'hpwl' or 'predicted_proxy'"
@@ -855,6 +932,27 @@ class LKChain:
             # ablation harness from blowing up when the user pairs the new
             # gate with a pre-Milestone-C checkpoint that's been removed.
             self.gate_mode = "hpwl"
+
+    def _compute_third(self, st: PlacementState,
+                       predicted_cumulative: float) -> float:
+        """Compute the third lex coordinate for the commit gate.
+
+        When ``reg_weight == 0`` (default), returns the original behavior:
+        ``st.hpwl()`` under hpwl gate or cumulative predicted Δproxy under
+        predicted_proxy gate. When ``reg_weight > 0``, blends the base
+        coord with the canvas-normalized regularity term (Task 1b).
+        """
+        if self.gate_mode == "predicted_proxy":
+            base = predicted_cumulative
+        else:
+            base = st.hpwl()
+        if self.reg_weight <= 0.0:
+            return base
+        hpwl_scale = max(st.cw, st.ch)
+        reg_scale = st.cw + st.ch
+        base_norm = base / max(hpwl_scale, 1e-9)
+        reg_norm = st.total_regularity() / max(reg_scale, 1e-9)
+        return base_norm + self.reg_weight * reg_norm
 
     def run_with_policy(self, max_length: int = 8) -> dict:
         """Drive the chain with the trained policy via ChainEnv."""
@@ -868,7 +966,8 @@ class LKChain:
         env = ChainEnv(st, self.seed, rng=self.rng,
                         max_chain_length=max_length, max_candidates=8,
                         gate_mode=self.gate_mode,
-                        approximator=self.approx)
+                        approximator=self.approx,
+                        reg_weight=self.reg_weight)
         import torch.nn.functional as _F
         final_info: dict = {}
         while not env.done:
@@ -922,14 +1021,13 @@ class LKChain:
         # Best-prefix tracking (A.1): the canonical Lin-Kernighan gain
         # criterion commits the lex-best PREFIX of the cascade, not the
         # endpoint. Lex order on (overlap_pairs, overlap_area, third) is
-        # the gate. Third coordinate depends on gate_mode (E.1):
-        #   - "hpwl"             -> st.hpwl()
-        #   - "predicted_proxy"  -> cumulative approximator-predicted Δproxy
-        #     (starts at 0; each move adds the chosen candidate's pred_delta)
-        if self.gate_mode == "predicted_proxy":
-            start_third = 0.0
-        else:
-            start_third = start_hpwl
+        # the gate. Third coordinate depends on gate_mode (E.1) and
+        # ``reg_weight`` (Task 1b):
+        #   - "hpwl"             -> st.hpwl() [+ reg_weight * reg_norm]
+        #   - "predicted_proxy"  -> cumulative Δproxy [+ reg_weight * reg_norm]
+        # When reg_weight > 0 the base coord is also canvas-normalized so
+        # the blend is scale-balanced; see ``_compute_third``.
+        start_third = self._compute_third(st, predicted_cumulative=0.0)
         start_key = (start_overlap_pairs, start_overlap_area, start_third)
         best_key = start_key
         best_pos_snapshot = snapshot
@@ -965,10 +1063,13 @@ class LKChain:
 
             best_predicted_delta = 0.0  # used iff gate_mode == "predicted_proxy"
             if self.approx is not None:
+                # Task 1c: feature schema follows the loaded checkpoint.
+                use_reg_feat = bool(self.approx.get("use_reg_feature", False))
                 feats = np.stack([
                     _features_for_move(
                         st, current,
                         np.array([cx - old_x, cy - old_y], dtype=np.float64),
+                        use_reg_feature=use_reg_feat,
                     )
                     for (cx, cy) in cands
                 ])
@@ -1016,10 +1117,7 @@ class LKChain:
             # a pos snapshot. Only one snapshot is retained (the running
             # winner), so the per-chain memory cost is one extra N-by-2
             # array, not max_length of them.
-            if self.gate_mode == "predicted_proxy":
-                third = predicted_cumulative
-            else:
-                third = st.hpwl()
+            third = self._compute_third(st, predicted_cumulative)
             cur_key = (st.overlap_pairs(), st.overlap_area(), third)
             if cur_key < best_key:
                 best_key = cur_key
@@ -1088,7 +1186,8 @@ class LKHPlacer:
                  legalization_reserve_s: float | None = None,
                  legalization_reserve_frac: float = 0.05,
                  seed_refresh_interval: int = 100,
-                 gate_mode: str = "hpwl"):
+                 gate_mode: str = "hpwl",
+                 reg_weight: float = 0.0):
         self.seed = seed
         self.time_budget_s = time_budget_s
         self.max_chains = max_chains
@@ -1111,6 +1210,8 @@ class LKHPlacer:
         # placer. ``"hpwl"`` is the Milestone-A default (no retrain needed);
         # ``"predicted_proxy"`` requires a cascade-aware approximator from C.
         self.gate_mode = gate_mode
+        # MaskRegulate Task 1b: regularity blend weight (0.0 = unchanged).
+        self.reg_weight = float(reg_weight)
 
         approx_ckpt = Path(checkpoint_path) if checkpoint_path else (
             _HERE / "checkpoints" / "cost_approximator.pt"
@@ -1219,13 +1320,24 @@ class LKHPlacer:
         chains = 0
         best_pos = state.pos.copy()
         # A.2: outer-loop best-tracking must match the chain-internal lex
-        # gate `(overlap_pairs, overlap_area, hpwl)`. With the pre-A.2
+        # gate `(overlap_pairs, overlap_area, third)`. With the pre-A.2
         # 2-tuple, a chain that reduced `overlap_area` at slight HPWL cost
         # would commit (lex-better in 3-tuple) but the outer would prefer
         # an earlier higher-area state with lower HPWL — and legalization
         # would then have to undo a larger overlap, regressing the very
         # invariant A.2 was designed to protect.
-        best_key = (state.overlap_pairs(), state.overlap_area(), state.hpwl())
+        # Task 1b: when reg_weight > 0, the outer third blends HPWL with
+        # regularity (canvas-normalized). Independent of gate_mode — the
+        # outer compares across chains and needs a state-level scalar,
+        # not the per-chain cumulative-Δproxy used inside predicted_proxy.
+        _hpwl_scale = max(state.cw, state.ch)
+        _reg_scale = state.cw + state.ch
+        def _outer_third() -> float:
+            if self.reg_weight <= 0.0:
+                return state.hpwl()
+            return (state.hpwl() / _hpwl_scale
+                    + self.reg_weight * state.total_regularity() / _reg_scale)
+        best_key = (state.overlap_pairs(), state.overlap_area(), _outer_third())
         stagnation = 0
 
         while chains < self.max_chains and (time.time() - start) < chain_loop_deadline:
@@ -1234,11 +1346,12 @@ class LKHPlacer:
                               approximator=self.approximator,
                               policy_bundle=self.policy_bundle,
                               gate_mode=self.gate_mode,
+                              reg_weight=self.reg_weight,
                               ).run(self.max_chain_length)
             chains += 1
             if result["committed"]:
                 cur_key = (state.overlap_pairs(), state.overlap_area(),
-                           state.hpwl())
+                           _outer_third())
                 if cur_key < best_key:
                     best_key = cur_key
                     best_pos = state.pos.copy()

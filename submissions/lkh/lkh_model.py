@@ -53,11 +53,16 @@ class ChainPolicy(nn.Module):
     Per chain step: ``K`` candidate moves are scored together with a single
     STOP action. ``forward`` returns a length-(K+1) logit vector and a scalar
     state value, both differentiable.
+
+    Task 1c (MaskRegulate): ``cand_dim`` accepts the augmented 17-dim
+    candidate schema. Existing 16-dim policies still load — ``_load_chain_policy``
+    reads ``cand_dim`` from the checkpoint and reconstructs the right shape.
     """
 
-    def __init__(self, hidden: int = 64):
+    def __init__(self, hidden: int = 64, cand_dim: int = CAND_DIM):
         super().__init__()
-        gd, md, cd, chd = GLOBAL_DIM, MACRO_DIM, CAND_DIM, CHAIN_DIM
+        self.cand_dim = int(cand_dim)
+        gd, md, cd, chd = GLOBAL_DIM, MACRO_DIM, self.cand_dim, CHAIN_DIM
         self.move_head = nn.Sequential(
             nn.Linear(gd + md + cd + chd, hidden),
             nn.ReLU(),

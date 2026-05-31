@@ -90,7 +90,8 @@ class ChainEnv:
                  terminal_commit_bonus: float = 0.0,
                  terminal_reward_mode: str = "committed_gain",
                  gate_mode: str = "hpwl",
-                 approximator: dict | None = None):
+                 approximator: dict | None = None,
+                 reg_weight: float = 0.0):
         """
         D.1 (LKH critique fix): ``terminal_reward_mode`` selects the PPO
         reward shape.
@@ -139,20 +140,30 @@ class ChainEnv:
             # Soft fallback so policy rollouts that lack an approximator
             # don't blow up; matches the LKChain.__init__ contract.
             self.gate_mode = "hpwl"
+        # Task 1b: regularity blend weight. 0.0 = unchanged. When > 0, the
+        # gate's third coord and the ``committed_gain`` reward both include
+        # a canvas-normalized regularity term — see ``_compute_third`` and
+        # ``_finalize``. predicted_proxy path is intentionally untouched
+        # (per the implementation brief) until Task 1c retrains the model.
+        self.reg_weight = float(reg_weight)
+        # Pre-compute scales so per-step ``_compute_third`` is allocation-
+        # free; both are constants for this env's lifetime.
+        self._hpwl_scale = max(state.cw, state.ch)
+        self._reg_scale = state.cw + state.ch
 
         self.snapshot = state.pos.copy()
         self.start_hpwl = state.hpwl()
         self.start_overlaps = state.overlap_pairs()
         self.start_overlap_area = state.overlap_area()
+        # Cache start regularity for the reward shape in _finalize.
+        self.start_regularity = (state.total_regularity()
+                                  if self.reg_weight > 0.0 else 0.0)
 
         # Best-prefix tracking (A.1) under the lex (overlap_pairs,
         # overlap_area, third) gate (A.2 / E.1). See LKChain.run_greedy
         # for the parallel implementation; the env mirrors it so RL
         # rollouts and greedy chains share commit semantics.
-        if self.gate_mode == "predicted_proxy":
-            start_third = 0.0
-        else:
-            start_third = self.start_hpwl
+        start_third = self._compute_third(predicted_cumulative=0.0)
         self.start_key = (self.start_overlaps, self.start_overlap_area,
                           start_third)
         self.best_key = self.start_key
@@ -170,6 +181,23 @@ class ChainEnv:
         # rule.
         self.visited: set[int] = {seed_macro}
 
+    def _compute_third(self, predicted_cumulative: float) -> float:
+        """Third lex coordinate. Mirrors ``LKChain._compute_third``.
+
+        ``reg_weight == 0`` (default) preserves the original behavior: HPWL
+        under the hpwl gate, cumulative predicted Δproxy under predicted_proxy.
+        ``reg_weight > 0`` blends in the canvas-normalized regularity term.
+        """
+        if self.gate_mode == "predicted_proxy":
+            base = predicted_cumulative
+        else:
+            base = self.state.hpwl()
+        if self.reg_weight <= 0.0:
+            return base
+        base_norm = base / max(self._hpwl_scale, 1e-9)
+        reg_norm = self.state.total_regularity() / max(self._reg_scale, 1e-9)
+        return base_norm + self.reg_weight * reg_norm
+
     def _predict_delta(self, old_x: float, old_y: float,
                        cx: float, cy: float) -> float:
         """Approximator-predicted Δproxy for moving current_macro -> (cx, cy).
@@ -178,9 +206,12 @@ class ChainEnv:
         denormalization performed by LKChain.run_greedy so the predicted
         cumulative is in the same units as the offline calibration set.
         """
+        # Task 1c: feature schema follows the approximator checkpoint.
+        use_reg_feat = bool(self.approximator.get("use_reg_feature", False))
         feats = _features_for_move(
             self.state, self.current_macro,
             np.array([cx - old_x, cy - old_y], dtype=np.float64),
+            use_reg_feature=use_reg_feat,
         )
         norm = (feats - self.approximator["feat_mean"]) / self.approximator["feat_std"]
         with torch.no_grad():
@@ -199,6 +230,14 @@ class ChainEnv:
             num_candidates=self.max_candidates,
             rng=self.rng,
         )
+        # Task 1c: policy candidate features follow the approximator's schema
+        # (so the PPO policy sees the same dim downstream code expects).
+        use_reg_feat = (
+            bool(self.approximator.get("use_reg_feature", False))
+            if self.approximator is not None else False
+        )
+        cand_dim = (_placer.FEATURE_DIM_WITH_REG if use_reg_feat
+                    else FEATURE_DIM)
         if cands:
             old_x = self.state.pos[self.current_macro, 0]
             old_y = self.state.pos[self.current_macro, 1]
@@ -206,11 +245,12 @@ class ChainEnv:
                 _features_for_move(
                     self.state, self.current_macro,
                     np.array([cx - old_x, cy - old_y], dtype=np.float64),
+                    use_reg_feature=use_reg_feat,
                 )
                 for (cx, cy) in cands
             ]).astype(np.float32)
         else:
-            cand_feats = np.zeros((0, FEATURE_DIM), dtype=np.float32)
+            cand_feats = np.zeros((0, cand_dim), dtype=np.float32)
 
         n_displaced = len(self.state.overlapping_with(self.current_macro))
         return {
@@ -262,11 +302,9 @@ class ChainEnv:
             self.predicted_cumulative += step_pred_delta
 
         # Best-prefix snapshot under the lex (overlap_pairs, overlap_area,
-        # third) gate. Third coord depends on gate_mode (E.1).
-        if self.gate_mode == "predicted_proxy":
-            third = self.predicted_cumulative
-        else:
-            third = new_hpwl
+        # third) gate. Third coord depends on gate_mode (E.1) and Task 1b's
+        # regularity blend.
+        third = self._compute_third(self.predicted_cumulative)
         cur_key = (self.state.overlap_pairs(), self.state.overlap_area(),
                    third)
         if cur_key < self.best_key:
@@ -309,7 +347,14 @@ class ChainEnv:
         # monitoring; under predicted_proxy gate, best_key[2] is the
         # cumulative predicted Δproxy at the committed prefix, not HPWL.
         committed_hpwl_gain = (self.start_hpwl - self.state.hpwl()) if committed else 0.0
-        # D.1: terminal reward shape.
+        # Task 1b: committed regularity gain (start - end). Positive = pushed
+        # toward edges = good. Only computed when reg_weight > 0; otherwise
+        # ``start_regularity`` is 0.0 and this is zero too.
+        committed_reg_gain = (
+            (self.start_regularity - self.state.total_regularity())
+            if (committed and self.reg_weight > 0.0) else 0.0
+        )
+        # D.1 + Task 1b: terminal reward shape.
         if self.terminal_reward_mode == "committed_gain":
             # Per-step reward was 0; terminal reward = committed gain in
             # the units the gate measures. STOP is now a first-class
@@ -318,7 +363,22 @@ class ChainEnv:
             # numerically larger telescope.
             if self.gate_mode == "predicted_proxy" and committed:
                 # Negative predicted cumulative = improvement = reward.
+                # Task 1b note: predicted_proxy reward path is intentionally
+                # untouched until a regularity-aware approximator exists.
                 reward = -float(self.best_key[2])
+            elif self.reg_weight > 0.0:
+                # Task 1b: convex blend of canvas-normalized hpwl gain and
+                # regularity gain. α = 1/(1+reg_weight) puts the two on
+                # comparable footing for the policy update — α → 1 as
+                # reg_weight → 0 recovers the original hpwl-only reward
+                # (modulo the normalization, which only kicks in for the
+                # regularity branch).
+                hpwl_gain_norm = (committed_hpwl_gain
+                                   / max(self._hpwl_scale, 1e-9))
+                reg_gain_norm = committed_reg_gain / max(self._reg_scale, 1e-9)
+                alpha = 1.0 / (1.0 + self.reg_weight)
+                reward = (alpha * hpwl_gain_norm
+                           + (1.0 - alpha) * reg_gain_norm)
             else:
                 reward = committed_hpwl_gain
         else:  # legacy telescope
@@ -329,6 +389,7 @@ class ChainEnv:
             "chain_length": self.chain_length,
             "best_prefix_index": self.best_prefix_index,
             "hpwl_gain": committed_hpwl_gain,
+            "reg_gain": committed_reg_gain,
             "predicted_proxy_gain": (-float(self.best_key[2])
                                      if (self.gate_mode == "predicted_proxy"
                                          and committed) else 0.0),

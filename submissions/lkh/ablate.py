@@ -77,37 +77,51 @@ def _eval_placement(name: str, placement, benchmark, plc, runtime: float):
     }
 
 
-# Per-milestone config: (label, approx_path, policy_path, use_policy, gate_mode).
-# ``None`` for an approximator/policy path means "skip" (we pass _BOGUS_CKPT).
+# Per-milestone config: (label, approx_path, policy_path, use_policy,
+# gate_mode, reg_weight). ``None`` for an approximator/policy path means
+# "skip" (we pass _BOGUS_CKPT). reg_weight is Task 1b's MaskRegulate blend.
 _MILESTONE_CONFIG = {
-    "A": ("A: Milestone-A surrogate", None, None, False, "hpwl"),
-    "B": ("B: Milestone-B surrogate", None, None, False, "hpwl"),
-    "C": ("C: Milestone-C +approx", _APPROX_CKPT, None, False, "hpwl"),
-    "D": ("D: Milestone-D +policy", _APPROX_CKPT, _POLICY_CKPT, True, "hpwl"),
-    "E": ("E: Milestone-E predproxy", _APPROX_CKPT, _POLICY_CKPT, True, "predicted_proxy"),
+    "A": ("A: Milestone-A surrogate", None, None, False, "hpwl", 0.0),
+    "B": ("B: Milestone-B surrogate", None, None, False, "hpwl", 0.0),
+    "C": ("C: Milestone-C +approx", _APPROX_CKPT, None, False, "hpwl", 0.0),
+    "D": ("D: Milestone-D +policy", _APPROX_CKPT, _POLICY_CKPT, True, "hpwl", 0.0),
+    "E": ("E: Milestone-E predproxy", _APPROX_CKPT, _POLICY_CKPT, True, "predicted_proxy", 0.0),
+    # MaskRegulate Task 1b: regularity blended into the lex gate's third
+    # coordinate. F mirrors D's checkpoints+gate but with reg_weight=0.5;
+    # use --reg-weight to override (e.g. for a sweep).
+    "F": ("F: + regularity (reg_weight=0.5)", _APPROX_CKPT, _POLICY_CKPT, True, "hpwl", 0.5),
 }
 
 
 def _build_placer(*, milestone: str, seed: int, time_budget_s: float,
-                  max_chains: int, max_chain_length: int):
-    """Instantiate an LKHPlacer for the requested milestone config."""
+                  max_chains: int, max_chain_length: int,
+                  reg_weight_override: float | None = None):
+    """Instantiate an LKHPlacer for the requested milestone config.
+
+    ``reg_weight_override`` lets callers (e.g. a CLI sweep) replace the
+    milestone's default regularity weight without editing the table.
+    """
     if milestone not in _MILESTONE_CONFIG:
         raise ValueError(f"unknown milestone {milestone!r}; "
                          f"expected one of {sorted(_MILESTONE_CONFIG)}")
-    _, approx, policy, use_policy, gate_mode = _MILESTONE_CONFIG[milestone]
+    _, approx, policy, use_policy, gate_mode, default_rw = _MILESTONE_CONFIG[milestone]
     approx_path = str(approx) if approx is not None else str(_BOGUS_CKPT)
     policy_path = str(policy) if policy is not None else str(_BOGUS_CKPT)
+    reg_weight = (default_rw if reg_weight_override is None
+                  else reg_weight_override)
     return placer_mod.LKHPlacer(
         seed=seed, time_budget_s=time_budget_s,
         max_chains=max_chains, max_chain_length=max_chain_length,
         checkpoint_path=approx_path, policy_path=policy_path,
         use_policy=use_policy, gate_mode=gate_mode,
+        reg_weight=reg_weight,
     )
 
 
 def run_milestone(milestone: str, benchmark_names: list[str], *,
                   time_budget_s: float, max_chains: int,
-                  max_chain_length: int, seed: int) -> dict:
+                  max_chain_length: int, seed: int,
+                  reg_weight_override: float | None = None) -> dict:
     """Run one milestone config across multiple benchmarks.
 
     Returns a dict shaped for ``--history-file`` consumption::
@@ -131,7 +145,8 @@ def run_milestone(milestone: str, benchmark_names: list[str], *,
         placer = _build_placer(milestone=milestone, seed=seed,
                                time_budget_s=time_budget_s,
                                max_chains=max_chains,
-                               max_chain_length=max_chain_length)
+                               max_chain_length=max_chain_length,
+                               reg_weight_override=reg_weight_override)
         t0 = time.time()
         placement = placer.place(benchmark)
         runtime = time.time() - t0
@@ -324,6 +339,11 @@ def main():
                    help="JSON file to append per-milestone records to. "
                         "Used to compute Δ-vs-previous-milestone in subsequent "
                         "runs. Only consulted in --milestone mode.")
+    p.add_argument("--reg-weight", type=float, default=None,
+                   help="MaskRegulate Task 1b: override the milestone's "
+                        "default regularity weight (blend coefficient in the "
+                        "lex gate's third coord). 0 = pure hpwl gate. Only "
+                        "consulted in --milestone mode.")
     args = p.parse_args()
 
     if args.milestone is None:
@@ -350,6 +370,7 @@ def main():
         max_chains=args.max_chains,
         max_chain_length=args.max_chain_length,
         seed=args.seed,
+        reg_weight_override=args.reg_weight,
     )
     history_path = Path(args.history_file) if args.history_file else None
     _print_milestone_summary(record, history_path)
