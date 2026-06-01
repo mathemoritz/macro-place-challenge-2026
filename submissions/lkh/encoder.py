@@ -215,19 +215,37 @@ def build_edge_index_and_attr(state) -> tuple[torch.Tensor, torch.Tensor]:
     return edge_index, edge_attr
 
 
-def rasterize_canvas(state, grid_size: int = 128) -> torch.Tensor:
-    """3-channel raster of the canvas [3, grid_size, grid_size]:
-        channel 0: occupancy (1 in any cell covered by a hard macro)
-        channel 1: density (sum of macro areas accumulated per cell)
-        channel 2: edge-endpoint weights (sum over edges with endpoint in cell)
-                   — congestion proxy. Plan's exact congestion model isn't
-                   specified; this captures "many wires terminate here".
+def rasterize_canvas(state, idx: int | None = None,
+                     grid_size: int = 128) -> torch.Tensor:
+    """3-channel raster of the canvas ``[3, grid_size, grid_size]``.
+
+    Task 4 (MaskRegulate): when ``idx`` is provided, the channels are the
+    per-macro mask triplet — exactly what MaskRegulate's NeurIPS 2024 paper
+    feeds its ResNet-18 backbone:
+        channel 0: PositionMask — 1.0 where placing macro ``idx`` would NOT
+                   overlap any other macro.
+        channel 1: WireMask — normalized HPWL Δ over the legal box for
+                   macro ``idx`` (low = good).
+        channel 2: RegularMask — distance from each cell to the nearest
+                   canvas edge for macro ``idx``'s legal box (low = good).
+
+    When ``idx is None`` (legacy / pre-Task-4 path), the channels are the
+    generic occupancy + density + edge-endpoint scatter — same as the
+    pre-fix code. Retained so the existing smoke test still passes.
+
+    All three per-macro channels are normalized to ~[0, 1] so the CNN sees
+    inputs on a consistent scale across designs of different canvas sizes.
     """
+    if idx is None:
+        return _rasterize_global(state, grid_size=grid_size)
+    return _rasterize_per_macro(state, idx=idx, grid_size=grid_size)
+
+
+def _rasterize_global(state, grid_size: int) -> torch.Tensor:
+    """Legacy 3-channel raster (no idx): occupancy / density / edge weights."""
     canvas = np.zeros((3, grid_size, grid_size), dtype=np.float32)
     cell_w = state.cw / grid_size
     cell_h = state.ch / grid_size
-
-    # Per-macro occupancy + density.
     for i in range(state.n):
         cx, cy = state.pos[i]
         w, h = state.sizes[i]
@@ -237,8 +255,6 @@ def rasterize_canvas(state, grid_size: int = 128) -> torch.Tensor:
         y1 = min(grid_size, int((cy + h / 2) / cell_h) + 1)
         canvas[0, y0:y1, x0:x1] = 1.0
         canvas[1, y0:y1, x0:x1] += float(w * h)
-
-    # Edge-endpoint scatter (vectorized).
     if len(state.edges) > 0:
         edges = state.edges
         weights = state.edge_weights.astype(np.float32)
@@ -247,15 +263,54 @@ def rasterize_canvas(state, grid_size: int = 128) -> torch.Tensor:
         gx = np.clip((state.pos[idx_all, 0] / cell_w).astype(int), 0, grid_size - 1)
         gy = np.clip((state.pos[idx_all, 1] / cell_h).astype(int), 0, grid_size - 1)
         np.add.at(canvas[2], (gy, gx), w_all)
-
     return torch.from_numpy(canvas)
 
 
-def encode_state(state, encoder: StateEncoder) -> tuple[torch.Tensor, torch.Tensor]:
-    """End-to-end: build inputs and run the encoder. Returns (per_node, global)."""
+def _rasterize_per_macro(state, idx: int, grid_size: int) -> torch.Tensor:
+    """Task 4: per-macro [PositionMask, WireMask, RegularMask] raster.
+
+    All three are evaluated on the same ``grid_size × grid_size`` mesh of
+    the legal placement box for macro ``idx`` (the same mesh
+    ``position_mask`` and ``wire_mask_grid`` use). Each channel is
+    normalized to a unit-ish range so the CNN's per-channel statistics are
+    benchmark-independent.
+    """
+    canvas = np.zeros((3, grid_size, grid_size), dtype=np.float32)
+
+    # Channel 0: PositionMask — bool → float. 1 = legal cell.
+    pmask = state.position_mask(idx, grid_size=grid_size)
+    canvas[0] = pmask.astype(np.float32)
+
+    # Channel 1: WireMask — HPWL cost grid normalized by its own max so the
+    # CNN sees relative cell preferences instead of design-scale absolutes.
+    cost_grid, _, _ = state.wire_mask_grid(idx, grid_size=grid_size)
+    if cost_grid.size > 0:
+        cmax = float(cost_grid.max()) or 1.0
+        cmin = float(cost_grid.min())
+        # Map to [0, 1] where 0 = HPWL-best cell, 1 = worst. Flip so the
+        # CNN sees lower-is-better as a higher value (more "attractive"),
+        # consistent with PositionMask where 1 = "good".
+        canvas[1] = 1.0 - ((cost_grid - cmin) /
+                            max(cmax - cmin, 1e-9)).astype(np.float32)
+
+    # Channel 2: RegularMask — distance-to-edge grid normalized by the
+    # max possible (cw/2 + ch/2). Flip so 1 = at edge (good).
+    rgrid = state.regularity_grid(idx, grid_size=grid_size)
+    if rgrid.size > 0:
+        rmax = float(state.cw + state.ch) / 2.0 + 1e-9
+        canvas[2] = 1.0 - (rgrid / rmax).astype(np.float32)
+    return torch.from_numpy(canvas)
+
+
+def encode_state(state, encoder: StateEncoder, idx: int | None = None
+                  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """End-to-end: build inputs and run the encoder. Returns
+    ``(per_node, global)``. Pass ``idx`` to enable Task 4's per-macro
+    mask raster; omit it (or pass ``None``) for the legacy global raster.
+    """
     node_feats = build_node_features(state)
     edge_index, edge_attr = build_edge_index_and_attr(state)
-    canvas = rasterize_canvas(state, grid_size=encoder.grid_size)
+    canvas = rasterize_canvas(state, idx=idx, grid_size=encoder.grid_size)
     with torch.no_grad():
         return encoder(node_feats, edge_index, edge_attr, canvas)
 

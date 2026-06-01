@@ -39,6 +39,20 @@ PlacementState = _placer.PlacementState
 _features_for_move = _placer._features_for_move
 FEATURE_DIM = _placer.FEATURE_DIM
 
+# Task 4: encoder for per-macro mask channels. Loaded lazily so the legacy
+# pre-Task-4 inference path doesn't import torch_geometric-shaped code on
+# Modal images that don't carry it.
+_encoder_mod = None
+def _get_encoder_module():
+    global _encoder_mod
+    if _encoder_mod is None:
+        _spec_enc = importlib.util.spec_from_file_location(
+            "lkh_encoder", str(_HERE / "encoder.py")
+        )
+        _encoder_mod = importlib.util.module_from_spec(_spec_enc)
+        _spec_enc.loader.exec_module(_encoder_mod)
+    return _encoder_mod
+
 
 # Feature-dim constants must match lkh_model.py exactly.
 GLOBAL_DIM = 5
@@ -93,7 +107,8 @@ class ChainEnv:
                  approximator: dict | None = None,
                  reg_weight: float = 0.0,
                  use_wiremask: bool = False,
-                 use_position_mask: bool = False):
+                 use_position_mask: bool = False,
+                 encoder=None):
         """
         D.1 (LKH critique fix): ``terminal_reward_mode`` selects the PPO
         reward shape.
@@ -153,6 +168,21 @@ class ChainEnv:
         self.use_wiremask = bool(use_wiremask)
         # MaskRegulate Task 3: legality filter on WireMask candidates.
         self.use_position_mask = bool(use_position_mask)
+        # Task 4b: optional StateEncoder. The encoder's GNN forward depends
+        # on the WHOLE state (positions + edges), so we cache it ONCE at
+        # chain init — subsequent steps recompute only the CNN branch (per-
+        # macro mask raster). The cache is invalidated naturally because
+        # each chain spawns a fresh ChainEnv.
+        self.encoder = encoder
+        self._encoder_gnn_cache: tuple | None = None
+        if self.encoder is not None:
+            _enc = _get_encoder_module()
+            nf = _enc.build_node_features(state)
+            ei, ea = _enc.build_edge_index_and_attr(state)
+            with torch.no_grad():
+                h_gnn, g_gnn = self.encoder.gnn(nf, ei, ea)
+            # Stored as (per_node[N, hidden], global_gnn[hidden]).
+            self._encoder_gnn_cache = (h_gnn.detach(), g_gnn.detach())
         # Pre-compute scales so per-step ``_compute_third`` is allocation-
         # free; both are constants for this env's lifetime.
         self._hpwl_scale = max(state.cw, state.ch)
@@ -262,7 +292,7 @@ class ChainEnv:
             cand_feats = np.zeros((0, cand_dim), dtype=np.float32)
 
         n_displaced = len(self.state.overlapping_with(self.current_macro))
-        return {
+        out = {
             "global": compute_global_features(self.state),
             "macro": compute_macro_features(self.state, self.current_macro),
             "candidates": cand_feats,
@@ -272,6 +302,24 @@ class ChainEnv:
             ),
             "raw_candidates": cands,
         }
+        # Task 4b: when an encoder is attached, append per-macro mask-CNN
+        # output to the cached GNN globals, plus the cached per-node
+        # embedding for the current macro. ``state_for_policy`` is the only
+        # call site at which the encoder fires — once per chain step.
+        if self.encoder is not None and self._encoder_gnn_cache is not None:
+            _enc = _get_encoder_module()
+            canvas = _enc.rasterize_canvas(
+                self.state, idx=self.current_macro,
+                grid_size=self.encoder.grid_size,
+            )
+            with torch.no_grad():
+                cnn_out = self.encoder.cnn(canvas)
+            h_gnn, g_gnn = self._encoder_gnn_cache
+            encoder_global = torch.cat([g_gnn, cnn_out], dim=-1)
+            encoder_macro = h_gnn[self.current_macro]
+            out["encoder_global"] = encoder_global.numpy().astype(np.float32)
+            out["encoder_macro"] = encoder_macro.numpy().astype(np.float32)
+        return out
 
     def step(self, action_idx: int, candidates: list[tuple[float, float]]
              ) -> tuple[float, bool, dict]:

@@ -534,6 +534,24 @@ class PlacementState:
     # less than the sum-of-half-sides means an overlap. Strict-overlap test
     # mirrors ``_DEFAULT_GAP`` semantics (1e-6) used elsewhere.
 
+    def regularity_grid(self, idx: int, grid_size: int = 64) -> np.ndarray:
+        """Per-cell regularity ``min(x, cw-x) + min(y, ch-y)`` for macro
+        ``idx``'s legal box, on a ``[grid_size, grid_size]`` raster. Higher
+        = farther from edge (worse per MaskRegulate). Used as a CNN channel
+        in Task 4's encoder rasterizer.
+        """
+        x_lo = float(self.half_w[idx])
+        x_hi = float(self.cw - self.half_w[idx])
+        y_lo = float(self.half_h[idx])
+        y_hi = float(self.ch - self.half_h[idx])
+        if x_hi <= x_lo or y_hi <= y_lo:
+            return np.zeros((grid_size, grid_size), dtype=np.float32)
+        x_centers = np.linspace(x_lo, x_hi, grid_size)
+        y_centers = np.linspace(y_lo, y_hi, grid_size)
+        dx_edge = np.minimum(x_centers, self.cw - x_centers)
+        dy_edge = np.minimum(y_centers, self.ch - y_centers)
+        return (dy_edge[:, None] + dx_edge[None, :]).astype(np.float32)
+
     def position_mask(self, idx: int, grid_size: int = 64) -> np.ndarray:
         """Return a ``[grid_size, grid_size]`` bool grid: True iff placing
         macro ``idx`` at the cell center yields **no** overlap with any
@@ -614,22 +632,22 @@ class PlacementState:
     # by summing two 1-D cost arrays via an outer sum, instead of the naive
     # O(grid² × degree). The minima of that grid are the HPWL-best cells.
 
-    def wire_mask_best(self, idx: int, grid_size: int = 64,
-                       top_k: int = 3) -> list[tuple[float, float]]:
-        """Top-``top_k`` cell centers minimizing macro ``idx``'s HPWL
-        contribution, evaluated on a ``grid_size × grid_size`` raster of the
-        legal placement box for this macro. Returns ``[]`` if the macro has
-        no incident edges (then there is no analytic optimum to recommend).
+    def wire_mask_grid(self, idx: int, grid_size: int = 64
+                        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Per-cell HPWL cost grid for macro ``idx``. Returns
+        ``(cost_grid, x_centers, y_centers)``. ``cost_grid[gy, gx]`` is the
+        macro's added HPWL contribution if placed at ``(x_centers[gx],
+        y_centers[gy])``. Returns ``(empty, empty, empty)`` if the macro
+        has no incident edges or the legal box collapses.
 
-        Cells are returned in best-first order, clamped to the legal canvas
-        and de-duplicated (so they don't clash with adjacent grid neighbors
-        when ``top_k`` is small).
+        Shared by ``wire_mask_best`` (top-k extraction) and the Task 4
+        encoder rasterizer (full grid as a CNN channel).
         """
-        # Gather anchors and weights from both edge sets.
         incident_hh = self.macro_edge_indices[idx]
         incident_hf = self.macro_hf_indices[idx]
         if len(incident_hh) == 0 and len(incident_hf) == 0:
-            return []
+            empty = np.zeros((0,), dtype=np.float64)
+            return np.zeros((0, 0)), empty, empty
 
         anchors_x_parts = []
         anchors_y_parts = []
@@ -650,27 +668,41 @@ class PlacementState:
         anchors_y = np.concatenate(anchors_y_parts)
         weights = np.concatenate(weights_parts).astype(np.float64)
 
-        # Legal placement box for this macro (centers must stay >= half_w
-        # from the boundary so the macro fits entirely inside the canvas).
+        # Legal placement box for this macro.
         x_lo = float(self.half_w[idx])
         x_hi = float(self.cw - self.half_w[idx])
         y_lo = float(self.half_h[idx])
         y_hi = float(self.ch - self.half_h[idx])
-        # Edge case: tight canvas → 1-D grid collapses. Fall back gracefully.
         if x_hi <= x_lo or y_hi <= y_lo:
-            return []
+            empty = np.zeros((0,), dtype=np.float64)
+            return np.zeros((0, 0)), empty, empty
 
         x_centers = np.linspace(x_lo, x_hi, grid_size)
         y_centers = np.linspace(y_lo, y_hi, grid_size)
 
-        # cost_x[gx] = sum_k w_k * |x_centers[gx] - anchors_x[k]|
-        # Compute via broadcasting; memory O(grid × degree).
+        # Separable: cost(x, y) = cost_x(x) + cost_y(y) with
+        # cost_x[gx] = sum_k w_k * |x_centers[gx] - anchors_x[k]|.
         cost_x = (weights[:, None] *
                   np.abs(x_centers[None, :] - anchors_x[:, None])).sum(axis=0)
         cost_y = (weights[:, None] *
                   np.abs(y_centers[None, :] - anchors_y[:, None])).sum(axis=0)
-        # Total cost at (gy, gx) = cost_y[gy] + cost_x[gx]  — outer sum.
         cost_grid = cost_y[:, None] + cost_x[None, :]
+        return cost_grid, x_centers, y_centers
+
+    def wire_mask_best(self, idx: int, grid_size: int = 64,
+                       top_k: int = 3) -> list[tuple[float, float]]:
+        """Top-``top_k`` cell centers minimizing macro ``idx``'s HPWL
+        contribution, evaluated on a ``grid_size × grid_size`` raster of the
+        legal placement box for this macro. Returns ``[]`` if the macro has
+        no incident edges (then there is no analytic optimum to recommend).
+
+        Cells are returned in best-first order, clamped to the legal canvas
+        and de-duplicated (so they don't clash with adjacent grid neighbors
+        when ``top_k`` is small).
+        """
+        cost_grid, x_centers, y_centers = self.wire_mask_grid(idx, grid_size)
+        if cost_grid.size == 0:
+            return []
 
         # k smallest cells. argpartition is O(N) vs sort's O(N log N).
         flat = cost_grid.ravel()
@@ -1066,9 +1098,13 @@ def _load_chain_policy(ckpt_path: Path):
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     # Task 1c: ChainPolicy accepts a non-default cand_dim. Older 16-d
     # checkpoints don't carry the field; fall back to FEATURE_DIM.
+    # Task 4b: optional encoder dims; default 0 so pre-Task-4 checkpoints
+    # load with the same shape they were trained at.
     policy = ChainPolicy(
         hidden=ckpt.get("hidden", 64),
         cand_dim=int(ckpt.get("cand_dim", FEATURE_DIM)),
+        encoder_global_dim=int(ckpt.get("encoder_global_dim", 0)),
+        encoder_macro_dim=int(ckpt.get("encoder_macro_dim", 0)),
     )
     policy.load_state_dict(ckpt["state_dict"])
     policy.eval()
@@ -1077,6 +1113,11 @@ def _load_chain_policy(ckpt_path: Path):
         "ChainEnv": env_mod.ChainEnv,
         "trained_on": ckpt.get("trained_on"),
         "n_iterations": ckpt.get("n_iterations"),
+        "encoder_global_dim": int(ckpt.get("encoder_global_dim", 0)),
+        "encoder_macro_dim": int(ckpt.get("encoder_macro_dim", 0)),
+        "encoder_grid_size": int(ckpt.get("encoder_grid_size", 64)),
+        "encoder_hidden": int(ckpt.get("encoder_hidden", 64)),
+        "encoder_path": ckpt.get("encoder_path"),
     }
 
 
@@ -1100,7 +1141,8 @@ class LKChain:
                  gate_mode: str = "hpwl",
                  reg_weight: float = 0.0,
                  use_wiremask: bool = False,
-                 use_position_mask: bool = False):
+                 use_position_mask: bool = False,
+                 encoder=None):
         """``gate_mode`` selects the third lex-coordinate of the commit gate:
 
         * ``"hpwl"`` (default): ``(overlap_pairs, overlap_area, hpwl)``.
@@ -1133,6 +1175,9 @@ class LKChain:
         # legality mask. Pair with use_wiremask=True to get safe analytic
         # candidates; with use_wiremask=False the flag is a no-op.
         self.use_position_mask = bool(use_position_mask)
+        # Task 4b: optional StateEncoder propagated to ChainEnv when the
+        # learned policy path is taken. None = legacy path (no encoder).
+        self.encoder = encoder
         if gate_mode not in ("hpwl", "predicted_proxy"):
             raise ValueError(
                 f"unknown gate_mode={gate_mode!r}; expected 'hpwl' or 'predicted_proxy'"
@@ -1180,7 +1225,8 @@ class LKChain:
                         approximator=self.approx,
                         reg_weight=self.reg_weight,
                         use_wiremask=self.use_wiremask,
-                        use_position_mask=self.use_position_mask)
+                        use_position_mask=self.use_position_mask,
+                        encoder=self.encoder)
         import torch.nn.functional as _F
         final_info: dict = {}
         while not env.done:
@@ -1191,12 +1237,23 @@ class LKChain:
                 if _d:
                     final_info = info
                 break
+            # Task 4b: forward encoder embeddings to policies that were
+            # trained with them (encoder_global_dim / encoder_macro_dim
+            # > 0). Legacy 16/17-d policies ignore these — they were built
+            # with the dims at 0, so the kwargs default to None and pass
+            # through harmlessly.
+            enc_global = (torch.from_numpy(sp["encoder_global"])
+                          if "encoder_global" in sp else None)
+            enc_macro = (torch.from_numpy(sp["encoder_macro"])
+                         if "encoder_macro" in sp else None)
             with torch.no_grad():
                 logits, _v = policy(
                     torch.from_numpy(sp["global"]),
                     torch.from_numpy(sp["macro"]),
                     torch.from_numpy(sp["candidates"]),
                     torch.from_numpy(sp["chain"]),
+                    encoder_global=enc_global,
+                    encoder_macro=enc_macro,
                 )
                 action = int(_F.softmax(logits, dim=-1).argmax().item())
             _r, _d, info = env.step(action, sp["raw_candidates"])
@@ -1405,7 +1462,8 @@ class LKHPlacer:
                  gate_mode: str = "hpwl",
                  reg_weight: float = 0.0,
                  use_wiremask: bool = False,
-                 use_position_mask: bool = False):
+                 use_position_mask: bool = False,
+                 encoder=None):
         self.seed = seed
         self.time_budget_s = time_budget_s
         self.max_chains = max_chains
@@ -1434,6 +1492,9 @@ class LKHPlacer:
         self.use_wiremask = bool(use_wiremask)
         # MaskRegulate Task 3: legality filter on WireMask candidates.
         self.use_position_mask = bool(use_position_mask)
+        # Task 4b: optional StateEncoder propagated to every LKChain spawn.
+        # None = legacy path (no encoder branch in the policy forward).
+        self.encoder = encoder
 
         approx_ckpt = Path(checkpoint_path) if checkpoint_path else (
             _HERE / "checkpoints" / "cost_approximator.pt"
@@ -1571,6 +1632,7 @@ class LKHPlacer:
                               reg_weight=self.reg_weight,
                               use_wiremask=self.use_wiremask,
                               use_position_mask=self.use_position_mask,
+                              encoder=self.encoder,
                               ).run(self.max_chain_length)
             chains += 1
             if result["committed"]:
