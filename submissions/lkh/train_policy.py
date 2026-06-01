@@ -186,7 +186,13 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                         ppo_epochs: int, output_ckpt: Path,
                         initial_policy_ckpt: Path | None = None,
                         log_every: int = 5,
-                        terminal_reward_mode: str = "committed_gain") -> dict:
+                        terminal_reward_mode: str = "committed_gain",
+                        gate_mode: str = "hpwl",
+                        reg_weight: float = 0.0,
+                        use_wiremask: bool = False,
+                        use_position_mask: bool = False,
+                        approximator_ckpt: Path | None = None,
+                        use_reg_feature: bool = False) -> dict:
     """PPO training across one or more benchmarks. Each trajectory samples
     a random benchmark from ``benchmarks`` (plan §4.3 semantics)."""
     import random as _random
@@ -205,12 +211,37 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     print(f"  pre-loading {len(benchmarks)} benchmark(s) into RAM...")
     bench_cache = _load_benchmark_cache(benchmarks)
 
-    policy = ChainPolicy(hidden=64)
+    # Task 1c: cand_dim follows the approximator's schema so the policy and
+    # approximator agree on per-candidate feature size. Default 16; bumps
+    # to 17 when use_reg_feature is on.
+    from lkh_model import FEATURE_DIM
+    cand_dim = (FEATURE_DIM + 1) if use_reg_feature else FEATURE_DIM
+    policy = ChainPolicy(hidden=64, cand_dim=cand_dim)
     if initial_policy_ckpt is not None and initial_policy_ckpt.exists():
         ckpt = torch.load(initial_policy_ckpt, map_location="cpu", weights_only=False)
-        policy.load_state_dict(ckpt["state_dict"])
-        print(f"  warm-started policy from {initial_policy_ckpt}")
+        # Cand_dim must match for state_dict to load. If the warm-start ckpt
+        # was trained at a different cand_dim (legacy 16 vs new 17), skip
+        # the warm-start and start fresh — incompatible shapes would crash
+        # state_dict load otherwise.
+        warm_cand_dim = int(ckpt.get("cand_dim", FEATURE_DIM))
+        if warm_cand_dim == cand_dim:
+            policy.load_state_dict(ckpt["state_dict"])
+            print(f"  warm-started policy from {initial_policy_ckpt}")
+        else:
+            print(f"  skip warm-start: ckpt cand_dim={warm_cand_dim} "
+                  f"!= run cand_dim={cand_dim}")
     optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+
+    # Task 1b + 4b: load approximator once. Needed when gate_mode is
+    # "predicted_proxy" (for the gate's cumulative Δproxy) or whenever
+    # ChainEnv would otherwise silently fall back to the hpwl gate.
+    approx_bundle = None
+    if approximator_ckpt is not None and Path(approximator_ckpt).exists():
+        approx_bundle = _placer._load_cost_approximator(Path(approximator_ckpt))
+        if approx_bundle is not None:
+            print(f"  approximator loaded for PPO env "
+                  f"(r={approx_bundle.get('pearson_r_val', float('nan')):.3f}, "
+                  f"use_reg_feature={approx_bundle.get('use_reg_feature', False)})")
 
     # Per-benchmark counters for diagnostics (only emitted at end-of-run).
     per_bench_traj_count = {n: 0 for n in benchmarks}
@@ -255,6 +286,11 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                 max_candidates=max_candidates,
                 terminal_commit_bonus=terminal_commit_bonus,
                 terminal_reward_mode=terminal_reward_mode,
+                gate_mode=gate_mode,
+                approximator=approx_bundle,
+                reg_weight=reg_weight,
+                use_wiremask=use_wiremask,
+                use_position_mask=use_position_mask,
             )
             traj = collect_rollout(env, policy)
             per_bench_traj_count[name] += 1
@@ -350,8 +386,18 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         "hidden": 64,
         "best_commit_ema": best_commit_ema,
         "best_iter": best_iter,
+        # Task 1c / 4b: schema flags so the placer's loader reconstructs
+        # the policy at the right shape and routes ChainEnv inputs correctly.
+        "cand_dim": cand_dim,
+        "use_reg_feature": bool(use_reg_feature),
+        "gate_mode": gate_mode,
+        "reg_weight": float(reg_weight),
+        "use_wiremask": bool(use_wiremask),
+        "use_position_mask": bool(use_position_mask),
     }, output_ckpt)
-    print(f"  policy -> {output_ckpt}")
+    print(f"  policy -> {output_ckpt}  (cand_dim={cand_dim}, "
+          f"gate_mode={gate_mode}, reg_weight={reg_weight}, "
+          f"use_wiremask={use_wiremask}, use_position_mask={use_position_mask})")
     return {"history": history, "policy": policy}
 
 

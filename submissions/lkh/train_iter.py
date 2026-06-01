@@ -90,7 +90,12 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               collect_missing: bool = False,
               enable_calibration: bool = True,
               calibration_samples_per_bench: int = 50,
-              calibration_time_budget_s: float = 10.0) -> dict:
+              calibration_time_budget_s: float = 10.0,
+              gate_mode: str = "hpwl",
+              reg_weight: float = 0.0,
+              use_wiremask: bool = False,
+              use_position_mask: bool = False,
+              use_reg_feature: bool = False) -> dict:
     """Run one round of Phase 3 + Phase 4 + per-benchmark evaluation.
 
     Canonical writes (so the placer can find the latest checkpoints) go to
@@ -199,6 +204,7 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         "pearson_r_val": info["pearson"], "spearman_r_val": info["spearman"],
         "trained_on": benchmarks, "round": round_idx,
         "n_train": info["n_train"], "n_val": info["n_val"],
+        "use_reg_feature": bool(use_reg_feature),
     }, cost_ckpt)
     print(f"  CostApproximator -> Pearson={info['pearson']:.3f}  "
           f"Spearman={info['spearman']:.3f}  saved to {cost_ckpt}")
@@ -219,6 +225,12 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         output_ckpt=policy_ckpt,
         initial_policy_ckpt=warm_start,
         log_every=max(policy_iterations // 5, 1),
+        gate_mode=gate_mode,
+        reg_weight=reg_weight,
+        use_wiremask=use_wiremask,
+        use_position_mask=use_position_mask,
+        approximator_ckpt=cost_ckpt,
+        use_reg_feature=use_reg_feature,
     )
 
     # ── Step 3: end-to-end evaluation on every benchmark ──────────────────
@@ -227,7 +239,11 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
     per_bench_eval = {}
     for name in benchmarks:
         print(f"  -- {name} --")
-        per_bench_eval[name] = evaluate_round(name, time_budget_s=eval_time_budget_s)
+        per_bench_eval[name] = evaluate_round(
+            name, time_budget_s=eval_time_budget_s,
+            gate_mode=gate_mode, reg_weight=reg_weight,
+            use_wiremask=use_wiremask, use_position_mask=use_position_mask,
+        )
 
     # ── Step 4 (C.3): calibration sampling ─────────────────────────────────
     # Capture (features, true_Δproxy) pairs at the placer's inference-time
@@ -249,6 +265,11 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
                     approximator_ckpt_path=str(cost_ckpt) if cost_ckpt.exists() else None,
                     policy_ckpt_path=str(policy_ckpt) if policy_ckpt.exists() else None,
                     seed=seed + round_idx * 1009 + b_idx * 7919,
+                    use_reg_feature=use_reg_feature,
+                    use_wiremask=use_wiremask,
+                    use_position_mask=use_position_mask,
+                    reg_weight=reg_weight,
+                    gate_mode=gate_mode,
                 )
                 all_cal_features.append(cal_f)
                 all_cal_targets.append(cal_t)
@@ -290,7 +311,10 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
     return record
 
 
-def evaluate_round(benchmark: str, *, time_budget_s: float = 20.0) -> dict:
+def evaluate_round(benchmark: str, *, time_budget_s: float = 20.0,
+                   gate_mode: str = "hpwl", reg_weight: float = 0.0,
+                   use_wiremask: bool = False,
+                   use_position_mask: bool = False) -> dict:
     """Run the placer + exact proxy cost on a single benchmark."""
     from macro_place.loader import load_benchmark_from_dir
     from macro_place.objective import compute_proxy_cost
@@ -303,7 +327,11 @@ def evaluate_round(benchmark: str, *, time_budget_s: float = 20.0) -> dict:
     bench, plc = load_benchmark_from_dir(str(bench_dir))
 
     placer = placer_mod.LKHPlacer(seed=123, time_budget_s=time_budget_s,
-                                    max_chains=2000, max_chain_length=8)
+                                    max_chains=2000, max_chain_length=8,
+                                    gate_mode=gate_mode,
+                                    reg_weight=reg_weight,
+                                    use_wiremask=use_wiremask,
+                                    use_position_mask=use_position_mask)
     t0 = time.time()
     placement = placer.place(bench)
     runtime = time.time() - t0
@@ -379,6 +407,19 @@ def main():
     p.add_argument("--calibration-time-budget", type=float, default=10.0,
                    help="C.3: seconds per-benchmark for the calibration "
                         "placer pass (default 10).")
+    # MaskRegulate flags (Tasks 1-3). Default OFF preserves legacy behavior;
+    # next-gen runs flip them on as a bundle.
+    p.add_argument("--use-reg-feature", action="store_true",
+                   help="Task 1c: 17-d features with regularity Δ.")
+    p.add_argument("--reg-weight", type=float, default=0.0,
+                   help="Task 1b: regularity blend in chain gate + PPO reward.")
+    p.add_argument("--use-wiremask", action="store_true",
+                   help="Task 2: inject analytic HPWL-best cells as candidates.")
+    p.add_argument("--use-position-mask", action="store_true",
+                   help="Task 3: legality-filter WireMask candidates.")
+    p.add_argument("--gate-mode", choices=("hpwl", "predicted_proxy"),
+                   default="hpwl",
+                   help="E.1: third lex coord of the commit gate.")
     args = p.parse_args()
 
     if args.preset is not None:
@@ -427,6 +468,11 @@ def main():
             enable_calibration=not args.no_calibration,
             calibration_samples_per_bench=args.calibration_samples_per_bench,
             calibration_time_budget_s=args.calibration_time_budget,
+            gate_mode=args.gate_mode,
+            reg_weight=args.reg_weight,
+            use_wiremask=args.use_wiremask,
+            use_position_mask=args.use_position_mask,
+            use_reg_feature=args.use_reg_feature,
         )
         history.append(record)
         # Stream the aggregated history to disk after every round so a crash

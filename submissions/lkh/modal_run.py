@@ -491,7 +491,12 @@ def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
                    calibration_samples_per_bench: int,
                    calibration_time_budget_s: float,
                    output_tag: str, cache_read_dir: str,
-                   skip_collection: bool) -> None:
+                   skip_collection: bool,
+                   gate_mode: str = "hpwl",
+                   reg_weight: float = 0.0,
+                   use_wiremask: bool = False,
+                   use_position_mask: bool = False,
+                   use_reg_feature: bool = False) -> None:
     import json as _json
     _setup_env()
     import train as _train
@@ -574,6 +579,11 @@ def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
             per_benchmark_cache_dir=per_benchmark_cache_dir,
             calibration_samples_per_bench=calibration_samples_per_bench,
             calibration_time_budget_s=calibration_time_budget_s,
+            gate_mode=gate_mode,
+            reg_weight=reg_weight,
+            use_wiremask=use_wiremask,
+            use_position_mask=use_position_mask,
+            use_reg_feature=use_reg_feature,
         )
         history.append(record)
         (output_root / "history.json").write_text(
@@ -593,12 +603,20 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
              calibration_samples_per_bench: int = 50,
              calibration_time_budget_s: float = 10.0,
              output_tag: str = "iter", cache_read_dir: str = "",
-             skip_collection: bool = False) -> None:
+             skip_collection: bool = False,
+             gate_mode: str = "hpwl",
+             reg_weight: float = 0.0,
+             use_wiremask: bool = False,
+             use_position_mask: bool = False,
+             use_reg_feature: bool = False) -> None:
     _run_iter_impl(
         benchmark, rounds, examples, cost_epochs, policy_iterations,
         trajectories_per_iter, eval_time_budget, seed, force_recollect,
         calibration_samples_per_bench, calibration_time_budget_s,
         output_tag, cache_read_dir, skip_collection,
+        gate_mode=gate_mode, reg_weight=reg_weight,
+        use_wiremask=use_wiremask, use_position_mask=use_position_mask,
+        use_reg_feature=use_reg_feature,
     )
 
 
@@ -636,6 +654,9 @@ def _spawn_iter(fn: Any, label: str, **kwargs: Any) -> None:
         "trajectories_per_iter", "eval_time_budget", "calibration_samples_per_bench",
         "calibration_time_budget_s", "seed", "force_recollect",
         "output_tag", "cache_read_dir", "skip_collection",
+        # MaskRegulate Tasks 1-3 toggles
+        "gate_mode", "reg_weight", "use_wiremask", "use_position_mask",
+        "use_reg_feature",
     ):
         if key in kwargs:
             print(f"  {key}: {kwargs[key]}")
@@ -699,7 +720,12 @@ def iter_(preset: str = "", benchmark: str = "", rounds: int = 0,
           calibration_time_budget_s: float = 0.0,
           seed: int = 0, force_recollect: bool = False,
           output_tag: str = "", cache_read_dir: str = "",
-          skip_collection: bool = False) -> None:
+          skip_collection: bool = False,
+          gate_mode: str = "hpwl",
+          reg_weight: float = 0.0,
+          use_wiremask: bool = False,
+          use_position_mask: bool = False,
+          use_reg_feature: bool = False) -> None:
     """Phase 5 — iterative training (background spawn). All knobs configurable.
 
     Presets: ``long12h``, ``medium4h`` (see ``ITER_PRESETS``). Override any CLI
@@ -731,6 +757,14 @@ def iter_(preset: str = "", benchmark: str = "", rounds: int = 0,
         output_tag=output_tag, cache_read_dir=cache_read_dir,
         skip_collection=skip_collection,
     )
+    # MaskRegulate Tasks 1-3 toggles pass through unconditionally — they're
+    # not part of the preset bundle (so a preset doesn't accidentally turn
+    # them on); flipping them is an explicit per-launch decision.
+    params["gate_mode"] = gate_mode
+    params["reg_weight"] = float(reg_weight)
+    params["use_wiremask"] = bool(use_wiremask)
+    params["use_position_mask"] = bool(use_position_mask)
+    params["use_reg_feature"] = bool(use_reg_feature)
     label = f"run_iter ({preset or 'custom'})"
     print(f"=== iter_ → /output/{params['output_tag']} ===")
     _spawn_iter(run_iter, label, **params)

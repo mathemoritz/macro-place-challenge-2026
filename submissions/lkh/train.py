@@ -110,6 +110,7 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
                             p_cascade: float = 0.5,
                             cascade_min: int = 2,
                             cascade_max: int = 4,
+                            use_reg_feature: bool = False,
                             ) -> tuple[np.ndarray, np.ndarray]:
     """Single-benchmark state-drift sampler. Returns (features [N, F], targets [N]).
 
@@ -201,7 +202,10 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
             old_y = float(state.pos[macro_idx, 1])
             delta = np.array([cx - old_x, cy - old_y], dtype=np.float64)
 
-            feats = _placer._features_for_move(state, macro_idx, delta)
+            feats = _placer._features_for_move(
+                state, macro_idx, delta,
+                use_reg_feature=use_reg_feature,
+            )
 
             # B.3: incremental apply + revert; the caches stay coherent
             # so subsequent _features_for_move calls read O(1) HPWL/area.
@@ -253,7 +257,13 @@ def collect_calibration_samples(benchmark_name: str, n_samples: int,
                                  time_budget_s: float,
                                  approximator_ckpt_path: str | None,
                                  policy_ckpt_path: str | None,
-                                 seed: int) -> tuple[np.ndarray, np.ndarray]:
+                                 seed: int,
+                                 use_reg_feature: bool = False,
+                                 use_wiremask: bool = False,
+                                 use_position_mask: bool = False,
+                                 reg_weight: float = 0.0,
+                                 gate_mode: str = "hpwl",
+                                 ) -> tuple[np.ndarray, np.ndarray]:
     """C.3 (LKH critique fix): collect (features, true_Δproxy) pairs from
     states the placer actually visits at inference time. Pre-fix the
     approximator was trained only on near-initial-placement single moves;
@@ -275,6 +285,10 @@ def collect_calibration_samples(benchmark_name: str, n_samples: int,
         checkpoint_path=approximator_ckpt_path,
         policy_path=policy_ckpt_path,
         use_policy=policy_ckpt_path is not None,
+        gate_mode=gate_mode,
+        reg_weight=reg_weight,
+        use_wiremask=use_wiremask,
+        use_position_mask=use_position_mask,
     )
     placement = placer.place(benchmark)
 
@@ -288,8 +302,10 @@ def collect_calibration_samples(benchmark_name: str, n_samples: int,
     state.rebuild_caches()
 
     movable = np.where(state.movable)[0]
+    feat_dim = (_placer.FEATURE_DIM_WITH_REG if use_reg_feature
+                else FEATURE_DIM)
     if len(movable) == 0:
-        return np.zeros((0, FEATURE_DIM), dtype=np.float32), \
+        return np.zeros((0, feat_dim), dtype=np.float32), \
                np.zeros(0, dtype=np.float32)
 
     rng = np.random.RandomState(seed + 7919)
@@ -313,7 +329,10 @@ def collect_calibration_samples(benchmark_name: str, n_samples: int,
             old_x = float(state.pos[macro_idx, 0])
             old_y = float(state.pos[macro_idx, 1])
             delta = np.array([cx - old_x, cy - old_y], dtype=np.float64)
-            feats = _placer._features_for_move(state, macro_idx, delta)
+            feats = _placer._features_for_move(
+                state, macro_idx, delta,
+                use_reg_feature=use_reg_feature,
+            )
             state.apply_move(macro_idx, cx, cy)
             new_cost = exact_cost()
             state.apply_move(macro_idx, old_x, old_y)
@@ -362,6 +381,7 @@ def load_per_benchmark_caches(
     drift_prob: float = 0.3,
     post_benchmark_callback: Optional[Callable[[str], None]] = None,
     force_recollect: bool = False,
+    use_reg_feature: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Load and concatenate per-benchmark ``<name>.pt`` caches.
 
@@ -404,6 +424,7 @@ def load_per_benchmark_caches(
                 feats, targets = _collect_one_benchmark(
                     name, num_examples_per_benchmark or 0,
                     seed=seed + b_idx * 7919, drift_prob=drift_prob,
+                    use_reg_feature=use_reg_feature,
                 )
                 _save_benchmark_cache(
                     cache_file, feats, targets,
@@ -422,6 +443,7 @@ def load_per_benchmark_caches(
             feats, targets = _collect_one_benchmark(
                 name, num_examples_per_benchmark,
                 seed=seed + b_idx * 7919, drift_prob=drift_prob,
+                use_reg_feature=use_reg_feature,
             )
             _save_benchmark_cache(
                 cache_file, feats, targets,
@@ -454,6 +476,7 @@ def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
                   seed: int, drift_prob: float = 0.3,
                   per_benchmark_cache_dir: Optional[Path] = None,
                   post_benchmark_callback: Optional[Callable[[str], None]] = None,
+                  use_reg_feature: bool = False,
                   ) -> tuple[np.ndarray, np.ndarray]:
     """Collect (or load) per-benchmark data and concatenate.
 
@@ -472,6 +495,7 @@ def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
             feats, targets = _collect_one_benchmark(
                 name, num_examples_per_benchmark,
                 seed=seed + b_idx * 7919, drift_prob=drift_prob,
+                use_reg_feature=use_reg_feature,
             )
             all_feats.append(feats)
             all_targets.append(targets)
@@ -482,6 +506,7 @@ def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
         num_examples_per_benchmark=num_examples_per_benchmark,
         collect_missing=True, seed=seed, drift_prob=drift_prob,
         post_benchmark_callback=post_benchmark_callback,
+        use_reg_feature=use_reg_feature,
     )
 
 
@@ -784,6 +809,12 @@ def main():
                    default=str(_HERE / "checkpoints" / "cost_approximator.pt"))
     p.add_argument("--force-recollect", action="store_true",
                    help="Re-run data collection even if cached data exists.")
+    p.add_argument("--use-reg-feature", action="store_true",
+                   help="MaskRegulate Task 1c: emit a 17th feature "
+                        "(reg_before - reg_after) in _features_for_move. "
+                        "Invalidates existing 16-d checkpoints; saves "
+                        "use_reg_feature=True in the new ckpt for "
+                        "downstream loader compatibility.")
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmark)
@@ -815,13 +846,20 @@ def main():
                   f"but request is {sorted(benchmarks)} — re-collecting")
 
     if not use_cache:
-        print(f"\n[1/3] Collecting on {benchmarks}...")
-        features, targets = collect_data(benchmarks, args.num_examples, args.seed)
+        print(f"\n[1/3] Collecting on {benchmarks}  "
+              f"(use_reg_feature={args.use_reg_feature})...")
+        features, targets = collect_data(
+            benchmarks, args.num_examples, args.seed,
+            use_reg_feature=args.use_reg_feature,
+        )
         data_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"features": features, "targets": targets,
-                    "benchmarks": benchmarks, "feature_dim": FEATURE_DIM},
+                    "benchmarks": benchmarks,
+                    "feature_dim": features.shape[1],
+                    "use_reg_feature": bool(args.use_reg_feature)},
                    data_path)
-        print(f"  saved {len(features)} examples to {data_path}")
+        print(f"  saved {len(features)} examples ({features.shape[1]}-d) "
+              f"to {data_path}")
 
     print(f"\n[2/3] Training ({features.shape[0]} examples, {features.shape[1]} feats)...")
     model, info = train_model(
@@ -850,6 +888,10 @@ def main():
         "trained_on": benchmarks,
         "n_train": info["n_train"],
         "n_val": info["n_val"],
+        # Task 1c: schema flag so the placer's loader picks up
+        # use_reg_feature from the ckpt and routes _features_for_move
+        # accordingly.
+        "use_reg_feature": bool(args.use_reg_feature),
     }
     ckpt_path = Path(args.checkpoint_out)
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
