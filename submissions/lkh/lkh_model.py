@@ -97,8 +97,8 @@ class ProxyCostPredictor(nn.Module):
 
         self.encoder = StateEncoder(hidden_dim, num_gnn_layers, edge_fc_layers, grid_size)
 
-        # Without current_node: gnn_global is 5H; cnn_global is H.
-        head_in = (6 if use_cnn else 5) * hidden_dim
+        # Without current_node: gnn_global is 7H; cnn_global is H.
+        head_in = (8 if use_cnn else 7) * hidden_dim
         self.proxy_head = nn.Sequential(
             nn.Linear(head_in, 64),
             nn.ReLU(),

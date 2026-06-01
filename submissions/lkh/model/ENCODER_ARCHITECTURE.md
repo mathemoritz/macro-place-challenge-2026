@@ -46,7 +46,7 @@ This is the most important difference between the two implementations.
 | Edge FC layers per GNN step | 1 | 1 |
 | Node input features | 8 | 8 |
 | Metadata input features | 12 | 12 (`NETLIST_METADATA`) |
-| Global vector components | 6 (or 8) × H | 7 × H (always with current_node) |
+| Global vector components | 8 (or 10) × H | 7 × H (always with current_node) |
 
 Our `hidden_dim = 128` is **16× larger** than Google's `gcn_node_dim = 8`. Every projection — feature encoder, edge FC, attention Q/K/V, metadata encoder — maps into this 128-dim space. Google's model is deliberately tiny because it was designed to run inside a TF-Agents training loop on thousands of TPU rollouts; the small hidden dim trades expressivity for training throughput. Our model runs offline (no live RL), so the 128-dim space gives it far more capacity to represent placement quality.
 
@@ -235,18 +235,22 @@ When `current_node=None`, this block is skipped entirely and the global vector i
 **Code:** [encoder.py:264–284](../encoder.py#L264-L284)  
 **Google equivalent:** [`model_lib.py:551–584`](../../../external/circuit_training/circuit_training/model/model_lib.py#L551-L584)
 
-After the GNN runs, edge embeddings from the last layer are summarized into four statistics:
+After the GNN runs, node embeddings and edge embeddings from the last layer are pooled into the global vector:
 
-| Statistic | Intuition |
+| Component | Intuition |
 |---|---|
+| `h_nodes_mean` | Mean hard-macro embedding — aggregate spatial distribution |
+| `h_nodes_max` | Max hard-macro embedding — captures extreme positions |
 | `h_edges_mean` | Average wire cost across all nets — overall wiring quality |
 | `h_edges_var` | Spread of wire costs — uniformity vs hotspots |
 | `h_edges_max` | Worst-case wire — most critical net |
 | `h_edges_min` | Best-case wire — baseline |
 
-These four statistics plus metadata and CNN output are concatenated into the global vector. Google's model includes the same four statistics (controlled by `include_min_max_var=True` at [model_lib.py:84](../../../external/circuit_training/circuit_training/model/model_lib.py#L84)) plus the attention output and current-node embedding, for a total of 7×8=56 dims. Our global vector is 6×128=768 (without current_node) or 8×128=1024 (with current_node).
+Google's model always includes a `current_node`, which contributes `h_attended` (attention-weighted mean of **all** node embeddings) and `h_current_node` (the focal macro's embedding) — giving it two node-level components in every forward pass. Our `ProxyCostPredictor` runs without a focal macro, so we substitute unconditional mean/max pooling over the hard macro embeddings, which plays the same role: providing a summary of the node embedding space to the head.
 
-**Key difference:** Our 6th global component is `h_cnn` (canvas CNN). Google's 6th component is `h_attended` (self-attention, always present). We move attention to slots 7–8 and make it conditional on `current_node`.
+Google's model includes the same four edge statistics (controlled by `include_min_max_var=True` at [model_lib.py:84](../../../external/circuit_training/circuit_training/model/model_lib.py#L84)) for a total of 7×8=56 dims. Our global vector is 7×128=896 (without current_node) or 9×128=1152 (with current_node); `encode_state` appends `h_cnn` to give 8×128=1024 or 10×128=1280.
+
+**Key difference from prior version:** The global vector previously omitted any node-level summary, leaving the head unable to predict density cost (which requires knowing where all macros are, not just connected pairs). The node pooling fixes this.
 
 ---
 

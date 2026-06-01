@@ -272,6 +272,11 @@ def _bench_batch_forward(
     # Per-sample CNN
     h_cnn = enc.cnn(cv)  # [B, H]
 
+    # Per-sample node stats (hard macros only)
+    h_nodes_b    = h_nodes_flat.reshape(B, N, H)[:, :n_hard, :]  # [B, n_hard, H]
+    h_nodes_mean = h_nodes_b.mean(dim=1)                         # [B, H]
+    h_nodes_max  = h_nodes_b.max(dim=1).values                   # [B, H]
+
     # Per-sample edge stats
     if E > 0:
         h_edges = h_edges_flat.reshape(B, E, H)   # [B, E, H]
@@ -284,17 +289,49 @@ def _bench_batch_forward(
         h_edges_mean = h_edges_var = h_edges_max = h_edges_min = zeros
 
     gnn_global = torch.cat(
-        [h_meta_b, h_edges_mean, h_edges_var, h_edges_max, h_edges_min], dim=-1
-    )  # [B, 5H]
+        [h_meta_b, h_nodes_mean, h_nodes_max,
+         h_edges_mean, h_edges_var, h_edges_max, h_edges_min], dim=-1
+    )  # [B, 7H]
 
     head_input = (
         torch.cat([gnn_global, h_cnn], dim=-1) if model.use_cnn else gnn_global
-    )  # [B, 6H or 5H]
+    )  # [B, 8H or 7H]
 
     return model.proxy_head(head_input)  # [B, 3]
 
 
 # ── Training ────────────────────────────────────────────────────────────────
+
+def _save_intermediate_checkpoint(
+    path: Path,
+    model: "ProxyCostPredictor",
+    ckpt_extra: dict,
+    norm_stats: dict,
+    r_wl: float,
+    r_den: float,
+    r_cong: float,
+    r_mean: float,
+    n_train: int,
+    n_val: int,
+) -> None:
+    """Write a loadable checkpoint immediately when val r improves mid-training."""
+    ckpt = {
+        **ckpt_extra,
+        "encoder_state": {k: v.cpu().clone() for k, v in model.encoder.state_dict().items()},
+        "head_state": {k: v.cpu().clone() for k, v in model.proxy_head.state_dict().items()},
+        "norm_stats": norm_stats,
+        "pearson_r_wl": r_wl,
+        "pearson_r_den": r_den,
+        "pearson_r_cong": r_cong,
+        "best_val_r_mean": r_mean,
+        "n_train": n_train,
+        "n_val": n_val,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".pt.tmp")
+    torch.save(ckpt, str(tmp))
+    tmp.rename(path)
+
 
 def _pearson(pred: np.ndarray, target: np.ndarray) -> float:
     if len(pred) < 2:
@@ -317,6 +354,9 @@ def train_proxy_encoder(
     seed: int = 42,
     device: torch.device | None = None,
     patience: int = 15,
+    checkpoint_path: Optional[Path] = None,
+    ckpt_extra: Optional[dict] = None,
+    wandb_run=None,
 ) -> tuple[ProxyCostPredictor, dict]:
     """Train ProxyCostPredictor on the given per-benchmark sample dicts.
 
@@ -396,6 +436,7 @@ def train_proxy_encoder(
     loss_fn = nn.MSELoss()
 
     best_val_r = -float("inf")
+    best_val_loss = float("inf")
     best_state: dict | None = None
     no_improve = 0
 
@@ -436,10 +477,10 @@ def train_proxy_encoder(
                 pred = _bench_batch_forward(model, d, b_global, device)  # [B, 3]
                 targets_b = targets_all[b_local]
 
-                loss = loss_fn(pred, targets_b) * len(b_local)
+                loss = loss_fn(pred, targets_b)
                 loss.backward()
                 train_loss += loss.item()
-                n_processed += len(b_local)
+                n_processed += 1  # count optimizer steps, not samples
 
                 # Step every batch_size samples
                 optimizer.step()
@@ -495,10 +536,32 @@ def train_proxy_encoder(
                   f"r_wl={r_wl:.3f}  r_den={r_den:.3f}  r_cong={r_cong:.3f}  "
                   f"r_mean={r_mean:.3f}")
 
+        if wandb_run is not None:
+            wandb_run.log({
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "r_wl": r_wl,
+                "r_den": r_den,
+                "r_cong": r_cong,
+                "r_mean": r_mean,
+                "lr": scheduler.get_last_lr()[0],
+            })
+
         if r_mean > best_val_r:
             best_val_r = r_mean
+
+        # Early stopping on val_loss (more stable than Pearson r with small n_val)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             no_improve = 0
+            if checkpoint_path is not None and ckpt_extra is not None:
+                _save_intermediate_checkpoint(
+                    checkpoint_path, model, ckpt_extra, norm_stats,
+                    r_wl, r_den, r_cong, r_mean, n_train, n_val,
+                )
+                print(f"    saved checkpoint (val_loss={val_loss:.4f}  r_mean={r_mean:.3f})")
         else:
             no_improve += 1
             if no_improve >= patience:
@@ -559,7 +622,7 @@ def main():
                    help="Single name, comma-separated, or 'all'")
     p.add_argument("--samples", type=int, default=200,
                    help="Random placement samples per benchmark")
-    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--hidden-dim", type=int, default=128)
@@ -570,13 +633,21 @@ def main():
                    help="Ablate CNN: exclude canvas features from head input")
     p.add_argument("--val-frac", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--patience", type=int, default=15,
-                   help="Early stopping patience (epochs without val r improvement)")
+    p.add_argument("--patience", type=int, default=50,
+                   help="Early stopping patience (epochs without val_loss improvement)")
     p.add_argument("--cache-dir",
                    default=str(_HERE / "data" / "encoder" / "per_bench"))
     p.add_argument("--checkpoint-out",
                    default=str(_HERE / "checkpoints" / "proxy_cost_encoder.pt"))
     p.add_argument("--force-recollect", action="store_true")
+    p.add_argument("--collection-only", action="store_true",
+                   help="Collect and cache samples, then exit without training")
+    p.add_argument("--skip-collection", action="store_true",
+                   help="Load from existing caches only; fail if any are missing")
+    p.add_argument("--wandb-project", default="",
+                   help="W&B project name; empty string disables wandb")
+    p.add_argument("--wandb-run-name", default="",
+                   help="W&B run name (auto-generated if empty)")
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmarks)
@@ -592,17 +663,70 @@ def main():
     print(f"  hidden_dim={args.hidden_dim}  gnn_layers={args.num_gnn_layers}  "
           f"use_cnn={use_cnn}")
 
-    print("\n[1/3] Data collection / cache loading...")
-    bench_data = load_all_caches(
-        benchmarks,
-        cache_dir=Path(args.cache_dir),
-        n_samples=args.samples,
-        seed=args.seed,
-        grid_size=args.grid_size,
-        force_recollect=args.force_recollect,
-    )
+    step_count = 3 if not args.collection_only else 1
+    print(f"\n[1/{step_count}] Data collection / cache loading...")
 
-    print(f"\n[2/3] Training ({args.epochs} epochs, batch={args.batch_size}, lr={args.lr})...")
+    if args.skip_collection:
+        cache_dir_path = Path(args.cache_dir)
+        bench_data = {}
+        missing = []
+        for name in benchmarks:
+            d = _load_bench_cache(cache_dir_path, name)
+            if d is None or d["node_feats"].shape[0] < args.samples:
+                missing.append(name)
+            else:
+                bench_data[name] = d
+                print(f"  [{name}] loaded {d['node_feats'].shape[0]} samples from cache")
+        if missing:
+            raise RuntimeError(
+                f"--skip-collection: missing or insufficient cache for {missing}\n"
+                f"  expected >= {args.samples} samples at {cache_dir_path}"
+            )
+    else:
+        bench_data = load_all_caches(
+            benchmarks,
+            cache_dir=Path(args.cache_dir),
+            n_samples=args.samples,
+            seed=args.seed,
+            grid_size=args.grid_size,
+            force_recollect=args.force_recollect,
+        )
+        if args.collection_only:
+            print("  collection complete — exiting (--collection-only).")
+            return
+
+    ckpt_path = Path(args.checkpoint_out)
+    ckpt_extra = {
+        "type": "proxy_cost_encoder",
+        "hidden_dim": args.hidden_dim,
+        "num_gnn_layers": args.num_gnn_layers,
+        "edge_fc_layers": args.edge_fc_layers,
+        "grid_size": args.grid_size,
+        "use_cnn": use_cnn,
+        "proxy_weights": PROXY_WEIGHTS,
+        "trained_on": benchmarks,
+    }
+
+    wandb_run = None
+    if args.wandb_project:
+        import wandb as _wandb
+        wandb_run = _wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name or None,
+            config={
+                "benchmarks": benchmarks,
+                "samples": args.samples,
+                "epochs": args.epochs,
+                "hidden_dim": args.hidden_dim,
+                "num_gnn_layers": args.num_gnn_layers,
+                "edge_fc_layers": args.edge_fc_layers,
+                "use_cnn": use_cnn,
+                "lr": args.lr,
+                "batch_size": args.batch_size,
+            },
+        )
+
+    print(f"\n[2/{step_count}] Training ({args.epochs} epochs, batch={args.batch_size}, lr={args.lr})...")
     model, info = train_proxy_encoder(
         bench_data,
         hidden_dim=args.hidden_dim,
@@ -616,9 +740,12 @@ def main():
         val_frac=args.val_frac,
         seed=args.seed,
         patience=args.patience,
+        checkpoint_path=ckpt_path,
+        ckpt_extra=ckpt_extra,
+        wandb_run=wandb_run,
     )
 
-    print(f"\n[3/3] Final validation Pearson r:")
+    print(f"\n[3/{step_count}] Final validation Pearson r:")
     print(f"    wl:   {info['pearson_r_wl']:.4f}")
     print(f"    den:  {info['pearson_r_den']:.4f}")
     print(f"    cong: {info['pearson_r_cong']:.4f}")
@@ -644,10 +771,18 @@ def main():
         "n_train": info["n_train"],
         "n_val": info["n_val"],
     }
-    ckpt_path = Path(args.checkpoint_out)
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(ckpt, ckpt_path)
     print(f"  checkpoint -> {ckpt_path}")
+
+    if wandb_run is not None:
+        wandb_run.summary.update({
+            "pearson_r_wl": info["pearson_r_wl"],
+            "pearson_r_den": info["pearson_r_den"],
+            "pearson_r_cong": info["pearson_r_cong"],
+            "best_val_r_mean": info["best_val_r_mean"],
+        })
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

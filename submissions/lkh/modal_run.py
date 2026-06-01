@@ -116,11 +116,15 @@ def _ignore(path) -> bool:
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-        "torch>=2.0",
         "numpy>=1.20",
         "matplotlib>=3.5",
         "tqdm>=4.65",
         "absl-py>=1.0",
+        "wandb>=0.16",
+    )
+    .pip_install(
+        "torch>=2.0",
+        extra_index_url="https://download.pytorch.org/whl/cu121",
     )
     .add_local_dir(
         local_path=str(REPO_ROOT),
@@ -298,28 +302,30 @@ def run_train(benchmark: str, num_examples: int, epochs: int, seed: int,
 
 @app.function(image=image, volumes={"/output": volume},
               gpu="A10G", memory=16384, timeout=4 * 3600,
-              nonpreemptible=True)
+              secrets=[modal.Secret.from_name("wandb")])
 def run_train_encoder(benchmarks: str, n_samples: int, epochs: int,
-                      seed: int = 42, force_recollect: bool = False) -> None:
-    """Phase 2.5: train ProxyCostPredictor on GPU.
+                      seed: int = 42, no_cnn: bool = False,
+                      wandb_project: str = "lkh-encoder",
+                      patience: int = 50) -> None:
+    """GPU training only. Assumes per-benchmark caches exist at /output/encoder/per_bench/.
 
-    Args:
-        benchmarks: single name, comma-separated list, or 'all'.
-        n_samples: random placement samples per benchmark.
-        epochs: training epochs.
-        seed: random seed.
-        force_recollect: re-collect data even if per-benchmark caches exist.
+    Called by run_encoder_pipeline after parallel collection completes.
     """
-    _setup_env()
-    cmd = ["python", "submissions/lkh/train_encoder.py",
-           "--benchmarks", benchmarks,
-           "--samples", str(n_samples),
-           "--epochs", str(epochs),
-           "--seed", str(seed),
-           "--cache-dir", "/output/iter/encoder/per_bench",
-           "--checkpoint-out", "/output/iter/checkpoints/proxy_cost_encoder.pt"]
-    if force_recollect:
-        cmd.append("--force-recollect")
+    volume.reload()
+    cmd = [
+        "python", "submissions/lkh/train_encoder.py",
+        "--benchmarks", benchmarks,
+        "--samples", str(n_samples),
+        "--epochs", str(epochs),
+        "--patience", str(patience),
+        "--seed", str(seed),
+        "--cache-dir", "/output/encoder/per_bench",
+        "--skip-collection",
+    ]
+    if no_cnn:
+        cmd.append("--no-cnn")
+    if wandb_project:
+        cmd += ["--wandb-project", wandb_project]
     _run(cmd)
     _persist("encoder")
 
@@ -397,6 +403,112 @@ def collect_one_benchmark_modal(name: str, num_examples: int, seed: int) -> dict
           f"{_train._fmt_time(wall)} ({_train._fmt_rate(len(feats), wall)})")
     return {"name": name, "n": int(len(feats)),
             "wall_s": float(wall), "from_cache": False}
+
+
+# ── Encoder collection + training pipeline ────────────────────────────────
+#
+# Data collection is 100 % CPU-bound (PlacementCost C++ backend). Running it
+# on the GPU container wastes expensive A10G time. Instead:
+#   1. collect_encoder_benchmark: one cheap CPU container per benchmark,
+#      all running in parallel via .starmap() in run_encoder_pipeline.
+#   2. run_train_encoder: GPU-only training, starts after all caches are committed.
+#   3. run_encoder_pipeline: orchestrator that sequences 1 → 2.
+#
+# Wall time ≈ max(per-benchmark collection) + training
+#            ≈ ~60 min collection + ~20–30 min training  (full 17-bench run)
+# vs ~6 h if collection ran sequentially on the GPU box.
+
+@app.function(image=image, volumes={"/output": volume},
+              cpu=2.0, memory=4096, timeout=8 * 3600, max_containers=20)
+def collect_encoder_benchmark(name: str, n_samples: int, seed: int,
+                               grid_size: int, force_recollect: bool) -> dict:
+    """Collect proxy-cost samples for one benchmark. CPU-only, runs in parallel."""
+    import time as _time
+    import torch as _torch
+
+    cache_dir = Path("/output/encoder/per_bench")
+    cache_file = cache_dir / f"{name}.pt"
+
+    if not force_recollect and cache_file.exists():
+        try:
+            d = _torch.load(str(cache_file), weights_only=False)
+            if d["node_feats"].shape[0] >= n_samples:
+                return {"name": name, "n": int(d["node_feats"].shape[0]),
+                        "wall_s": 0.0, "from_cache": True}
+        except Exception:
+            print(f"[{name}] cache unreadable; re-collecting")
+
+    t0 = _time.time()
+    _run([
+        "python", "submissions/lkh/train_encoder.py",
+        "--benchmarks", name,
+        "--samples", str(n_samples),
+        "--seed", str(seed),
+        "--grid-size", str(grid_size),
+        "--cache-dir", str(cache_dir),
+        "--collection-only",
+    ])
+    wall = _time.time() - t0
+    volume.commit()
+    return {"name": name, "n": n_samples, "wall_s": float(wall), "from_cache": False}
+
+
+@app.function(image=image, volumes={"/output": volume},
+              cpu=2.0, memory=4096, timeout=12 * 3600)
+def run_encoder_pipeline(benchmarks: str, n_samples: int, epochs: int,
+                         seed: int = 42, force_recollect: bool = False,
+                         no_cnn: bool = False, wandb_project: str = "lkh-encoder",
+                         grid_size: int = 128, patience: int = 50) -> None:
+    """Orchestrator: parallel CPU collection → single GPU training pass."""
+    _setup_env()
+
+    if benchmarks == "all":
+        from macro_place.evaluate import IBM_BENCHMARKS
+        benchmark_list = list(IBM_BENCHMARKS)
+    else:
+        benchmark_list = [n.strip() for n in benchmarks.split(",") if n.strip()]
+
+    volume.reload()
+    cache_dir = Path("/output/encoder/per_bench")
+
+    def _cache_sufficient(name: str) -> bool:
+        import torch as _torch
+        p = cache_dir / f"{name}.pt"
+        if not p.exists():
+            return False
+        try:
+            d = _torch.load(str(p), weights_only=False)
+            return int(d["node_feats"].shape[0]) >= n_samples
+        except Exception:
+            return False
+
+    todo = benchmark_list if force_recollect else [
+        n for n in benchmark_list if not _cache_sufficient(n)
+    ]
+
+    if todo:
+        configs = [
+            (n, n_samples, seed + i * 7919, grid_size, force_recollect)
+            for i, n in enumerate(todo)
+        ]
+        n_cached = len(benchmark_list) - len(todo)
+        print(f"[encoder] collecting {len(todo)} benchmarks in parallel "
+              f"({n_cached} already cached)")
+        for res in collect_encoder_benchmark.starmap(configs):
+            tag = "cached" if res.get("from_cache") else "collected"
+            wall = res.get("wall_s", 0.0)
+            wall_str = f"{wall:.0f}s" if wall < 60 else f"{wall / 60:.1f}m"
+            print(f"  {tag}: {res['name']:>6}  n={res['n']:>4}  wall={wall_str}")
+        volume.reload()
+    else:
+        print(f"[encoder] all {len(benchmark_list)} benchmarks cached — skipping collection")
+
+    print("[encoder] handing off to GPU training...")
+    run_train_encoder.remote(
+        benchmarks=benchmarks, n_samples=n_samples, epochs=epochs,
+        seed=seed, no_cnn=no_cnn, wandb_project=wandb_project,
+        patience=patience,
+    )
 
 
 # Budgeted for ~12 h wall time on 17 IBM benchmarks (parallel collection +
@@ -641,6 +753,42 @@ def train(benchmark: str = "ibm01", num_examples: int = 1500, epochs: int = 60,
         epochs=epochs, seed=seed, force_recollect=force_recollect,
     )
     _print_spawn_handle(call, "run_train")
+
+
+@app.local_entrypoint()
+def encoder(benchmarks: str = "all", n_samples: int = 200, epochs: int = 300,
+            seed: int = 42, force_recollect: bool = False,
+            no_cnn: bool = False, wandb_project: str = "lkh-encoder",
+            patience: int = 50) -> None:
+    """Phase 2.5 — parallel CPU collection + GPU encoder training.
+
+    Collection runs one cheap CPU container per benchmark (up to 20 concurrent);
+    training starts on a single A10G once all caches are committed.
+    Wall time ≈ max(per-benchmark) + training, not sum(per-benchmark).
+
+    Early stopping is based on val_loss (more stable than Pearson r with small
+    val sets). Default patience=50 gives the model room to escape plateaus.
+
+    Examples:
+        # Smoke test (reuses cached data from previous run)
+        uv run modal run --detach submissions/lkh/modal_run.py::encoder \\
+            --benchmarks ibm01,ibm02,ibm07 --n-samples 20 --epochs 20
+
+        # Full run, all 17 benchmarks
+        uv run modal run --detach submissions/lkh/modal_run.py::encoder \\
+            --benchmarks all --n-samples 200 --epochs 300
+
+    Download checkpoint (works mid-run too — best weights are saved immediately):
+        modal volume get lkh-results /encoder/checkpoints/proxy_cost_encoder.pt \\
+            submissions/lkh/checkpoints/
+    """
+    call = run_encoder_pipeline.spawn(
+        benchmarks=benchmarks, n_samples=n_samples, epochs=epochs,
+        seed=seed, force_recollect=force_recollect,
+        no_cnn=no_cnn, wandb_project=wandb_project,
+        patience=patience,
+    )
+    _print_spawn_handle(call, "run_encoder_pipeline")
 
 
 @app.local_entrypoint()

@@ -13,7 +13,7 @@ StateEncoder.forward produces three tensors:
     gnn_global [5H or 7H]     — GNN-only global summary (without / with current_node)
     cnn_global [H]            — CNN canvas features (exposed separately for ablation)
 
-encode_state() concatenates gnn_global + cnn_global → [6H or 8H] for callers
+encode_state() concatenates gnn_global + cnn_global → [8H or 10H] for callers
 that want the full global vector without caring about the CNN split.
 
 Components:
@@ -192,6 +192,8 @@ class StateEncoder(nn.Module):
     Output (per_node, gnn_global, cnn_global):
         gnn_global components (matching model_lib.py:551-584):
             h_metadata      [H]   — netlist-level circuit properties
+            h_nodes_mean    [H]   — mean hard-macro embedding (node-level summary)
+            h_nodes_max     [H]   — max hard-macro embedding (extreme positions)
             h_edges_mean    [H]   — mean edge embedding (global wiring summary)
             h_edges_var     [H]   — variance (spread of wire costs)
             h_edges_max     [H]   — max (worst-case wires)
@@ -262,8 +264,9 @@ class StateEncoder(nn.Module):
 
         Returns:
             per_node:   [n_hard, H]
-            gnn_global: [5H] without current_node, [7H] with current_node
-                        = concat(h_meta, h_edges_mean, h_edges_var, h_edges_max,
+            gnn_global: [7H] without current_node, [9H] with current_node
+                        = concat(h_meta, h_nodes_mean, h_nodes_max,
+                                 h_edges_mean, h_edges_var, h_edges_max,
                                  h_edges_min [, h_attended, h_current_node])
             cnn_global: [H]  — CNN canvas features (exposed separately for ablation)
         """
@@ -284,7 +287,12 @@ class StateEncoder(nn.Module):
             h_edges_max = torch.zeros(H, dtype=h_nodes.dtype, device=h_nodes.device)
             h_edges_min = torch.zeros(H, dtype=h_nodes.dtype, device=h_nodes.device)
 
-        gnn_parts = [h_meta, h_edges_mean, h_edges_var, h_edges_max, h_edges_min]
+        h_nodes_hard = h_nodes[:n_hard]
+        h_nodes_mean = h_nodes_hard.mean(dim=0)
+        h_nodes_max  = h_nodes_hard.max(dim=0).values
+
+        gnn_parts = [h_meta, h_nodes_mean, h_nodes_max,
+                     h_edges_mean, h_edges_var, h_edges_max, h_edges_min]
 
         if current_node is not None:
             h_curr = h_nodes[current_node]
@@ -558,7 +566,7 @@ def _smoke_test():
     fwd_ms = (time.time() - t) * 1000 / n_runs
     print(f"\n  forward (no current_node): {fwd_ms:.1f} ms avg over {n_runs}")
     print(f"    per_node   : {tuple(per_node.shape)}   expected ({state.n}, 128)")
-    print(f"    gnn_global : {tuple(gnn_global.shape)}  expected (640,)  [5×128]")
+    print(f"    gnn_global : {tuple(gnn_global.shape)}  expected (896,)  [7×128]")
     print(f"    cnn_global : {tuple(cnn_global.shape)}  expected (128,)  [1×128]")
 
     with torch.no_grad():
@@ -567,14 +575,14 @@ def _smoke_test():
         )
     print(f"\n  forward (current_node=0):")
     print(f"    per_node   : {tuple(per_node_c.shape)}   expected ({state.n}, 128)")
-    print(f"    gnn_global : {tuple(gnn_global_c.shape)}  expected (896,)  [7×128]")
+    print(f"    gnn_global : {tuple(gnn_global_c.shape)}  expected (1152,)  [9×128]")
     print(f"    cnn_global : {tuple(cnn_global_c.shape)}  expected (128,)  [1×128]")
 
     # encode_state still returns the concatenated form for backward compat
     p2, g2 = encode_state(state, encoder, current_node=None)
-    assert g2.shape == (768,), f"encode_state global shape (no current): {g2.shape}"
+    assert g2.shape == (1024,), f"encode_state global shape (no current): {g2.shape}"
     p3, g3 = encode_state(state, encoder, current_node=0)
-    assert g3.shape == (1024,), f"encode_state global shape (with current): {g3.shape}"
+    assert g3.shape == (1280,), f"encode_state global shape (with current): {g3.shape}"
 
     # Gradient flow
     encoder.train()
@@ -585,9 +593,9 @@ def _smoke_test():
     print(f"\n  backward pass   : gradients finite = {grad_ok}")
 
     assert per_node.shape == (state.n, 128), f"per_node shape mismatch: {per_node.shape}"
-    assert gnn_global.shape == (640,), f"gnn_global shape mismatch: {gnn_global.shape}"
+    assert gnn_global.shape == (896,), f"gnn_global shape mismatch: {gnn_global.shape}"
     assert cnn_global.shape == (128,), f"cnn_global shape mismatch: {cnn_global.shape}"
-    assert gnn_global_c.shape == (896,), f"gnn_global shape (current) mismatch: {gnn_global_c.shape}"
+    assert gnn_global_c.shape == (1152,), f"gnn_global shape (current) mismatch: {gnn_global_c.shape}"
     assert grad_ok, "gradient flow broken"
     print("\n  All assertions passed.")
 
