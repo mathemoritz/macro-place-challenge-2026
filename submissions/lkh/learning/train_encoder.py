@@ -32,17 +32,17 @@ import torch
 import torch.nn as nn
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_HERE.parent.parent))  # repo root for macro_place
+sys.path.insert(0, str(_HERE.parent))          # submissions/lkh/
+sys.path.insert(0, str(_HERE.parent.parent.parent))  # repo root for macro_place
 
 # Load placer.py via importlib to avoid package __init__ issues
-_spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer.py"))
+_spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE.parent / "placer.py"))
 _placer = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_placer)
 
 # Load encoder module
 _enc_spec = importlib.util.spec_from_file_location(
-    "lkh_encoder", str(_HERE / "model" / "encoder.py")
+    "lkh_encoder", str(_HERE.parent / "model" / "encoder.py")
 )
 _encoder_mod = importlib.util.module_from_spec(_enc_spec)
 _enc_spec.loader.exec_module(_encoder_mod)
@@ -662,8 +662,8 @@ def main():
         default=50,
         help="Early stopping patience (epochs without val_loss improvement)",
     )
-    p.add_argument("--cache-dir", default=str(_HERE / "data" / "encoder" / "per_bench"))
-    p.add_argument("--checkpoint-out", default=str(_HERE / "checkpoints" / "proxy_cost_encoder.pt"))
+    p.add_argument("--cache-dir", default=str(_HERE.parent / "data" / "encoder" / "per_bench"))
+    p.add_argument("--checkpoint-out", default=str(_HERE.parent / "checkpoints" / "proxy_cost_encoder.pt"))
     p.add_argument("--force-recollect", action="store_true")
     p.add_argument(
         "--collection-only",

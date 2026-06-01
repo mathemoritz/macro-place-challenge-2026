@@ -67,8 +67,8 @@ import modal
 
 app = modal.App("lkh-macro-place")
 
-# Local repo root (this file is at submissions/lkh/modal_run.py).
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+# Local repo root (this file is at submissions/lkh/utils/modal_run.py).
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
 def _ignore(path) -> bool:
@@ -356,7 +356,7 @@ def run_train_encoder(
     volume.reload()
     cmd = [
         "python",
-        "submissions/lkh/train_encoder.py",
+        "submissions/lkh/learning/train_encoder.py",
         "--benchmarks",
         benchmarks,
         "--samples",
@@ -386,13 +386,20 @@ def run_train_encoder(
     memory=8192,
     timeout=12 * 3600,
     nonpreemptible=True,
+    secrets=[modal.Secret.from_name("wandb")],
 )
 def run_policy(
-    benchmark: str, iterations: int, trajectories_per_iter: int, seed: int, initial_policy: str
+    benchmark: str, iterations: int, trajectories_per_iter: int, seed: int,
+    initial_policy: str,
+    encoder_ckpt: str = "",
+    proj_dim: int = 16,
+    gate_mode: str = "hpwl",
+    wandb_project: str = "",
+    wandb_run_name: str = "",
 ) -> None:
     cmd = [
         "python",
-        "submissions/lkh/train_policy.py",
+        "submissions/lkh/learning/train_policy.py",
         "--benchmark",
         benchmark,
         "--iterations",
@@ -404,6 +411,13 @@ def run_policy(
     ]
     if initial_policy:
         cmd += ["--initial-policy", initial_policy]
+    if encoder_ckpt:
+        cmd += ["--encoder-ckpt", encoder_ckpt, "--proj-dim", str(proj_dim),
+                "--gate-mode", gate_mode]
+    if wandb_project:
+        cmd += ["--wandb-project", wandb_project]
+    if wandb_run_name:
+        cmd += ["--wandb-run-name", wandb_run_name]
     _run(cmd)
     _persist("policy")
 
@@ -527,7 +541,7 @@ def collect_encoder_benchmark(
     _run(
         [
             "python",
-            "submissions/lkh/train_encoder.py",
+            "submissions/lkh/learning/train_encoder.py",
             "--benchmarks",
             name,
             "--samples",
@@ -999,12 +1013,19 @@ def policy(
     trajectories_per_iter: int = 4,
     seed: int = 42,
     initial_policy: str = "",
+    encoder_ckpt: str = "",
+    proj_dim: int = 16,
+    gate_mode: str = "hpwl",
+    wandb_project: str = "",
+    wandb_run_name: str = "",
 ) -> None:
     """Phase 4 — train ChainPolicy via PPO on Modal (background spawn).
 
     Examples:
         modal run modal_run.py::policy --benchmark all --iterations 3000
         modal run modal_run.py::policy --benchmark ibm01,ibm07 --iterations 1000
+        modal run --detach modal_run.py::policy --benchmark all --iterations 3000 \\
+            --encoder-ckpt /output/encoder/checkpoints/proxy_cost_encoder.pt
     """
     call = run_policy.spawn(
         benchmark=benchmark,
@@ -1012,6 +1033,11 @@ def policy(
         trajectories_per_iter=trajectories_per_iter,
         seed=seed,
         initial_policy=initial_policy,
+        encoder_ckpt=encoder_ckpt,
+        proj_dim=proj_dim,
+        gate_mode=gate_mode,
+        wandb_project=wandb_project,
+        wandb_run_name=wandb_run_name,
     )
     _print_spawn_handle(call, "run_policy")
 

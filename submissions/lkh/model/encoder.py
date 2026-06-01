@@ -511,6 +511,40 @@ def encode_state(
     return per_node, torch.cat([gnn_global, cnn_global], dim=-1)
 
 
+def encode_state_gnn_only(
+    state,
+    encoder: StateEncoder,
+    current_node: int | None = None,
+    anchors=None,
+    anchor_inverse=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """GNN-only encode — skips canvas rasterization.
+
+    Passes a zero canvas so rasterize_canvas() is never called.
+    The CNN forward still runs but on all-zeros input (cheap); we discard
+    its output. Pre-built anchors can be passed to avoid rebuilding per step.
+
+    Returns:
+        per_node   [state.n, H]
+        gnn_global [7H] (without current_node) or [9H] (with current_node)
+    """
+    if anchors is None or anchor_inverse is None:
+        anchors, anchor_inverse = _build_anchors(state)
+    node_feats = build_node_features(state, anchors)
+    edge_index, edge_attr = build_edge_index_and_attr(state, anchor_inverse)
+    metadata = build_metadata_features(state, anchor_inverse)
+    dummy_canvas = torch.zeros(
+        encoder.CNN_CHANNELS, encoder.grid_size, encoder.grid_size,
+        dtype=torch.float32,
+    )
+    with torch.no_grad():
+        per_node, gnn_global, _cnn = encoder(
+            node_feats, edge_index, edge_attr, dummy_canvas, metadata,
+            n_hard=state.n, current_node=current_node,
+        )
+    return per_node, gnn_global
+
+
 # ── Smoke test ─────────────────────────────────────────────────────────────
 
 

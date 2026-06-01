@@ -31,13 +31,27 @@ if str(_HERE) not in sys.path:
 
 # Load placer.py for PlacementState + _features_for_move without triggering
 # the macro_place package __init__ chain.
-_spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer.py"))
+_spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE.parent / "placer.py"))
 _placer = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_placer)
 
 PlacementState = _placer.PlacementState
 _features_for_move = _placer._features_for_move
 FEATURE_DIM = _placer.FEATURE_DIM
+
+_encoder_mod = None
+
+
+def _get_encoder_mod():
+    global _encoder_mod
+    if _encoder_mod is None:
+        import importlib.util as _ilu
+        _spec_enc = _ilu.spec_from_file_location(
+            "lkh_encoder", str(_HERE.parent / "model" / "encoder.py")
+        )
+        _encoder_mod = _ilu.module_from_spec(_spec_enc)
+        _spec_enc.loader.exec_module(_encoder_mod)
+    return _encoder_mod
 
 
 # Feature-dim constants must match lkh_model.py exactly.
@@ -90,7 +104,9 @@ class ChainEnv:
                  terminal_commit_bonus: float = 0.0,
                  terminal_reward_mode: str = "committed_gain",
                  gate_mode: str = "hpwl",
-                 approximator: dict | None = None):
+                 approximator: dict | None = None,
+                 encoder=None,
+                 proxy_predictor=None):
         """
         D.1 (LKH critique fix): ``terminal_reward_mode`` selects the PPO
         reward shape.
@@ -135,7 +151,7 @@ class ChainEnv:
             )
         self.gate_mode = gate_mode
         self.approximator = approximator
-        if gate_mode == "predicted_proxy" and approximator is None:
+        if gate_mode == "predicted_proxy" and approximator is None and proxy_predictor is None:
             # Soft fallback so policy rollouts that lack an approximator
             # don't blow up; matches the LKChain.__init__ contract.
             self.gate_mode = "hpwl"
@@ -170,6 +186,32 @@ class ChainEnv:
         # rule.
         self.visited: set[int] = {seed_macro}
 
+        self._encoder = encoder
+        self._proxy_predictor = proxy_predictor
+        if encoder is not None or proxy_predictor is not None:
+            enc_mod = _get_encoder_mod()
+            self._anchors, self._anchor_inverse = enc_mod._build_anchors(state)
+            if encoder is not None:
+                encoder.eval()
+            if proxy_predictor is not None:
+                proxy_predictor["model"].eval()
+                # Cache topology tensors — edge connectivity and metadata
+                # don't change during a chain; node positions do, so nf is
+                # rebuilt fresh in _predict_delta_gnn each call.
+                self._proxy_ei, self._proxy_ea = enc_mod.build_edge_index_and_attr(
+                    state, self._anchor_inverse)
+                self._proxy_md = enc_mod.build_metadata_features(state, self._anchor_inverse)
+                m = proxy_predictor["model"]
+                self._proxy_canvas = torch.zeros(
+                    m.encoder.CNN_CHANNELS, m.encoder.grid_size, m.encoder.grid_size,
+                    dtype=torch.float32,
+                )
+            else:
+                self._proxy_ei = self._proxy_ea = self._proxy_md = self._proxy_canvas = None
+        else:
+            self._anchors = self._anchor_inverse = None
+            self._proxy_ei = self._proxy_ea = self._proxy_md = self._proxy_canvas = None
+
     def _predict_delta(self, old_x: float, old_y: float,
                        cx: float, cy: float) -> float:
         """Approximator-predicted Δproxy for moving current_macro -> (cx, cy).
@@ -187,6 +229,40 @@ class ChainEnv:
             pred = self.approximator["model"](torch.tensor(norm, dtype=torch.float32))
         return float(pred.item() * self.approximator["target_std"]
                      + self.approximator["target_mean"])
+
+    def _predict_delta_gnn(self, old_x: float, old_y: float,
+                           cx: float, cy: float) -> float:
+        """ProxyCostPredictor-based Δproxy for moving current_macro -> (cx, cy).
+
+        Mirrors LKChain.run_greedy's proxy_encoder scoring path. Canvas is
+        reused from init (stale but cheap; exact rasterization is too slow
+        per candidate). Topology tensors (ei, ea, md) are also cached.
+        """
+        enc_mod = _get_encoder_mod()
+        nf = enc_mod.build_node_features(self.state, self._anchors)
+        model = self._proxy_predictor["model"]
+        pw = self._proxy_predictor["proxy_weights"]
+        n_hard = self.state.n
+        hp = float(self.state.cw + self.state.ch)
+
+        with torch.no_grad():
+            pred_before = model(
+                nf, self._proxy_ei, self._proxy_ea,
+                self._proxy_canvas, self._proxy_md, n_hard,
+            )
+            nf_after = nf.clone()
+            nf_after[self.current_macro, 0] = cx / hp
+            nf_after[self.current_macro, 1] = cy / hp
+            pred_after = model(
+                nf_after, self._proxy_ei, self._proxy_ea,
+                self._proxy_canvas, self._proxy_md, n_hard,
+            )
+
+        return float(
+            pw["wl"]   * (pred_after[0] - pred_before[0])
+            + pw["den"]  * (pred_after[1] - pred_before[1])
+            + pw["cong"] * (pred_after[2] - pred_before[2])
+        )
 
     def state_for_policy(self) -> dict:
         """Build the policy inputs for the current step.
@@ -213,7 +289,7 @@ class ChainEnv:
             cand_feats = np.zeros((0, FEATURE_DIM), dtype=np.float32)
 
         n_displaced = len(self.state.overlapping_with(self.current_macro))
-        return {
+        obs = {
             "global": compute_global_features(self.state),
             "macro": compute_macro_features(self.state, self.current_macro),
             "candidates": cand_feats,
@@ -223,6 +299,17 @@ class ChainEnv:
             ),
             "raw_candidates": cands,
         }
+        if self._encoder is not None:
+            enc_mod = _get_encoder_mod()
+            per_node, gnn_global = enc_mod.encode_state_gnn_only(
+                self.state, self._encoder,
+                current_node=None,
+                anchors=self._anchors,
+                anchor_inverse=self._anchor_inverse,
+            )
+            obs["gnn_global"]    = gnn_global
+            obs["macro_gnn_emb"] = per_node[self.current_macro]
+        return obs
 
     def step(self, action_idx: int, candidates: list[tuple[float, float]]
              ) -> tuple[float, bool, dict]:
@@ -242,7 +329,10 @@ class ChainEnv:
         # *before* apply_move (the approximator is trained on
         # pre-move features). Skipped when gate_mode == "hpwl".
         if self.gate_mode == "predicted_proxy":
-            step_pred_delta = self._predict_delta(old_x, old_y, cx, cy)
+            if self._proxy_predictor is not None:
+                step_pred_delta = self._predict_delta_gnn(old_x, old_y, cx, cy)
+            else:
+                step_pred_delta = self._predict_delta(old_x, old_y, cx, cy)
         else:
             step_pred_delta = 0.0
         # B.3: apply_move keeps the incremental caches consistent so the

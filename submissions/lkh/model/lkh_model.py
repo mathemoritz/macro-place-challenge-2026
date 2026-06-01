@@ -28,7 +28,7 @@ import torch.nn.functional as F
 # ── lazy-load encoder (lives in model/ subdirectory) ───────────────────────
 _HERE = Path(__file__).resolve().parent
 _encoder_spec = importlib.util.spec_from_file_location(
-    "lkh_encoder", str(_HERE / "model" / "encoder.py")
+    "lkh_encoder", str(_HERE / "encoder.py")
 )
 _encoder_mod = importlib.util.module_from_spec(_encoder_spec)
 _encoder_spec.loader.exec_module(_encoder_mod)
@@ -192,3 +192,87 @@ class ChainPolicy(nn.Module):
 
         logits = torch.cat([move_logits, stop_logit], dim=-1)          # (K+1,)
         return logits, value
+
+
+# GNN_GLOBAL_FACTOR * H = gnn_global dim (7H without current_node attention)
+GNN_GLOBAL_FACTOR = 7
+
+
+class ChainPolicyWithGNN(nn.Module):
+    """ChainPolicy augmented with frozen GNN embeddings.
+
+    Adds two projection heads:
+      gnn_global_proj:  Linear(7H → proj_dim) + LayerNorm + ReLU
+      macro_gnn_proj:   Linear(H  → proj_dim) + LayerNorm + ReLU
+
+    Projected embeddings are concatenated to global_feat and macro_feat
+    before the MLP heads. When both GNN tensors are None, behavior is
+    identical to ChainPolicy (projections are zero-padded).
+    """
+
+    def __init__(self, hidden: int = 64, gnn_H: int = 32, proj_dim: int = 16):
+        super().__init__()
+        self.gnn_H = gnn_H
+        self.proj_dim = proj_dim
+
+        self.gnn_global_proj = nn.Sequential(
+            nn.Linear(GNN_GLOBAL_FACTOR * gnn_H, proj_dim),
+            nn.LayerNorm(proj_dim),
+            nn.ReLU(),
+        )
+        self.macro_gnn_proj = nn.Sequential(
+            nn.Linear(gnn_H, proj_dim),
+            nn.LayerNorm(proj_dim),
+            nn.ReLU(),
+        )
+
+        gd  = GLOBAL_DIM + proj_dim   # 5  + 16 = 21
+        md  = MACRO_DIM  + proj_dim   # 6  + 16 = 22
+        cd  = CAND_DIM                # 16
+        chd = CHAIN_DIM               # 3
+
+        self.move_head = nn.Sequential(
+            nn.Linear(gd + md + cd + chd, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+        self.stop_head = nn.Sequential(
+            nn.Linear(gd + chd, hidden), nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+        self.value_head = nn.Sequential(
+            nn.Linear(gd + chd, hidden), nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(
+        self,
+        global_feat:   torch.Tensor,
+        macro_feat:    torch.Tensor,
+        cand_feats:    torch.Tensor,
+        chain_feat:    torch.Tensor,
+        gnn_global:    torch.Tensor | None = None,
+        macro_gnn_emb: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        dev = global_feat.device
+        g_gnn = self.gnn_global_proj(gnn_global) if gnn_global is not None \
+                else torch.zeros(self.proj_dim, dtype=global_feat.dtype, device=dev)
+        m_gnn = self.macro_gnn_proj(macro_gnn_emb) if macro_gnn_emb is not None \
+                else torch.zeros(self.proj_dim, dtype=macro_feat.dtype, device=dev)
+
+        g_aug = torch.cat([global_feat, g_gnn])
+        m_aug = torch.cat([macro_feat,  m_gnn])
+
+        K = cand_feats.shape[0]
+        move_inp = torch.cat([
+            g_aug.unsqueeze(0).expand(K, -1),
+            m_aug.unsqueeze(0).expand(K, -1),
+            cand_feats,
+            chain_feat.unsqueeze(0).expand(K, -1),
+        ], dim=-1)
+        move_logits = self.move_head(move_inp).squeeze(-1)
+
+        sv_inp = torch.cat([g_aug, chain_feat])
+        stop_logit = self.stop_head(sv_inp)
+        value      = self.value_head(sv_inp).squeeze(-1)
+        return torch.cat([move_logits, stop_logit]), value
