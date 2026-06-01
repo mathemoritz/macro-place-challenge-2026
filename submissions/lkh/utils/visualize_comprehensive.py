@@ -33,7 +33,7 @@ sys.path.insert(0, str(_HERE.parent.parent))
 
 from macro_place.loader import load_benchmark_from_dir
 from macro_place.objective import _set_placement, compute_proxy_cost
-from train import parse_benchmarks
+from submissions.lkh.learning.train import parse_benchmarks
 from visualize import _draw_arrows, _draw_panel
 
 _spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer.py"))
@@ -69,8 +69,15 @@ def _heatmap_panel(ax, benchmark, placement, plc, mode: str, title: str) -> None
         vmax = max(vmax, 1e-9)
 
     im = ax.imshow(
-        grid, origin="lower", extent=extent, aspect="equal",
-        cmap=cmap, alpha=0.75, vmin=0.0, vmax=vmax, zorder=0,
+        grid,
+        origin="lower",
+        extent=extent,
+        aspect="equal",
+        cmap=cmap,
+        alpha=0.75,
+        vmin=0.0,
+        vmax=vmax,
+        zorder=0,
         interpolation="nearest",
     )
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=label)
@@ -82,8 +89,13 @@ def _heatmap_panel(ax, benchmark, placement, plc, mode: str, title: str) -> None
         w, h = sizes[i].tolist()
         ax.add_patch(
             Rectangle(
-                (x - w / 2, y - h / 2), w, h,
-                fill=False, edgecolor="black", linewidth=0.4, zorder=2,
+                (x - w / 2, y - h / 2),
+                w,
+                h,
+                fill=False,
+                edgecolor="black",
+                linewidth=0.4,
+                zorder=2,
             )
         )
     ax.set_xlim(-cw * 0.02, cw * 1.02)
@@ -139,27 +151,48 @@ def visualize_comprehensive(
     n_arrows = _draw_arrows(ax_final, benchmark, initial, final) if show_arrows else 0
     if n_arrows:
         ax_final.text(
-            0.02, 0.98, f"{n_arrows} macros moved",
-            transform=ax_final.transAxes, va="top", ha="left", fontsize=9,
+            0.02,
+            0.98,
+            f"{n_arrows} macros moved",
+            transform=ax_final.transAxes,
+            va="top",
+            ha="left",
+            fontsize=9,
             bbox=dict(facecolor="white", alpha=0.75, edgecolor="gray"),
         )
 
     plc_init = plc
     _heatmap_panel(
-        fig.add_subplot(gs[1, 0]), benchmark, initial, plc_init,
-        "density", f"Initial — density",
+        fig.add_subplot(gs[1, 0]),
+        benchmark,
+        initial,
+        plc_init,
+        "density",
+        f"Initial — density",
     )
     _heatmap_panel(
-        fig.add_subplot(gs[1, 1]), benchmark, initial, plc_init,
-        "congestion", f"Initial — congestion",
+        fig.add_subplot(gs[1, 1]),
+        benchmark,
+        initial,
+        plc_init,
+        "congestion",
+        f"Initial — congestion",
     )
     _heatmap_panel(
-        fig.add_subplot(gs[1, 2]), benchmark, final, plc_init,
-        "density", f"LKHPlacer — density",
+        fig.add_subplot(gs[1, 2]),
+        benchmark,
+        final,
+        plc_init,
+        "density",
+        f"LKHPlacer — density",
     )
     _heatmap_panel(
-        fig.add_subplot(gs[1, 3]), benchmark, final, plc_init,
-        "congestion", f"LKHPlacer — congestion",
+        fig.add_subplot(gs[1, 3]),
+        benchmark,
+        final,
+        plc_init,
+        "congestion",
+        f"LKHPlacer — congestion",
     )
 
     delta = float(final_costs["proxy_cost"]) - float(init_costs["proxy_cost"])
@@ -178,8 +211,14 @@ def visualize_comprehensive(
         ax_trace.set_title("Iterative training eval trace (0 overlaps, legalized)", fontsize=9)
         ax_trace.grid(True, alpha=0.3)
         for r, p in round_history:
-            ax_trace.annotate(f"{p:.3f}", (r, p), textcoords="offset points",
-                              xytext=(0, 6), ha="center", fontsize=8)
+            ax_trace.annotate(
+                f"{p:.3f}",
+                (r, p),
+                textcoords="offset points",
+                xytext=(0, 6),
+                ha="center",
+                fontsize=8,
+            )
 
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=130, bbox_inches="tight")
@@ -204,11 +243,17 @@ def main():
     p.add_argument("--max-chain-length", type=int, default=8)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out-dir", default="vis")
-    p.add_argument("--history", default="modal_output/iter/history.json",
-                   help="Path to history.json for eval-round trace inset.")
+    p.add_argument(
+        "--history",
+        default="modal_output/iter/history.json",
+        help="Path to history.json for eval-round trace inset.",
+    )
     p.add_argument("--no-arrows", action="store_true")
-    p.add_argument("--placement-only", action="store_true",
-                   help="Skip placer run; only render initial.plc (for quick heatmap check).")
+    p.add_argument(
+        "--placement-only",
+        action="store_true",
+        help="Skip placer run; only render initial.plc (for quick heatmap check).",
+    )
     args = p.parse_args()
 
     name = parse_benchmarks(args.benchmark)[0]
@@ -234,16 +279,21 @@ def main():
 
     out = Path(args.out_dir) / f"{name}_comprehensive.png"
     metrics = visualize_comprehensive(
-        benchmark, plc, initial, final, str(out),
+        benchmark,
+        plc,
+        initial,
+        final,
+        str(out),
         round_history=round_hist or None,
         show_arrows=not args.no_arrows,
     )
-    print(f"  local run: init_proxy={metrics['initial_proxy']:.4f}  "
-          f"final_proxy={metrics['final_proxy']:.4f}  "
-          f"Δ={metrics['delta_proxy']:+.4f}  moved={metrics['n_macros_moved']}")
+    print(
+        f"  local run: init_proxy={metrics['initial_proxy']:.4f}  "
+        f"final_proxy={metrics['final_proxy']:.4f}  "
+        f"Δ={metrics['delta_proxy']:+.4f}  moved={metrics['n_macros_moved']}"
+    )
     if round_hist:
-        print(f"  Modal eval trace: " +
-              "  ".join(f"r{r}={p:.4f}" for r, p in round_hist))
+        print(f"  Modal eval trace: " + "  ".join(f"r{r}={p:.4f}" for r, p in round_hist))
 
 
 if __name__ == "__main__":

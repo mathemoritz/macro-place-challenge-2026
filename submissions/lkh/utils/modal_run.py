@@ -70,6 +70,7 @@ app = modal.App("lkh-macro-place")
 # Local repo root (this file is at submissions/lkh/modal_run.py).
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
+
 def _ignore(path) -> bool:
     """``ignore`` callable for ``Image.add_local_dir``: True ⇒ exclude file.
 
@@ -83,9 +84,17 @@ def _ignore(path) -> bool:
     """
     p = "/" + str(path).replace("\\", "/").strip("/")
     drop = [
-        "/.git/", "/.venv/", "/__pycache__/", "/.pytest_cache/",
-        "/.idea/", "/.vscode/", "/.cursor/", "/.DS_Store",
-        "/vis/", "/vis_surrogate/", "/agent-transcripts/",
+        "/.git/",
+        "/.venv/",
+        "/__pycache__/",
+        "/.pytest_cache/",
+        "/.idea/",
+        "/.vscode/",
+        "/.cursor/",
+        "/.DS_Store",
+        "/vis/",
+        "/vis_surrogate/",
+        "/agent-transcripts/",
         # MacroPlacement top-level directories we don't need.
         "/external/MacroPlacement/Flows/",
         "/external/MacroPlacement/Docs/",
@@ -138,14 +147,18 @@ volume = modal.Volume.from_name("lkh-results", create_if_missing=True)
 
 # ── Container-side helpers (run inside Modal) ──────────────────────────────
 
+
 def _setup_env() -> None:
     """Set the cwd and PYTHONPATH so macro_place + plc_client_os are importable."""
     import os
     import sys
+
     os.chdir("/root/repo")
-    for p in ("/root/repo",
-              "/root/repo/submissions/lkh",
-              "/root/repo/external/MacroPlacement/CodeElements/Plc_client"):
+    for p in (
+        "/root/repo",
+        "/root/repo/submissions/lkh",
+        "/root/repo/external/MacroPlacement/CodeElements/Plc_client",
+    ):
         if p not in sys.path:
             sys.path.insert(0, p)
 
@@ -153,13 +166,16 @@ def _setup_env() -> None:
 def _run(cmd: list[str]) -> None:
     """Run a python subprocess from the repo root with PYTHONPATH set."""
     import os
+
     _setup_env()
     env = os.environ.copy()
-    extra = ":".join([
-        "/root/repo",
-        "/root/repo/submissions/lkh",
-        "/root/repo/external/MacroPlacement/CodeElements/Plc_client",
-    ])
+    extra = ":".join(
+        [
+            "/root/repo",
+            "/root/repo/submissions/lkh",
+            "/root/repo/external/MacroPlacement/CodeElements/Plc_client",
+        ]
+    )
     env["PYTHONPATH"] = f"{extra}:{env.get('PYTHONPATH', '')}"
     print(f"$ {' '.join(shlex.quote(c) for c in cmd)}", flush=True)
     subprocess.run(cmd, env=env, check=True, cwd="/root/repo")
@@ -168,8 +184,8 @@ def _run(cmd: list[str]) -> None:
 def _archive_iter_output(output_root: Path) -> Path | None:
     """Copy prior ``/output/iter`` artifacts into ``archives/<UTC-timestamp>/``.
 
-    Called before ``force_recollect`` wipes working caches so old 75-example
-  (or partial) collections remain on the volume under ``iter/archives/``.
+      Called before ``force_recollect`` wipes working caches so old 75-example
+    (or partial) collections remain on the volume under ``iter/archives/``.
     """
     per_bench = output_root / "per_bench"
     data_pt = output_root / "data" / "chain_data.pt"
@@ -248,8 +264,8 @@ def _persist(label: str) -> None:
     ``/output/<label>/``. Existing files are overwritten."""
     targets = [
         ("submissions/lkh/checkpoints", f"/output/{label}/checkpoints"),
-        ("submissions/lkh/data",        f"/output/{label}/data"),
-        ("vis",                          f"/output/{label}/vis"),
+        ("submissions/lkh/data", f"/output/{label}/data"),
+        ("vis", f"/output/{label}/vis"),
     ]
     for src, dst in targets:
         src_path = Path("/root/repo") / src
@@ -261,8 +277,8 @@ def _persist(label: str) -> None:
 
 # ── Remote functions ───────────────────────────────────────────────────────
 
-@app.function(image=image, volumes={"/output": volume},
-              cpu=8.0, memory=8192, timeout=30 * 60)
+
+@app.function(image=image, volumes={"/output": volume}, cpu=8.0, memory=8192, timeout=30 * 60)
 def run_smoke() -> None:
     """Verify the image, mount, and benchmark loader on a fresh container."""
     _setup_env()
@@ -270,56 +286,89 @@ def run_smoke() -> None:
     import sys
     import torch
     import numpy as np
+
     print(f"  Python : {sys.version.split()[0]}")
     print(f"  Torch  : {torch.__version__}")
     print(f"  NumPy  : {np.__version__}")
     from macro_place.loader import load_benchmark_from_dir
+
     bench_dir = "external/MacroPlacement/Testcases/ICCAD04/ibm01"
     if not Path(bench_dir).exists():
         print(f"FAIL: testcases not in mount at {bench_dir}")
         return
     bench, _plc = load_benchmark_from_dir(bench_dir)
-    print(f"  loaded {bench.name}: "
-          f"{bench.num_hard_macros} hard / {bench.num_macros} total macros")
+    print(
+        f"  loaded {bench.name}: " f"{bench.num_hard_macros} hard / {bench.num_macros} total macros"
+    )
     print("OK")
 
 
-@app.function(image=image, volumes={"/output": volume},
-              cpu=8.0, memory=8192, timeout=6 * 3600,
-              nonpreemptible=True)
-def run_train(benchmark: str, num_examples: int, epochs: int, seed: int,
-              force_recollect: bool) -> None:
-    cmd = ["python", "submissions/lkh/train.py",
-           "--benchmark", benchmark,
-           "--num-examples", str(num_examples),
-           "--epochs", str(epochs),
-           "--seed", str(seed)]
+@app.function(
+    image=image,
+    volumes={"/output": volume},
+    cpu=8.0,
+    memory=8192,
+    timeout=6 * 3600,
+    nonpreemptible=True,
+)
+def run_train(
+    benchmark: str, num_examples: int, epochs: int, seed: int, force_recollect: bool
+) -> None:
+    cmd = [
+        "python",
+        "submissions/lkh/train.py",
+        "--benchmark",
+        benchmark,
+        "--num-examples",
+        str(num_examples),
+        "--epochs",
+        str(epochs),
+        "--seed",
+        str(seed),
+    ]
     if force_recollect:
         cmd.append("--force-recollect")
     _run(cmd)
     _persist("train")
 
 
-@app.function(image=image, volumes={"/output": volume},
-              gpu="A10G", memory=16384, timeout=4 * 3600,
-              secrets=[modal.Secret.from_name("wandb")])
-def run_train_encoder(benchmarks: str, n_samples: int, epochs: int,
-                      seed: int = 42, no_cnn: bool = False,
-                      wandb_project: str = "lkh-encoder",
-                      patience: int = 50) -> None:
+@app.function(
+    image=image,
+    volumes={"/output": volume},
+    gpu="A10G",
+    memory=16384,
+    timeout=4 * 3600,
+    secrets=[modal.Secret.from_name("wandb")],
+)
+def run_train_encoder(
+    benchmarks: str,
+    n_samples: int,
+    epochs: int,
+    seed: int = 42,
+    no_cnn: bool = False,
+    wandb_project: str = "lkh-encoder",
+    patience: int = 50,
+) -> None:
     """GPU training only. Assumes per-benchmark caches exist at /output/encoder/per_bench/.
 
     Called by run_encoder_pipeline after parallel collection completes.
     """
     volume.reload()
     cmd = [
-        "python", "submissions/lkh/train_encoder.py",
-        "--benchmarks", benchmarks,
-        "--samples", str(n_samples),
-        "--epochs", str(epochs),
-        "--patience", str(patience),
-        "--seed", str(seed),
-        "--cache-dir", "/output/encoder/per_bench",
+        "python",
+        "submissions/lkh/train_encoder.py",
+        "--benchmarks",
+        benchmarks,
+        "--samples",
+        str(n_samples),
+        "--epochs",
+        str(epochs),
+        "--patience",
+        str(patience),
+        "--seed",
+        str(seed),
+        "--cache-dir",
+        "/output/encoder/per_bench",
         "--skip-collection",
     ]
     if no_cnn:
@@ -330,16 +379,29 @@ def run_train_encoder(benchmarks: str, n_samples: int, epochs: int,
     _persist("encoder")
 
 
-@app.function(image=image, volumes={"/output": volume},
-              cpu=8.0, memory=8192, timeout=12 * 3600,
-              nonpreemptible=True)
-def run_policy(benchmark: str, iterations: int, trajectories_per_iter: int,
-               seed: int, initial_policy: str) -> None:
-    cmd = ["python", "submissions/lkh/train_policy.py",
-           "--benchmark", benchmark,
-           "--iterations", str(iterations),
-           "--trajectories-per-iter", str(trajectories_per_iter),
-           "--seed", str(seed)]
+@app.function(
+    image=image,
+    volumes={"/output": volume},
+    cpu=8.0,
+    memory=8192,
+    timeout=12 * 3600,
+    nonpreemptible=True,
+)
+def run_policy(
+    benchmark: str, iterations: int, trajectories_per_iter: int, seed: int, initial_policy: str
+) -> None:
+    cmd = [
+        "python",
+        "submissions/lkh/train_policy.py",
+        "--benchmark",
+        benchmark,
+        "--iterations",
+        str(iterations),
+        "--trajectories-per-iter",
+        str(trajectories_per_iter),
+        "--seed",
+        str(seed),
+    ]
     if initial_policy:
         cmd += ["--initial-policy", initial_policy]
     _run(cmd)
@@ -360,14 +422,22 @@ def run_policy(benchmark: str, iterations: int, trajectories_per_iter: int,
 # so the next stage (Phase 3 training + PPO) sees a fully populated cache.
 # ---------------------------------------------------------------------------
 
-@app.function(image=image, volumes={"/output": volume},
-              cpu=2.0, memory=4096, timeout=8 * 3600,
-              nonpreemptible=True, max_containers=20)
+
+@app.function(
+    image=image,
+    volumes={"/output": volume},
+    cpu=2.0,
+    memory=4096,
+    timeout=8 * 3600,
+    nonpreemptible=True,
+    max_containers=20,
+)
 def collect_one_benchmark_modal(name: str, num_examples: int, seed: int) -> dict:
     import time as _time
+
     _setup_env()
     import torch as _torch
-    import train as _train
+    import submissions.lkh.learning.train as _train
 
     cache_dir = Path("/output/iter/per_bench")
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -378,8 +448,7 @@ def collect_one_benchmark_modal(name: str, num_examples: int, seed: int) -> dict
     if cache_file.exists():
         try:
             d = _torch.load(str(cache_file), weights_only=False)
-            return {"name": name, "n": int(len(d["features"])),
-                    "wall_s": 0.0, "from_cache": True}
+            return {"name": name, "n": int(len(d["features"])), "wall_s": 0.0, "from_cache": True}
         except Exception:
             print(f"[{name}] cache exists but unreadable; re-collecting")
 
@@ -389,20 +458,24 @@ def collect_one_benchmark_modal(name: str, num_examples: int, seed: int) -> dict
     # The outer `collect_data` renames this to `num_examples_per_benchmark`;
     # don't conflate them here or Modal raises TypeError on the worker.
     feats, targets = _train._collect_one_benchmark(
-        name, num_examples=num_examples, seed=seed,
+        name,
+        num_examples=num_examples,
+        seed=seed,
     )
     wall = _time.time() - t0
 
     tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
-    _torch.save({"features": feats, "targets": targets,
-                 "num_examples": num_examples, "name": name},
-                str(tmp))
+    _torch.save(
+        {"features": feats, "targets": targets, "num_examples": num_examples, "name": name},
+        str(tmp),
+    )
     tmp.replace(cache_file)
     volume.commit()
-    print(f"[{name}] done: {len(feats)} examples in "
-          f"{_train._fmt_time(wall)} ({_train._fmt_rate(len(feats), wall)})")
-    return {"name": name, "n": int(len(feats)),
-            "wall_s": float(wall), "from_cache": False}
+    print(
+        f"[{name}] done: {len(feats)} examples in "
+        f"{_train._fmt_time(wall)} ({_train._fmt_rate(len(feats), wall)})"
+    )
+    return {"name": name, "n": int(len(feats)), "wall_s": float(wall), "from_cache": False}
 
 
 # ── Encoder collection + training pipeline ────────────────────────────────
@@ -418,10 +491,18 @@ def collect_one_benchmark_modal(name: str, num_examples: int, seed: int) -> dict
 #            ≈ ~60 min collection + ~20–30 min training  (full 17-bench run)
 # vs ~6 h if collection ran sequentially on the GPU box.
 
-@app.function(image=image, volumes={"/output": volume},
-              cpu=2.0, memory=4096, timeout=8 * 3600, max_containers=20)
-def collect_encoder_benchmark(name: str, n_samples: int, seed: int,
-                               grid_size: int, force_recollect: bool) -> dict:
+
+@app.function(
+    image=image,
+    volumes={"/output": volume},
+    cpu=2.0,
+    memory=4096,
+    timeout=8 * 3600,
+    max_containers=20,
+)
+def collect_encoder_benchmark(
+    name: str, n_samples: int, seed: int, grid_size: int, force_recollect: bool
+) -> dict:
     """Collect proxy-cost samples for one benchmark. CPU-only, runs in parallel."""
     import time as _time
     import torch as _torch
@@ -433,37 +514,56 @@ def collect_encoder_benchmark(name: str, n_samples: int, seed: int,
         try:
             d = _torch.load(str(cache_file), weights_only=False)
             if d["node_feats"].shape[0] >= n_samples:
-                return {"name": name, "n": int(d["node_feats"].shape[0]),
-                        "wall_s": 0.0, "from_cache": True}
+                return {
+                    "name": name,
+                    "n": int(d["node_feats"].shape[0]),
+                    "wall_s": 0.0,
+                    "from_cache": True,
+                }
         except Exception:
             print(f"[{name}] cache unreadable; re-collecting")
 
     t0 = _time.time()
-    _run([
-        "python", "submissions/lkh/train_encoder.py",
-        "--benchmarks", name,
-        "--samples", str(n_samples),
-        "--seed", str(seed),
-        "--grid-size", str(grid_size),
-        "--cache-dir", str(cache_dir),
-        "--collection-only",
-    ])
+    _run(
+        [
+            "python",
+            "submissions/lkh/train_encoder.py",
+            "--benchmarks",
+            name,
+            "--samples",
+            str(n_samples),
+            "--seed",
+            str(seed),
+            "--grid-size",
+            str(grid_size),
+            "--cache-dir",
+            str(cache_dir),
+            "--collection-only",
+        ]
+    )
     wall = _time.time() - t0
     volume.commit()
     return {"name": name, "n": n_samples, "wall_s": float(wall), "from_cache": False}
 
 
-@app.function(image=image, volumes={"/output": volume},
-              cpu=2.0, memory=4096, timeout=12 * 3600)
-def run_encoder_pipeline(benchmarks: str, n_samples: int, epochs: int,
-                         seed: int = 42, force_recollect: bool = False,
-                         no_cnn: bool = False, wandb_project: str = "lkh-encoder",
-                         grid_size: int = 128, patience: int = 50) -> None:
+@app.function(image=image, volumes={"/output": volume}, cpu=2.0, memory=4096, timeout=12 * 3600)
+def run_encoder_pipeline(
+    benchmarks: str,
+    n_samples: int,
+    epochs: int,
+    seed: int = 42,
+    force_recollect: bool = False,
+    no_cnn: bool = False,
+    wandb_project: str = "lkh-encoder",
+    grid_size: int = 128,
+    patience: int = 50,
+) -> None:
     """Orchestrator: parallel CPU collection → single GPU training pass."""
     _setup_env()
 
     if benchmarks == "all":
         from macro_place.evaluate import IBM_BENCHMARKS
+
         benchmark_list = list(IBM_BENCHMARKS)
     else:
         benchmark_list = [n.strip() for n in benchmarks.split(",") if n.strip()]
@@ -473,6 +573,7 @@ def run_encoder_pipeline(benchmarks: str, n_samples: int, epochs: int,
 
     def _cache_sufficient(name: str) -> bool:
         import torch as _torch
+
         p = cache_dir / f"{name}.pt"
         if not p.exists():
             return False
@@ -482,18 +583,21 @@ def run_encoder_pipeline(benchmarks: str, n_samples: int, epochs: int,
         except Exception:
             return False
 
-    todo = benchmark_list if force_recollect else [
-        n for n in benchmark_list if not _cache_sufficient(n)
-    ]
+    todo = (
+        benchmark_list
+        if force_recollect
+        else [n for n in benchmark_list if not _cache_sufficient(n)]
+    )
 
     if todo:
         configs = [
-            (n, n_samples, seed + i * 7919, grid_size, force_recollect)
-            for i, n in enumerate(todo)
+            (n, n_samples, seed + i * 7919, grid_size, force_recollect) for i, n in enumerate(todo)
         ]
         n_cached = len(benchmark_list) - len(todo)
-        print(f"[encoder] collecting {len(todo)} benchmarks in parallel "
-              f"({n_cached} already cached)")
+        print(
+            f"[encoder] collecting {len(todo)} benchmarks in parallel "
+            f"({n_cached} already cached)"
+        )
         for res in collect_encoder_benchmark.starmap(configs):
             tag = "cached" if res.get("from_cache") else "collected"
             wall = res.get("wall_s", 0.0)
@@ -505,8 +609,12 @@ def run_encoder_pipeline(benchmarks: str, n_samples: int, epochs: int,
 
     print("[encoder] handing off to GPU training...")
     run_train_encoder.remote(
-        benchmarks=benchmarks, n_samples=n_samples, epochs=epochs,
-        seed=seed, no_cnn=no_cnn, wandb_project=wandb_project,
+        benchmarks=benchmarks,
+        n_samples=n_samples,
+        epochs=epochs,
+        seed=seed,
+        no_cnn=no_cnn,
+        wandb_project=wandb_project,
         patience=patience,
     )
 
@@ -549,16 +657,26 @@ MEDIUM_RUN_4H: dict[str, Any] = {
 }
 
 
-def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
-                   policy_iterations: int, trajectories_per_iter: int,
-                   eval_time_budget: float, seed: int, force_recollect: bool,
-                   calibration_samples_per_bench: int,
-                   calibration_time_budget_s: float,
-                   output_tag: str, cache_read_dir: str,
-                   skip_collection: bool) -> None:
+def _run_iter_impl(
+    benchmark: str,
+    rounds: int,
+    examples: int,
+    cost_epochs: int,
+    policy_iterations: int,
+    trajectories_per_iter: int,
+    eval_time_budget: float,
+    seed: int,
+    force_recollect: bool,
+    calibration_samples_per_bench: int,
+    calibration_time_budget_s: float,
+    output_tag: str,
+    cache_read_dir: str,
+    skip_collection: bool,
+) -> None:
     import json as _json
+
     _setup_env()
-    import train as _train
+    import submissions.lkh.learning.train as _train
     import train_iter as _ti
 
     benchmarks = _train.parse_benchmarks(benchmark)
@@ -585,8 +703,7 @@ def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
     volume.reload()
 
     if skip_collection:
-        missing = [n for n in benchmarks
-                   if not (per_benchmark_cache_dir / f"{n}.pt").exists()]
+        missing = [n for n in benchmarks if not (per_benchmark_cache_dir / f"{n}.pt").exists()]
         if missing:
             raise RuntimeError(
                 f"skip_collection: missing caches {missing} under {per_benchmark_cache_dir}"
@@ -600,38 +717,46 @@ def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
             _clear_iter_working_tree(output_root)
             volume.commit()
             print(f"[Modal] force_recollect: cleared {output_root}")
-        todo = [n for n in benchmarks
-                if not (per_benchmark_cache_dir / f"{n}.pt").exists()]
+        todo = [n for n in benchmarks if not (per_benchmark_cache_dir / f"{n}.pt").exists()]
         if todo:
             configs = [(n, examples, seed + i * 7919) for i, n in enumerate(todo)]
             print(f"[Modal] parallel collection: {len(todo)} benchmarks")
             for res in collect_one_benchmark_modal.starmap(configs):
                 tag = "cached" if res.get("from_cache") else "collected"
-                print(f"  {tag}: {res['name']:>6}  n={res['n']:>4}  "
-                      f"wall={_train._fmt_time(res.get('wall_s', 0.0))}")
+                print(
+                    f"  {tag}: {res['name']:>6}  n={res['n']:>4}  "
+                    f"wall={_train._fmt_time(res.get('wall_s', 0.0))}"
+                )
             volume.reload()
         else:
             print(f"[Modal] all {len(benchmarks)} benchmarks already cached.")
 
     print(f"=== Phase 5 on Modal ({output_tag}) ===")
     print(f"  benchmarks={benchmarks}  rounds={rounds}  output={output_root}")
-    print(f"  examples/bench={examples}  cost_epochs={cost_epochs}  "
-          f"policy_iters={policy_iterations}  traj/iter={trajectories_per_iter}")
-    print(f"  eval_time_budget={eval_time_budget}s  "
-          f"calibration={calibration_samples_per_bench}/bench @ "
-          f"{calibration_time_budget_s}s")
+    print(
+        f"  examples/bench={examples}  cost_epochs={cost_epochs}  "
+        f"policy_iters={policy_iterations}  traj/iter={trajectories_per_iter}"
+    )
+    print(
+        f"  eval_time_budget={eval_time_budget}s  "
+        f"calibration={calibration_samples_per_bench}/bench @ "
+        f"{calibration_time_budget_s}s"
+    )
     print(f"  per-benchmark cache: {per_benchmark_cache_dir}")
 
     history: list[dict] = []
     for r in range(rounds):
         record = _ti.run_round(
-            r, benchmarks=benchmarks,
+            r,
+            benchmarks=benchmarks,
             num_examples_per_benchmark=examples,
             cost_epochs=cost_epochs,
             policy_iterations=policy_iterations,
             trajectories_per_iter=trajectories_per_iter,
-            seed=seed, data_path=data_path,
-            cost_ckpt=cost_ckpt, policy_ckpt=policy_ckpt,
+            seed=seed,
+            data_path=data_path,
+            cost_ckpt=cost_ckpt,
+            policy_ckpt=policy_ckpt,
             force_recollect=False,
             eval_time_budget_s=eval_time_budget,
             output_root=output_root,
@@ -640,51 +765,98 @@ def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
             calibration_time_budget_s=calibration_time_budget_s,
         )
         history.append(record)
-        (output_root / "history.json").write_text(
-            _json.dumps(history, indent=2, default=str)
-        )
+        (output_root / "history.json").write_text(_json.dumps(history, indent=2, default=str))
         _persist(output_tag)
         volume.commit()
         print(f"[Modal] round {r} committed ({len(history)} rounds done).")
 
 
-@app.function(image=image, volumes={"/output": volume},
-              cpu=8.0, memory=16384, timeout=24 * 3600,
-              nonpreemptible=True)
-def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
-             policy_iterations: int, trajectories_per_iter: int,
-             eval_time_budget: float, seed: int, force_recollect: bool,
-             calibration_samples_per_bench: int = 50,
-             calibration_time_budget_s: float = 10.0,
-             output_tag: str = "iter", cache_read_dir: str = "",
-             skip_collection: bool = False) -> None:
+@app.function(
+    image=image,
+    volumes={"/output": volume},
+    cpu=8.0,
+    memory=16384,
+    timeout=24 * 3600,
+    nonpreemptible=True,
+)
+def run_iter(
+    benchmark: str,
+    rounds: int,
+    examples: int,
+    cost_epochs: int,
+    policy_iterations: int,
+    trajectories_per_iter: int,
+    eval_time_budget: float,
+    seed: int,
+    force_recollect: bool,
+    calibration_samples_per_bench: int = 50,
+    calibration_time_budget_s: float = 10.0,
+    output_tag: str = "iter",
+    cache_read_dir: str = "",
+    skip_collection: bool = False,
+) -> None:
     _run_iter_impl(
-        benchmark, rounds, examples, cost_epochs, policy_iterations,
-        trajectories_per_iter, eval_time_budget, seed, force_recollect,
-        calibration_samples_per_bench, calibration_time_budget_s,
-        output_tag, cache_read_dir, skip_collection,
+        benchmark,
+        rounds,
+        examples,
+        cost_epochs,
+        policy_iterations,
+        trajectories_per_iter,
+        eval_time_budget,
+        seed,
+        force_recollect,
+        calibration_samples_per_bench,
+        calibration_time_budget_s,
+        output_tag,
+        cache_read_dir,
+        skip_collection,
     )
 
 
-@app.function(image=image, volumes={"/output": volume},
-              cpu=8.0, memory=16384, timeout=4 * 3600,
-              nonpreemptible=True)
-def run_iter_medium(benchmark: str, rounds: int, examples: int,
-                    cost_epochs: int, policy_iterations: int,
-                    trajectories_per_iter: int, eval_time_budget: float,
-                    seed: int, force_recollect: bool,
-                    calibration_samples_per_bench: int,
-                    calibration_time_budget_s: float, output_tag: str,
-                    cache_read_dir: str, skip_collection: bool) -> None:
+@app.function(
+    image=image,
+    volumes={"/output": volume},
+    cpu=8.0,
+    memory=16384,
+    timeout=4 * 3600,
+    nonpreemptible=True,
+)
+def run_iter_medium(
+    benchmark: str,
+    rounds: int,
+    examples: int,
+    cost_epochs: int,
+    policy_iterations: int,
+    trajectories_per_iter: int,
+    eval_time_budget: float,
+    seed: int,
+    force_recollect: bool,
+    calibration_samples_per_bench: int,
+    calibration_time_budget_s: float,
+    output_tag: str,
+    cache_read_dir: str,
+    skip_collection: bool,
+) -> None:
     _run_iter_impl(
-        benchmark, rounds, examples, cost_epochs, policy_iterations,
-        trajectories_per_iter, eval_time_budget, seed, force_recollect,
-        calibration_samples_per_bench, calibration_time_budget_s,
-        output_tag, cache_read_dir, skip_collection,
+        benchmark,
+        rounds,
+        examples,
+        cost_epochs,
+        policy_iterations,
+        trajectories_per_iter,
+        eval_time_budget,
+        seed,
+        force_recollect,
+        calibration_samples_per_bench,
+        calibration_time_budget_s,
+        output_tag,
+        cache_read_dir,
+        skip_collection,
     )
 
 
 # ── Local entrypoints ──────────────────────────────────────────────────────
+
 
 @app.local_entrypoint()
 def smoke() -> None:
@@ -708,16 +880,27 @@ def smoke() -> None:
 # dashboard then shows the App as "stopped" with 0 calls).
 # ---------------------------------------------------------------------------
 
+
 def _spawn_iter(fn: Any, label: str, **kwargs: Any) -> None:
     """Dispatch a Phase-5 Modal function and print hyperparameters."""
     call = fn.spawn(**kwargs)
     _print_spawn_handle(call, label)
     print("\n--- Hyperparameters ---")
     for key in (
-        "benchmark", "rounds", "examples", "cost_epochs", "policy_iterations",
-        "trajectories_per_iter", "eval_time_budget", "calibration_samples_per_bench",
-        "calibration_time_budget_s", "seed", "force_recollect",
-        "output_tag", "cache_read_dir", "skip_collection",
+        "benchmark",
+        "rounds",
+        "examples",
+        "cost_epochs",
+        "policy_iterations",
+        "trajectories_per_iter",
+        "eval_time_budget",
+        "calibration_samples_per_bench",
+        "calibration_time_budget_s",
+        "seed",
+        "force_recollect",
+        "output_tag",
+        "cache_read_dir",
+        "skip_collection",
     ):
         if key in kwargs:
             print(f"  {key}: {kwargs[key]}")
@@ -740,8 +923,13 @@ def _print_spawn_handle(call, label: str) -> None:
 
 
 @app.local_entrypoint()
-def train(benchmark: str = "ibm01", num_examples: int = 1500, epochs: int = 60,
-          seed: int = 42, force_recollect: bool = False) -> None:
+def train(
+    benchmark: str = "ibm01",
+    num_examples: int = 1500,
+    epochs: int = 60,
+    seed: int = 42,
+    force_recollect: bool = False,
+) -> None:
     """Phase 3 — train CostApproximator on Modal (background spawn).
 
     Examples:
@@ -749,17 +937,26 @@ def train(benchmark: str = "ibm01", num_examples: int = 1500, epochs: int = 60,
         modal run modal_run.py::train --benchmark all --num-examples 300
     """
     call = run_train.spawn(
-        benchmark=benchmark, num_examples=num_examples,
-        epochs=epochs, seed=seed, force_recollect=force_recollect,
+        benchmark=benchmark,
+        num_examples=num_examples,
+        epochs=epochs,
+        seed=seed,
+        force_recollect=force_recollect,
     )
     _print_spawn_handle(call, "run_train")
 
 
 @app.local_entrypoint()
-def encoder(benchmarks: str = "all", n_samples: int = 200, epochs: int = 300,
-            seed: int = 42, force_recollect: bool = False,
-            no_cnn: bool = False, wandb_project: str = "lkh-encoder",
-            patience: int = 50) -> None:
+def encoder(
+    benchmarks: str = "all",
+    n_samples: int = 200,
+    epochs: int = 300,
+    seed: int = 42,
+    force_recollect: bool = False,
+    no_cnn: bool = False,
+    wandb_project: str = "lkh-encoder",
+    patience: int = 50,
+) -> None:
     """Phase 2.5 — parallel CPU collection + GPU encoder training.
 
     Collection runs one cheap CPU container per benchmark (up to 20 concurrent);
@@ -783,18 +980,26 @@ def encoder(benchmarks: str = "all", n_samples: int = 200, epochs: int = 300,
             submissions/lkh/checkpoints/
     """
     call = run_encoder_pipeline.spawn(
-        benchmarks=benchmarks, n_samples=n_samples, epochs=epochs,
-        seed=seed, force_recollect=force_recollect,
-        no_cnn=no_cnn, wandb_project=wandb_project,
+        benchmarks=benchmarks,
+        n_samples=n_samples,
+        epochs=epochs,
+        seed=seed,
+        force_recollect=force_recollect,
+        no_cnn=no_cnn,
+        wandb_project=wandb_project,
         patience=patience,
     )
     _print_spawn_handle(call, "run_encoder_pipeline")
 
 
 @app.local_entrypoint()
-def policy(benchmark: str = "ibm01", iterations: int = 1000,
-           trajectories_per_iter: int = 4, seed: int = 42,
-           initial_policy: str = "") -> None:
+def policy(
+    benchmark: str = "ibm01",
+    iterations: int = 1000,
+    trajectories_per_iter: int = 4,
+    seed: int = 42,
+    initial_policy: str = "",
+) -> None:
     """Phase 4 — train ChainPolicy via PPO on Modal (background spawn).
 
     Examples:
@@ -802,20 +1007,29 @@ def policy(benchmark: str = "ibm01", iterations: int = 1000,
         modal run modal_run.py::policy --benchmark ibm01,ibm07 --iterations 1000
     """
     call = run_policy.spawn(
-        benchmark=benchmark, iterations=iterations,
+        benchmark=benchmark,
+        iterations=iterations,
         trajectories_per_iter=trajectories_per_iter,
-        seed=seed, initial_policy=initial_policy,
+        seed=seed,
+        initial_policy=initial_policy,
     )
     _print_spawn_handle(call, "run_policy")
 
 
 @app.local_entrypoint()
-def iter_(benchmark: str = "ibm01", rounds: int = 2, examples: int = 400,
-          cost_epochs: int = 60, policy_iterations: int = 1000,
-          trajectories_per_iter: int = 4, eval_time_budget: float = 20.0,
-          calibration_samples_per_bench: int = 50,
-          calibration_time_budget_s: float = 10.0,
-          seed: int = 42, force_recollect: bool = False) -> None:
+def iter_(
+    benchmark: str = "ibm01",
+    rounds: int = 2,
+    examples: int = 400,
+    cost_epochs: int = 60,
+    policy_iterations: int = 1000,
+    trajectories_per_iter: int = 4,
+    eval_time_budget: float = 20.0,
+    calibration_samples_per_bench: int = 50,
+    calibration_time_budget_s: float = 10.0,
+    seed: int = 42,
+    force_recollect: bool = False,
+) -> None:
     """Phase 5 — iterative training loop, dispatched as a background job.
 
     Examples:
@@ -836,15 +1050,22 @@ def iter_(benchmark: str = "ibm01", rounds: int = 2, examples: int = 400,
     can actually execute.
     """
     _spawn_iter(
-        run_iter, "run_iter",
-        benchmark=benchmark, rounds=rounds, examples=examples,
-        cost_epochs=cost_epochs, policy_iterations=policy_iterations,
+        run_iter,
+        "run_iter",
+        benchmark=benchmark,
+        rounds=rounds,
+        examples=examples,
+        cost_epochs=cost_epochs,
+        policy_iterations=policy_iterations,
         trajectories_per_iter=trajectories_per_iter,
         eval_time_budget=eval_time_budget,
         calibration_samples_per_bench=calibration_samples_per_bench,
         calibration_time_budget_s=calibration_time_budget_s,
-        seed=seed, force_recollect=force_recollect,
-        output_tag="iter", cache_read_dir="", skip_collection=False,
+        seed=seed,
+        force_recollect=force_recollect,
+        output_tag="iter",
+        cache_read_dir="",
+        skip_collection=False,
     )
 
 

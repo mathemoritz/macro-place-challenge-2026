@@ -28,7 +28,8 @@ sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent.parent))
 
 import matplotlib
-matplotlib.use("Agg")            # headless backend
+
+matplotlib.use("Agg")  # headless backend
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
@@ -36,7 +37,7 @@ _spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer
 placer_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(placer_mod)
 
-from train import parse_benchmarks  # comma-separated / "all" CLI helper
+from submissions.lkh.learning.train import parse_benchmarks  # comma-separated / "all" CLI helper
 
 from macro_place.loader import load_benchmark_from_dir
 from macro_place.objective import compute_proxy_cost
@@ -59,6 +60,7 @@ def legalize_initial_placement(benchmark) -> torch.Tensor:
 
 # ── Rendering ──────────────────────────────────────────────────────────────
 
+
 def _draw_panel(ax, benchmark, placement, title: str) -> None:
     """Canvas border + soft macros (faint) + hard macros (solid)."""
     cw = float(benchmark.canvas_width)
@@ -66,18 +68,25 @@ def _draw_panel(ax, benchmark, placement, title: str) -> None:
     n_hard = benchmark.num_hard_macros
     sizes = benchmark.macro_sizes
 
-    ax.add_patch(Rectangle((0, 0), cw, ch, fill=False,
-                            edgecolor="black", linewidth=2))
+    ax.add_patch(Rectangle((0, 0), cw, ch, fill=False, edgecolor="black", linewidth=2))
 
     # Soft macros — drawn first so hard macros sit on top.
     for i in range(n_hard, benchmark.num_macros):
         x, y = placement[i].tolist()
         w, h = sizes[i].tolist()
-        ax.add_patch(Rectangle(
-            (x - w / 2, y - h / 2), w, h,
-            fill=True, facecolor="lightsteelblue", alpha=0.15,
-            edgecolor="gray", linewidth=0.3, linestyle="dashed",
-        ))
+        ax.add_patch(
+            Rectangle(
+                (x - w / 2, y - h / 2),
+                w,
+                h,
+                fill=True,
+                facecolor="lightsteelblue",
+                alpha=0.15,
+                edgecolor="gray",
+                linewidth=0.3,
+                linestyle="dashed",
+            )
+        )
 
     # Hard macros — fixed in red, movable in blue.
     for i in range(n_hard):
@@ -86,11 +95,18 @@ def _draw_panel(ax, benchmark, placement, title: str) -> None:
         is_fixed = bool(benchmark.macro_fixed[i].item())
         face = "red" if is_fixed else "steelblue"
         alpha = 0.3 if is_fixed else 0.5
-        ax.add_patch(Rectangle(
-            (x - w / 2, y - h / 2), w, h,
-            fill=True, facecolor=face, alpha=alpha,
-            edgecolor="black", linewidth=0.5,
-        ))
+        ax.add_patch(
+            Rectangle(
+                (x - w / 2, y - h / 2),
+                w,
+                h,
+                fill=True,
+                facecolor=face,
+                alpha=alpha,
+                edgecolor="black",
+                linewidth=0.5,
+            )
+        )
 
     ax.set_xlim(-cw * 0.02, cw * 1.02)
     ax.set_ylim(-ch * 0.02, ch * 1.02)
@@ -100,8 +116,7 @@ def _draw_panel(ax, benchmark, placement, title: str) -> None:
     ax.set_title(title, fontsize=11)
 
 
-def _draw_arrows(ax, benchmark, initial, final,
-                  threshold_frac: float = 0.005) -> int:
+def _draw_arrows(ax, benchmark, initial, final, threshold_frac: float = 0.005) -> int:
     """Arrows on ``ax`` from initial→final for each hard macro that moved
     more than ``threshold_frac * canvas_diagonal``. Returns the number
     of arrows actually drawn.
@@ -111,7 +126,7 @@ def _draw_arrows(ax, benchmark, initial, final,
     final_pos = final[:n_hard].numpy()
     deltas = final_pos - init_pos
     dist = np.linalg.norm(deltas, axis=1)
-    diag = float((benchmark.canvas_width ** 2 + benchmark.canvas_height ** 2) ** 0.5)
+    diag = float((benchmark.canvas_width**2 + benchmark.canvas_height**2) ** 0.5)
     threshold = threshold_frac * diag
 
     if dist.max() <= threshold:
@@ -133,10 +148,16 @@ def _draw_arrows(ax, benchmark, initial, final,
     return n_drawn
 
 
-def visualize_initial_vs_final(benchmark, plc, initial, final, save_path: str,
-                                show_arrows: bool = True,
-                                initial_label: str = "Initial",
-                                arrow_baseline=None) -> dict:
+def visualize_initial_vs_final(
+    benchmark,
+    plc,
+    initial,
+    final,
+    save_path: str,
+    show_arrows: bool = True,
+    initial_label: str = "Initial",
+    arrow_baseline=None,
+) -> dict:
     """Two-panel figure: initial.plc on the left, placer output on the right.
 
     Metrics in each title come from ``compute_proxy_cost`` so the comparison
@@ -147,20 +168,24 @@ def visualize_initial_vs_final(benchmark, plc, initial, final, save_path: str,
 
     fig, axes = plt.subplots(1, 2, figsize=(20, 10))
 
-    title_l = (f"{initial_label} — {benchmark.name}\n"
-               f"proxy={initial_costs['proxy_cost']:.4f}  "
-               f"wl={initial_costs['wirelength_cost']:.3f}  "
-               f"den={initial_costs['density_cost']:.3f}  "
-               f"cong={initial_costs['congestion_cost']:.3f}  "
-               f"overlap_pairs={int(initial_costs['overlap_count'])}")
+    title_l = (
+        f"{initial_label} — {benchmark.name}\n"
+        f"proxy={initial_costs['proxy_cost']:.4f}  "
+        f"wl={initial_costs['wirelength_cost']:.3f}  "
+        f"den={initial_costs['density_cost']:.3f}  "
+        f"cong={initial_costs['congestion_cost']:.3f}  "
+        f"overlap_pairs={int(initial_costs['overlap_count'])}"
+    )
     _draw_panel(axes[0], benchmark, initial, title_l)
 
-    title_r = (f"LKHPlacer — {benchmark.name}\n"
-               f"proxy={final_costs['proxy_cost']:.4f}  "
-               f"wl={final_costs['wirelength_cost']:.3f}  "
-               f"den={final_costs['density_cost']:.3f}  "
-               f"cong={final_costs['congestion_cost']:.3f}  "
-               f"overlap_pairs={int(final_costs['overlap_count'])}")
+    title_r = (
+        f"LKHPlacer — {benchmark.name}\n"
+        f"proxy={final_costs['proxy_cost']:.4f}  "
+        f"wl={final_costs['wirelength_cost']:.3f}  "
+        f"den={final_costs['density_cost']:.3f}  "
+        f"cong={final_costs['congestion_cost']:.3f}  "
+        f"overlap_pairs={int(final_costs['overlap_count'])}"
+    )
     _draw_panel(axes[1], benchmark, final, title_r)
 
     arrow_from = initial if arrow_baseline is None else arrow_baseline
@@ -172,9 +197,13 @@ def visualize_initial_vs_final(benchmark, plc, initial, final, save_path: str,
             else "arrows: left panel → LKH"
         )
         axes[1].text(
-            0.02, 0.98,
+            0.02,
+            0.98,
             f"{n_arrows} macros moved\n({arrow_note})",
-            transform=axes[1].transAxes, va="top", ha="left", fontsize=9,
+            transform=axes[1].transAxes,
+            va="top",
+            ha="left",
+            fontsize=9,
             bbox=dict(facecolor="white", alpha=0.7, edgecolor="gray"),
         )
 
@@ -195,24 +224,35 @@ def visualize_initial_vs_final(benchmark, plc, initial, final, save_path: str,
 
 # ── CLI ────────────────────────────────────────────────────────────────────
 
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--benchmark", default="ibm01",
-                   help="Single name, comma-separated list, or 'all'.")
+    p.add_argument(
+        "--benchmark", default="ibm01", help="Single name, comma-separated list, or 'all'."
+    )
     p.add_argument("--time-budget", type=float, default=15.0)
     p.add_argument("--max-chains", type=int, default=2000)
     p.add_argument("--max-chain-length", type=int, default=8)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out-dir", default="vis")
-    p.add_argument("--no-arrows", action="store_true",
-                   help="Hide the per-macro displacement arrows.")
-    p.add_argument("--initial", choices=("raw", "legalized"), default="raw",
-                   help="'raw' = initial.plc as shipped; 'legalized' = spiral-"
-                   "legalized start (0 overlap pairs) for fair proxy comparison.")
-    p.add_argument("--arrows-from", choices=("same", "raw"), default="same",
-                   help="Displacement arrows on the right panel: 'same' = from "
-                   "the left-panel placement; 'raw' = from shipped initial.plc "
-                   "(use with --initial legalized to show total motion).")
+    p.add_argument(
+        "--no-arrows", action="store_true", help="Hide the per-macro displacement arrows."
+    )
+    p.add_argument(
+        "--initial",
+        choices=("raw", "legalized"),
+        default="raw",
+        help="'raw' = initial.plc as shipped; 'legalized' = spiral-"
+        "legalized start (0 overlap pairs) for fair proxy comparison.",
+    )
+    p.add_argument(
+        "--arrows-from",
+        choices=("same", "raw"),
+        default="same",
+        help="Displacement arrows on the right panel: 'same' = from "
+        "the left-panel placement; 'raw' = from shipped initial.plc "
+        "(use with --initial legalized to show total motion).",
+    )
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmark)
@@ -227,9 +267,7 @@ def main():
         raw_initial = bench.macro_positions.clone()
         if args.initial == "legalized":
             initial = legalize_initial_placement(bench)
-            bench.macro_positions[: bench.num_hard_macros] = initial[
-                : bench.num_hard_macros
-            ]
+            bench.macro_positions[: bench.num_hard_macros] = initial[: bench.num_hard_macros]
             initial_label = "Legalized initial"
         else:
             initial = raw_initial.clone()
@@ -239,8 +277,10 @@ def main():
         if args.arrows_from == "raw":
             arrow_baseline = raw_initial
         elif args.initial == "legalized" and not args.no_arrows:
-            print("  hint: with --initial legalized the placer often moves few "
-                  "macros; add --arrows-from raw to show motion from initial.plc")
+            print(
+                "  hint: with --initial legalized the placer often moves few "
+                "macros; add --arrows-from raw to show motion from initial.plc"
+            )
 
         placer = placer_mod.LKHPlacer(
             seed=args.seed,
@@ -255,7 +295,11 @@ def main():
 
         save_path = out_dir / f"{name}_compare.png"
         metrics = visualize_initial_vs_final(
-            bench, plc, initial, final, str(save_path),
+            bench,
+            plc,
+            initial,
+            final,
+            str(save_path),
             show_arrows=not args.no_arrows,
             initial_label=initial_label,
             arrow_baseline=arrow_baseline,
@@ -266,15 +310,19 @@ def main():
 
     if len(summary) > 1:
         print(f"\n=== Summary ===")
-        print(f"  {'benchmark':>10}  {'init_proxy':>10}  {'final_proxy':>11}  "
-              f"{'Δproxy':>8}  {'init_ov':>7}  {'final_ov':>8}  {'moved':>6}  {'time':>6}")
+        print(
+            f"  {'benchmark':>10}  {'init_proxy':>10}  {'final_proxy':>11}  "
+            f"{'Δproxy':>8}  {'init_ov':>7}  {'final_ov':>8}  {'moved':>6}  {'time':>6}"
+        )
         for s in summary:
             d = s["final_proxy"] - s["initial_proxy"]
             sign = "+" if d >= 0 else ""
-            print(f"  {s['benchmark']:>10}  {s['initial_proxy']:>10.4f}  "
-                  f"{s['final_proxy']:>11.4f}  {sign}{d:>7.4f}  "
-                  f"{s['initial_overlaps']:>7d}  {s['final_overlaps']:>8d}  "
-                  f"{s['n_macros_moved']:>6d}  {s['wall_s']:>5.1f}s")
+            print(
+                f"  {s['benchmark']:>10}  {s['initial_proxy']:>10.4f}  "
+                f"{s['final_proxy']:>11.4f}  {sign}{d:>7.4f}  "
+                f"{s['initial_overlaps']:>7d}  {s['final_overlaps']:>8d}  "
+                f"{s['n_macros_moved']:>6d}  {s['wall_s']:>5.1f}s"
+            )
 
 
 if __name__ == "__main__":

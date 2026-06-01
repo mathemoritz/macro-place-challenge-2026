@@ -47,7 +47,7 @@ _enc_spec = importlib.util.spec_from_file_location(
 _encoder_mod = importlib.util.module_from_spec(_enc_spec)
 _enc_spec.loader.exec_module(_encoder_mod)
 
-from lkh_model import ProxyCostPredictor
+from submissions.lkh.model.lkh_model import ProxyCostPredictor
 from macro_place.loader import load_benchmark_from_dir
 from macro_place.objective import compute_proxy_cost
 
@@ -63,10 +63,12 @@ PROXY_WEIGHTS = {"wl": 1.0, "den": 0.5, "cong": 0.5}
 
 # ── Benchmark list parsing ──────────────────────────────────────────────────
 
+
 def parse_benchmarks(arg: str) -> list[str]:
     arg = (arg or "").strip()
     if arg == "all":
         from macro_place.evaluate import IBM_BENCHMARKS
+
         return list(IBM_BENCHMARKS)
     names = [n.strip() for n in arg.split(",") if n.strip()]
     if not names:
@@ -75,6 +77,7 @@ def parse_benchmarks(arg: str) -> list[str]:
 
 
 # ── Timing helpers ──────────────────────────────────────────────────────────
+
 
 def _fmt_time(s: float) -> str:
     if s < 60:
@@ -85,6 +88,7 @@ def _fmt_time(s: float) -> str:
 
 
 # ── Data collection ─────────────────────────────────────────────────────────
+
 
 def collect_proxy_samples(
     benchmark_name: str,
@@ -156,23 +160,25 @@ def collect_proxy_samples(
             elapsed = time.time() - t0
             rate = (i + 1) / elapsed
             eta = (n_samples - i - 1) / max(rate, 1e-9)
-            print(f"  [{benchmark_name}] {i+1}/{n_samples} "
-                  f"({_fmt_time(elapsed)} elapsed, eta {_fmt_time(eta)})")
+            print(
+                f"  [{benchmark_name}] {i+1}/{n_samples} "
+                f"({_fmt_time(elapsed)} elapsed, eta {_fmt_time(eta)})"
+            )
             last_log = time.time()
 
     elapsed = time.time() - t0
     print(f"  [{benchmark_name}] done: {n_samples} samples in {_fmt_time(elapsed)}")
 
     return {
-        "node_feats": torch.stack(nf_list),                        # [N, N_total, 8]
-        "canvas": torch.stack(cv_list),                            # [N, 3, G, G]
-        "edge_index": edge_index,                                  # [2, E]
-        "edge_attr": edge_attr,                                    # [E, 1]
-        "metadata": metadata,                                      # [12]
+        "node_feats": torch.stack(nf_list),  # [N, N_total, 8]
+        "canvas": torch.stack(cv_list),  # [N, 3, G, G]
+        "edge_index": edge_index,  # [2, E]
+        "edge_attr": edge_attr,  # [E, 1]
+        "metadata": metadata,  # [12]
         "n_hard": n_hard,
-        "wl_costs": torch.tensor(wl_list, dtype=torch.float32),   # [N]
+        "wl_costs": torch.tensor(wl_list, dtype=torch.float32),  # [N]
         "den_costs": torch.tensor(den_list, dtype=torch.float32),  # [N]
-        "cong_costs": torch.tensor(cong_list, dtype=torch.float32), # [N]
+        "cong_costs": torch.tensor(cong_list, dtype=torch.float32),  # [N]
         "proxy_weights": PROXY_WEIGHTS,
         "name": benchmark_name,
     }
@@ -215,14 +221,14 @@ def load_all_caches(
                 result[name] = cached
                 continue
             print(f"  cache has {n_in_cache} samples, need {n_samples} — re-collecting")
-        data = collect_proxy_samples(name, n_samples, seed=seed + b_idx * 7919,
-                                     grid_size=grid_size)
+        data = collect_proxy_samples(name, n_samples, seed=seed + b_idx * 7919, grid_size=grid_size)
         _save_bench_cache(cache_dir, data)
         result[name] = data
     return result
 
 
 # ── Batched forward ─────────────────────────────────────────────────────────
+
 
 def _bench_batch_forward(
     model: ProxyCostPredictor,
@@ -239,11 +245,11 @@ def _bench_batch_forward(
     Returns: [B, 3] predictions (normalized).
     """
     B = len(indices)
-    nf = bench_data["node_feats"][indices].to(device)       # [B, N, 8]
+    nf = bench_data["node_feats"][indices].to(device)  # [B, N, 8]
     cv = bench_data["canvas"][indices].to(torch.float32).to(device)  # [B, 3, G, G]
-    ei = bench_data["edge_index"].to(device)                # [2, E]
-    ea = bench_data["edge_attr"].to(device)                 # [E, 1]
-    md = bench_data["metadata"].to(device)                  # [12]
+    ei = bench_data["edge_index"].to(device)  # [2, E]
+    ea = bench_data["edge_attr"].to(device)  # [E, 1]
+    md = bench_data["metadata"].to(device)  # [12]
     n_hard = bench_data["n_hard"]
     N = nf.shape[1]
     E = ei.shape[1]
@@ -257,7 +263,7 @@ def _bench_batch_forward(
         # Offset edge_index for each sample: sample b uses nodes [b*N, (b+1)*N)
         offsets = torch.arange(B, device=device) * N  # [B]
         ei_batch = torch.cat([ei + offsets[b] for b in range(B)], dim=1)  # [2, B*E]
-        ea_batch = ea.repeat(B, 1)                                          # [B*E, 1]
+        ea_batch = ea.repeat(B, 1)  # [B*E, 1]
     else:
         ei_batch = torch.zeros(2, 0, dtype=torch.long, device=device)
         ea_batch = torch.zeros(0, 1, dtype=torch.float32, device=device)
@@ -273,24 +279,24 @@ def _bench_batch_forward(
     h_cnn = enc.cnn(cv)  # [B, H]
 
     # Per-sample node stats (hard macros only)
-    h_nodes_b    = h_nodes_flat.reshape(B, N, H)[:, :n_hard, :]  # [B, n_hard, H]
-    h_nodes_mean = h_nodes_b.mean(dim=1)                         # [B, H]
-    h_nodes_max  = h_nodes_b.max(dim=1).values                   # [B, H]
+    h_nodes_b = h_nodes_flat.reshape(B, N, H)[:, :n_hard, :]  # [B, n_hard, H]
+    h_nodes_mean = h_nodes_b.mean(dim=1)  # [B, H]
+    h_nodes_max = h_nodes_b.max(dim=1).values  # [B, H]
 
     # Per-sample edge stats
     if E > 0:
-        h_edges = h_edges_flat.reshape(B, E, H)   # [B, E, H]
-        h_edges_mean = h_edges.mean(dim=1)         # [B, H]
-        h_edges_var  = h_edges.var(dim=1)          # [B, H]
-        h_edges_max  = h_edges.max(dim=1).values   # [B, H]
-        h_edges_min  = h_edges.min(dim=1).values   # [B, H]
+        h_edges = h_edges_flat.reshape(B, E, H)  # [B, E, H]
+        h_edges_mean = h_edges.mean(dim=1)  # [B, H]
+        h_edges_var = h_edges.var(dim=1)  # [B, H]
+        h_edges_max = h_edges.max(dim=1).values  # [B, H]
+        h_edges_min = h_edges.min(dim=1).values  # [B, H]
     else:
         zeros = torch.zeros(B, H, device=device)
         h_edges_mean = h_edges_var = h_edges_max = h_edges_min = zeros
 
     gnn_global = torch.cat(
-        [h_meta_b, h_nodes_mean, h_nodes_max,
-         h_edges_mean, h_edges_var, h_edges_max, h_edges_min], dim=-1
+        [h_meta_b, h_nodes_mean, h_nodes_max, h_edges_mean, h_edges_var, h_edges_max, h_edges_min],
+        dim=-1,
     )  # [B, 7H]
 
     head_input = (
@@ -301,6 +307,7 @@ def _bench_batch_forward(
 
 
 # ── Training ────────────────────────────────────────────────────────────────
+
 
 def _save_intermediate_checkpoint(
     path: Path,
@@ -403,8 +410,8 @@ def train_proxy_encoder(
 
     def normalize_targets(name: str, wl, den, cong):
         ns = norm_stats[name]
-        wl_n  = (wl  - ns["wl_mean"])   / ns["wl_std"]
-        den_n = (den - ns["den_mean"])  / ns["den_std"]
+        wl_n = (wl - ns["wl_mean"]) / ns["wl_std"]
+        den_n = (den - ns["den_mean"]) / ns["den_std"]
         cng_n = (cong - ns["cong_mean"]) / ns["cong_std"]
         return torch.stack([wl_n, den_n, cng_n], dim=-1)  # [N, 3]
 
@@ -465,7 +472,9 @@ def train_proxy_encoder(
                 d["wl_costs"][indices],
                 d["den_costs"][indices],
                 d["cong_costs"][indices],
-            ).to(device)  # [N_b, 3]
+            ).to(
+                device
+            )  # [N_b, 3]
 
             # Mini-batches within this benchmark
             b_perm = list(range(len(indices)))
@@ -524,29 +533,33 @@ def train_proxy_encoder(
                     val_true_all.append(targets_b.cpu().numpy())
 
         val_loss /= max(n_val_proc, 1)
-        val_pred_np = np.concatenate(val_pred_all)   # [N_val, 3]
-        val_true_np = np.concatenate(val_true_all)   # [N_val, 3]
-        r_wl   = _pearson(val_pred_np[:, 0], val_true_np[:, 0])
-        r_den  = _pearson(val_pred_np[:, 1], val_true_np[:, 1])
+        val_pred_np = np.concatenate(val_pred_all)  # [N_val, 3]
+        val_true_np = np.concatenate(val_true_all)  # [N_val, 3]
+        r_wl = _pearson(val_pred_np[:, 0], val_true_np[:, 0])
+        r_den = _pearson(val_pred_np[:, 1], val_true_np[:, 1])
         r_cong = _pearson(val_pred_np[:, 2], val_true_np[:, 2])
         r_mean = np.mean([r_wl, r_den, r_cong])
 
         if epoch % 5 == 0 or epoch == epochs - 1:
-            print(f"  epoch {epoch:3d}  train={train_loss:.4f}  val={val_loss:.4f}  "
-                  f"r_wl={r_wl:.3f}  r_den={r_den:.3f}  r_cong={r_cong:.3f}  "
-                  f"r_mean={r_mean:.3f}")
+            print(
+                f"  epoch {epoch:3d}  train={train_loss:.4f}  val={val_loss:.4f}  "
+                f"r_wl={r_wl:.3f}  r_den={r_den:.3f}  r_cong={r_cong:.3f}  "
+                f"r_mean={r_mean:.3f}"
+            )
 
         if wandb_run is not None:
-            wandb_run.log({
-                "epoch": epoch,
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "r_wl": r_wl,
-                "r_den": r_den,
-                "r_cong": r_cong,
-                "r_mean": r_mean,
-                "lr": scheduler.get_last_lr()[0],
-            })
+            wandb_run.log(
+                {
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                    "r_wl": r_wl,
+                    "r_den": r_den,
+                    "r_cong": r_cong,
+                    "r_mean": r_mean,
+                    "lr": scheduler.get_last_lr()[0],
+                }
+            )
 
         if r_mean > best_val_r:
             best_val_r = r_mean
@@ -558,8 +571,16 @@ def train_proxy_encoder(
             no_improve = 0
             if checkpoint_path is not None and ckpt_extra is not None:
                 _save_intermediate_checkpoint(
-                    checkpoint_path, model, ckpt_extra, norm_stats,
-                    r_wl, r_den, r_cong, r_mean, n_train, n_val,
+                    checkpoint_path,
+                    model,
+                    ckpt_extra,
+                    norm_stats,
+                    r_wl,
+                    r_den,
+                    r_cong,
+                    r_mean,
+                    n_train,
+                    n_val,
                 )
                 print(f"    saved checkpoint (val_loss={val_loss:.4f}  r_mean={r_mean:.3f})")
         else:
@@ -599,8 +620,8 @@ def train_proxy_encoder(
 
     val_pred_np = np.concatenate(val_pred_all)
     val_true_np = np.concatenate(val_true_all)
-    final_r_wl   = _pearson(val_pred_np[:, 0], val_true_np[:, 0])
-    final_r_den  = _pearson(val_pred_np[:, 1], val_true_np[:, 1])
+    final_r_wl = _pearson(val_pred_np[:, 0], val_true_np[:, 0])
+    final_r_den = _pearson(val_pred_np[:, 1], val_true_np[:, 1])
     final_r_cong = _pearson(val_pred_np[:, 2], val_true_np[:, 2])
 
     return model, {
@@ -616,12 +637,13 @@ def train_proxy_encoder(
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--benchmarks", default="ibm01",
-                   help="Single name, comma-separated, or 'all'")
-    p.add_argument("--samples", type=int, default=200,
-                   help="Random placement samples per benchmark")
+    p.add_argument("--benchmarks", default="ibm01", help="Single name, comma-separated, or 'all'")
+    p.add_argument(
+        "--samples", type=int, default=200, help="Random placement samples per benchmark"
+    )
     p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -629,25 +651,34 @@ def main():
     p.add_argument("--num-gnn-layers", type=int, default=3)
     p.add_argument("--edge-fc-layers", type=int, default=1)
     p.add_argument("--grid-size", type=int, default=128)
-    p.add_argument("--no-cnn", action="store_true",
-                   help="Ablate CNN: exclude canvas features from head input")
+    p.add_argument(
+        "--no-cnn", action="store_true", help="Ablate CNN: exclude canvas features from head input"
+    )
     p.add_argument("--val-frac", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--patience", type=int, default=50,
-                   help="Early stopping patience (epochs without val_loss improvement)")
-    p.add_argument("--cache-dir",
-                   default=str(_HERE / "data" / "encoder" / "per_bench"))
-    p.add_argument("--checkpoint-out",
-                   default=str(_HERE / "checkpoints" / "proxy_cost_encoder.pt"))
+    p.add_argument(
+        "--patience",
+        type=int,
+        default=50,
+        help="Early stopping patience (epochs without val_loss improvement)",
+    )
+    p.add_argument("--cache-dir", default=str(_HERE / "data" / "encoder" / "per_bench"))
+    p.add_argument("--checkpoint-out", default=str(_HERE / "checkpoints" / "proxy_cost_encoder.pt"))
     p.add_argument("--force-recollect", action="store_true")
-    p.add_argument("--collection-only", action="store_true",
-                   help="Collect and cache samples, then exit without training")
-    p.add_argument("--skip-collection", action="store_true",
-                   help="Load from existing caches only; fail if any are missing")
-    p.add_argument("--wandb-project", default="",
-                   help="W&B project name; empty string disables wandb")
-    p.add_argument("--wandb-run-name", default="",
-                   help="W&B run name (auto-generated if empty)")
+    p.add_argument(
+        "--collection-only",
+        action="store_true",
+        help="Collect and cache samples, then exit without training",
+    )
+    p.add_argument(
+        "--skip-collection",
+        action="store_true",
+        help="Load from existing caches only; fail if any are missing",
+    )
+    p.add_argument(
+        "--wandb-project", default="", help="W&B project name; empty string disables wandb"
+    )
+    p.add_argument("--wandb-run-name", default="", help="W&B run name (auto-generated if empty)")
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmarks)
@@ -658,10 +689,10 @@ def main():
 
     print("=== Phase 2.5: ProxyCostPredictor encoder pre-training ===")
     print(f"  benchmarks = {benchmarks}")
-    print(f"  samples/benchmark = {args.samples}  "
-          f"total ≈ {args.samples * len(benchmarks)}")
-    print(f"  hidden_dim={args.hidden_dim}  gnn_layers={args.num_gnn_layers}  "
-          f"use_cnn={use_cnn}")
+    print(f"  samples/benchmark = {args.samples}  " f"total ≈ {args.samples * len(benchmarks)}")
+    print(
+        f"  hidden_dim={args.hidden_dim}  gnn_layers={args.num_gnn_layers}  " f"use_cnn={use_cnn}"
+    )
 
     step_count = 3 if not args.collection_only else 1
     print(f"\n[1/{step_count}] Data collection / cache loading...")
@@ -710,6 +741,7 @@ def main():
     wandb_run = None
     if args.wandb_project:
         import wandb as _wandb
+
         wandb_run = _wandb.init(
             project=args.wandb_project,
             name=args.wandb_run_name or None,
@@ -726,7 +758,9 @@ def main():
             },
         )
 
-    print(f"\n[2/{step_count}] Training ({args.epochs} epochs, batch={args.batch_size}, lr={args.lr})...")
+    print(
+        f"\n[2/{step_count}] Training ({args.epochs} epochs, batch={args.batch_size}, lr={args.lr})..."
+    )
     model, info = train_proxy_encoder(
         bench_data,
         hidden_dim=args.hidden_dim,
@@ -776,12 +810,14 @@ def main():
     print(f"  checkpoint -> {ckpt_path}")
 
     if wandb_run is not None:
-        wandb_run.summary.update({
-            "pearson_r_wl": info["pearson_r_wl"],
-            "pearson_r_den": info["pearson_r_den"],
-            "pearson_r_cong": info["pearson_r_cong"],
-            "best_val_r_mean": info["best_val_r_mean"],
-        })
+        wandb_run.summary.update(
+            {
+                "pearson_r_wl": info["pearson_r_wl"],
+                "pearson_r_den": info["pearson_r_den"],
+                "pearson_r_cong": info["pearson_r_cong"],
+                "best_val_r_mean": info["best_val_r_mean"],
+            }
+        )
         wandb_run.finish()
 
 

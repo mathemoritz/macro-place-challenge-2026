@@ -42,6 +42,7 @@ if str(_HERE) not in sys.path:
 
 # ── HPWL edge graph extraction ─────────────────────────────────────────────
 
+
 class HpwlEdges(NamedTuple):
     """Bundle of edge arrays driving the HPWL surrogate.
 
@@ -54,9 +55,10 @@ class HpwlEdges(NamedTuple):
     terminals on the net (hard + soft + ports), and adds a parallel
     hard-to-fixed-anchor edge set.
     """
-    hh_edges: np.ndarray   # [E_hh, 2] hard-macro-to-hard-macro pairs
+
+    hh_edges: np.ndarray  # [E_hh, 2] hard-macro-to-hard-macro pairs
     hh_weights: np.ndarray  # [E_hh] per-pair weights
-    hf_macros: np.ndarray   # [E_hf] hard-macro indices for each hard-to-fixed contribution
+    hf_macros: np.ndarray  # [E_hf] hard-macro indices for each hard-to-fixed contribution
     hf_anchors: np.ndarray  # [E_hf, 2] (x, y) of the fixed terminal
     hf_weights: np.ndarray  # [E_hf] per-edge weights
 
@@ -91,10 +93,7 @@ def _hard_macro_edges(benchmark: Benchmark) -> HpwlEdges:
             for net_pins in benchmark.net_pin_nodes
         )
     else:
-        nets_owners = (
-            sorted({int(o) for o in nodes.tolist()})
-            for nodes in benchmark.net_nodes
-        )
+        nets_owners = (sorted({int(o) for o in nodes.tolist()}) for nodes in benchmark.net_nodes)
 
     hh_w: dict[tuple[int, int], float] = {}
     hf_w: dict[tuple[int, int], float] = {}
@@ -151,7 +150,12 @@ def _load_plc_if_available(name: str):
     }
     design = ng45.get(name) or ng45.get(name.replace("_ng45", ""))
     if design:
-        base = Path("external/MacroPlacement/Flows/NanGate45") / design / "netlist" / "output_CT_Grouping"
+        base = (
+            Path("external/MacroPlacement/Flows/NanGate45")
+            / design
+            / "netlist"
+            / "output_CT_Grouping"
+        )
         if (base / "netlist.pb.txt").exists():
             _, plc = load_benchmark(str(base / "netlist.pb.txt"), str(base / "initial.plc"))
             return plc
@@ -159,6 +163,7 @@ def _load_plc_if_available(name: str):
 
 
 # ── Placement state ────────────────────────────────────────────────────────
+
 
 class PlacementState:
     """Mutable hard-macro positions with O(N) overlap checks and HPWL surrogate."""
@@ -174,8 +179,15 @@ class PlacementState:
 
     _DEFAULT_GAP = 1e-6
 
-    def __init__(self, benchmark: Benchmark, edges, edge_weights=None,
-                 hf_macros=None, hf_anchors=None, hf_weights=None):
+    def __init__(
+        self,
+        benchmark: Benchmark,
+        edges,
+        edge_weights=None,
+        hf_macros=None,
+        hf_anchors=None,
+        hf_weights=None,
+    ):
         """Build a placement state.
 
         Two calling conventions are accepted for back-compat with code paths
@@ -195,14 +207,12 @@ class PlacementState:
             hf_weights = bundle.hf_weights
         else:
             hh_edges = edges
-            hh_weights = edge_weights if edge_weights is not None \
-                else np.zeros(0, dtype=np.float64)
-            hf_macros = hf_macros if hf_macros is not None \
-                else np.zeros(0, dtype=np.int64)
-            hf_anchors = hf_anchors if hf_anchors is not None \
-                else np.zeros((0, 2), dtype=np.float64)
-            hf_weights = hf_weights if hf_weights is not None \
-                else np.zeros(0, dtype=np.float64)
+            hh_weights = edge_weights if edge_weights is not None else np.zeros(0, dtype=np.float64)
+            hf_macros = hf_macros if hf_macros is not None else np.zeros(0, dtype=np.int64)
+            hf_anchors = (
+                hf_anchors if hf_anchors is not None else np.zeros((0, 2), dtype=np.float64)
+            )
+            hf_weights = hf_weights if hf_weights is not None else np.zeros(0, dtype=np.float64)
 
         n_hard = benchmark.num_hard_macros
         self.n = n_hard
@@ -259,9 +269,7 @@ class PlacementState:
         self.per_edge_hpwl: np.ndarray = np.zeros(len(hh_edges), dtype=np.float64)
         self.per_edge_hf_hpwl: np.ndarray = np.zeros(len(hf_macros), dtype=np.float64)
         self._total_hpwl: float = 0.0
-        self._overlap_partners: list[dict[int, float]] = [
-            {} for _ in range(n_hard)
-        ]
+        self._overlap_partners: list[dict[int, float]] = [{} for _ in range(n_hard)]
         self._total_overlap_pairs: int = 0
         self._total_overlap_area: float = 0.0
         self.rebuild_caches()
@@ -357,8 +365,9 @@ class PlacementState:
         if self.n > 1:
             dx = np.abs(self.pos[:, 0:1] - self.pos[:, 0:1].T)
             dy = np.abs(self.pos[:, 1:2] - self.pos[:, 1:2].T)
-            is_overlap = (dx + self._DEFAULT_GAP < self.sep_x) & \
-                         (dy + self._DEFAULT_GAP < self.sep_y)
+            is_overlap = (dx + self._DEFAULT_GAP < self.sep_x) & (
+                dy + self._DEFAULT_GAP < self.sep_y
+            )
             np.fill_diagonal(is_overlap, False)
             ox = np.maximum(0.0, self.sep_x - dx)
             oy = np.maximum(0.0, self.sep_y - dy)
@@ -371,8 +380,7 @@ class PlacementState:
                 self._total_overlap_pairs += 1
                 self._total_overlap_area += a
 
-    def apply_move(self, idx: int, new_x: float, new_y: float
-                   ) -> tuple[float, float]:
+    def apply_move(self, idx: int, new_x: float, new_y: float) -> tuple[float, float]:
         """Move macro ``idx`` to (``new_x``, ``new_y``); incrementally
         update HPWL and overlap caches. Returns the previous (x, y) so a
         caller can revert with ``state.apply_move(idx, *prev)``.
@@ -425,8 +433,9 @@ class PlacementState:
         dy_row = np.abs(self.pos[idx, 1] - self.pos[:, 1])
         sep_x_row = self.sep_x[idx]
         sep_y_row = self.sep_y[idx]
-        is_overlap_row = (dx_row + self._DEFAULT_GAP < sep_x_row) & \
-                         (dy_row + self._DEFAULT_GAP < sep_y_row)
+        is_overlap_row = (dx_row + self._DEFAULT_GAP < sep_x_row) & (
+            dy_row + self._DEFAULT_GAP < sep_y_row
+        )
         is_overlap_row[idx] = False
         new_partners_idx = np.where(is_overlap_row)[0]
         if len(new_partners_idx) > 0:
@@ -468,15 +477,16 @@ class PlacementState:
             dx = np.abs(self.pos[self.hf_macros, 0] - self.hf_anchors[:, 0])
             dy = np.abs(self.pos[self.hf_macros, 1] - self.hf_anchors[:, 1])
             true_hpwl += float((self.hf_weights * (dx + dy)).sum())
-        assert np.isclose(cached_hpwl, true_hpwl, rtol=rtol, atol=atol), (
-            f"HPWL cache drift: cached={cached_hpwl} true={true_hpwl}"
-        )
+        assert np.isclose(
+            cached_hpwl, true_hpwl, rtol=rtol, atol=atol
+        ), f"HPWL cache drift: cached={cached_hpwl} true={true_hpwl}"
 
         if self.n > 1:
             dx = np.abs(self.pos[:, 0:1] - self.pos[:, 0:1].T)
             dy = np.abs(self.pos[:, 1:2] - self.pos[:, 1:2].T)
-            is_overlap = (dx + self._DEFAULT_GAP < self.sep_x) & \
-                         (dy + self._DEFAULT_GAP < self.sep_y)
+            is_overlap = (dx + self._DEFAULT_GAP < self.sep_x) & (
+                dy + self._DEFAULT_GAP < self.sep_y
+            )
             np.fill_diagonal(is_overlap, False)
             true_pairs = int(is_overlap.sum() // 2)
             ox = np.maximum(0.0, self.sep_x - dx)
@@ -489,12 +499,12 @@ class PlacementState:
             true_area = float(pair_area.sum() / 2.0)
         else:
             true_pairs, true_area = 0, 0.0
-        assert cached_pairs == true_pairs, (
-            f"overlap_pairs cache drift: cached={cached_pairs} true={true_pairs}"
-        )
-        assert np.isclose(cached_area, true_area, rtol=rtol, atol=atol), (
-            f"overlap_area cache drift: cached={cached_area} true={true_area}"
-        )
+        assert (
+            cached_pairs == true_pairs
+        ), f"overlap_pairs cache drift: cached={cached_pairs} true={true_pairs}"
+        assert np.isclose(
+            cached_area, true_area, rtol=rtol, atol=atol
+        ), f"overlap_area cache drift: cached={cached_area} true={true_area}"
 
     # ── Candidate generation ──────────────────────────────────────────────
 
@@ -507,8 +517,9 @@ class PlacementState:
         hits[idx] = False
         return int(hits.sum())
 
-    def candidate_positions(self, idx: int, num_candidates: int = 16,
-                            rng: random.Random | None = None) -> list[tuple[float, float]]:
+    def candidate_positions(
+        self, idx: int, num_candidates: int = 16, rng: random.Random | None = None
+    ) -> list[tuple[float, float]]:
         """Candidate centers for macro ``idx``: connected centroid + top-K
         connected partners + grid jitter + random jumps.
 
@@ -534,8 +545,7 @@ class PlacementState:
         cur_x = float(self.pos[idx, 0])
         cur_y = float(self.pos[idx, 1])
         if self.neighbor_weight[idx]:
-            top_partners = sorted(self.neighbor_weight[idx].items(),
-                                  key=lambda kv: -kv[1])[:4]
+            top_partners = sorted(self.neighbor_weight[idx].items(), key=lambda kv: -kv[1])[:4]
             for partner_j, _w in top_partners:
                 px = float(self.pos[partner_j, 0])
                 py = float(self.pos[partner_j, 1])
@@ -544,28 +554,29 @@ class PlacementState:
                 norm = (vdx * vdx + vdy * vdy) ** 0.5
                 if norm < 1e-9:
                     continue
-                cands.append(self.clamp(
-                    idx,
-                    cur_x + vdx * step / norm,
-                    cur_y + vdy * step / norm,
-                ))
+                cands.append(
+                    self.clamp(
+                        idx,
+                        cur_x + vdx * step / norm,
+                        cur_y + vdy * step / norm,
+                    )
+                )
 
         # Local grid jitter steps proportional to macro size. Trimmed from
         # 12 to 7 (kept 4 wide cardinals + 3 narrow cardinals; dropped 4
         # diagonals and 1 narrow cardinal to make room for the connected-
         # partner offsets above).
-        for dxm, dym in [(-2, 0), (2, 0), (0, -2), (0, 2),
-                         (-1, 0), (1, 0), (0, -1)]:
-            x, y = self.clamp(idx,
-                              cur_x + dxm * step,
-                              cur_y + dym * step)
+        for dxm, dym in [(-2, 0), (2, 0), (0, -2), (0, 2), (-1, 0), (1, 0), (0, -1)]:
+            x, y = self.clamp(idx, cur_x + dxm * step, cur_y + dym * step)
             cands.append((x, y))
 
         # Random canvas jumps (open-region proxy without expensive search).
         for _ in range(4):
-            x, y = self.clamp(idx,
-                              r.uniform(self.half_w[idx], self.cw - self.half_w[idx]),
-                              r.uniform(self.half_h[idx], self.ch - self.half_h[idx]))
+            x, y = self.clamp(
+                idx,
+                r.uniform(self.half_w[idx], self.cw - self.half_w[idx]),
+                r.uniform(self.half_h[idx], self.ch - self.half_h[idx]),
+            )
             cands.append((x, y))
 
         return cands[:num_candidates]
@@ -576,8 +587,9 @@ class PlacementState:
 FEATURE_DIM = 16
 
 
-def _features_for_move(state: "PlacementState", macro_idx: int,
-                        move_delta: np.ndarray) -> np.ndarray:
+def _features_for_move(
+    state: "PlacementState", macro_idx: int, move_delta: np.ndarray
+) -> np.ndarray:
     """16-dim feature vector for predicting Δproxy_cost of moving ``macro_idx``
     by ``move_delta``. Mirrors the physical signals a GNN+CNN encoder would
     surface: HPWL change, local density at source/target, overlap change,
@@ -615,25 +627,37 @@ def _features_for_move(state: "PlacementState", macro_idx: int,
         attract_old = attract_new = 0.0
         deg = 0
 
-    feats = np.array([
-        w, h, w * h,                                # macro geometry
-        float(move_delta[0]), float(move_delta[1]),
-        abs(float(move_delta[0])), abs(float(move_delta[1])),
-        new_x / state.cw, new_y / state.ch,         # normalized target
-        hpwl_after - hpwl_before,                    # HPWL Δ (surrogate)
-        float(n_overlap_old), float(n_overlap_new),  # local overlap counts
-        float(n_local_old), float(n_local_new),      # local density
-        attract_old - attract_new,                   # +ve = pulled toward neighbors
-        float(deg),                                  # macro degree
-    ], dtype=np.float32)
+    feats = np.array(
+        [
+            w,
+            h,
+            w * h,  # macro geometry
+            float(move_delta[0]),
+            float(move_delta[1]),
+            abs(float(move_delta[0])),
+            abs(float(move_delta[1])),
+            new_x / state.cw,
+            new_y / state.ch,  # normalized target
+            hpwl_after - hpwl_before,  # HPWL Δ (surrogate)
+            float(n_overlap_old),
+            float(n_overlap_new),  # local overlap counts
+            float(n_local_old),
+            float(n_local_new),  # local density
+            attract_old - attract_new,  # +ve = pulled toward neighbors
+            float(deg),  # macro degree
+        ],
+        dtype=np.float32,
+    )
     assert feats.shape == (FEATURE_DIM,), f"feature dim drift: {feats.shape}"
     return feats
 
 
 # ── Legalization (Phase 6 finishing step) ──────────────────────────────────
 
-def _legalize(state: PlacementState, *, gap: float = 0.001,
-              max_search_radius: int = 150) -> np.ndarray:
+
+def _legalize(
+    state: PlacementState, *, gap: float = 0.001, max_search_radius: int = 150
+) -> np.ndarray:
     """Greedy outward-spiral legalization to zero hard-macro overlap pairs.
 
     Largest movable macros are placed first; each one keeps its position if it
@@ -689,10 +713,8 @@ def _legalize(state: PlacementState, *, gap: float = 0.001,
                 for dym in range(-r, r + 1):
                     if abs(dxm) != r and abs(dym) != r:
                         continue
-                    cx = float(np.clip(pos[idx, 0] + dxm * step,
-                                        half_w[idx], cw - half_w[idx]))
-                    cy = float(np.clip(pos[idx, 1] + dym * step,
-                                        half_h[idx], ch - half_h[idx]))
+                    cx = float(np.clip(pos[idx, 0] + dxm * step, half_w[idx], cw - half_w[idx]))
+                    cy = float(np.clip(pos[idx, 1] + dym * step, half_h[idx], ch - half_h[idx]))
                     if placed.any():
                         dx = np.abs(cx - legal[:, 0])
                         dy = np.abs(cy - legal[:, 1])
@@ -716,6 +738,7 @@ def _legalize(state: PlacementState, *, gap: float = 0.001,
 
 # ── Legalization-time probe (A.4 of LKH critique fix) ─────────────────────
 
+
 def _probe_legalization_cost(state: PlacementState, n_probe: int = 10) -> float:
     """Estimate full ``_legalize`` wall time by replicating the spiral
     inner-loop (read-only) on ``n_probe`` largest movable macros and
@@ -734,9 +757,10 @@ def _probe_legalization_cost(state: PlacementState, n_probe: int = 10) -> float:
     movable_idx = np.where(state.movable)[0]
     if len(movable_idx) == 0:
         return 0.0
-    order = sorted(movable_idx.tolist(),
-                   key=lambda i: -float(state.sizes[i, 0] * state.sizes[i, 1]))
-    sample = order[:min(n_probe, len(order))]
+    order = sorted(
+        movable_idx.tolist(), key=lambda i: -float(state.sizes[i, 0] * state.sizes[i, 1])
+    )
+    sample = order[: min(n_probe, len(order))]
 
     sep_x = (state.sizes[:, 0:1] + state.sizes[:, 0:1].T) / 2.0 + 0.001
     sep_y = (state.sizes[:, 1:2] + state.sizes[:, 1:2].T) / 2.0 + 0.001
@@ -760,12 +784,13 @@ def _probe_legalization_cost(state: PlacementState, n_probe: int = 10) -> float:
 
 # ── Cost approximator loading (Phase 3) ────────────────────────────────────
 
+
 def _load_cost_approximator(ckpt_path: Path):
     """Returns (model, feat_mean, feat_std, target_mean, target_std) or None."""
     if not ckpt_path.exists():
         return None
     try:
-        from lkh_model import CostApproximator
+        from submissions.lkh.model.lkh_model import CostApproximator
     except ImportError:
         return None
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
@@ -788,16 +813,18 @@ def _load_cost_approximator(ckpt_path: Path):
 
 # ── Chain policy loading (Phase 4) ─────────────────────────────────────────
 
+
 def _load_chain_policy(ckpt_path: Path):
     """Returns a dict with policy + chain_env helpers, or None if missing."""
     if not ckpt_path.exists():
         return None
     try:
-        from lkh_model import ChainPolicy
+        from submissions.lkh.model.lkh_model import ChainPolicy
     except ImportError:
         return None
     # Import chain_env via importlib to avoid circular imports.
     import importlib.util as _ilu
+
     spec = _ilu.spec_from_file_location("chain_env", str(_HERE / "chain_env.py"))
     env_mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(env_mod)
@@ -819,14 +846,14 @@ def _load_chain_policy(ckpt_path: Path):
 # loading placer.py for a HPWL-only run doesn't pay the torch.nn import cost.
 _encoder_helpers: dict | None = None
 
+
 def _get_encoder_helpers() -> dict:
     global _encoder_helpers
     if _encoder_helpers is not None:
         return _encoder_helpers
     import importlib.util as _ilu
-    enc_spec = _ilu.spec_from_file_location(
-        "lkh_encoder", str(_HERE / "model" / "encoder.py")
-    )
+
+    enc_spec = _ilu.spec_from_file_location("lkh_encoder", str(_HERE / "model" / "encoder.py"))
     enc_mod = _ilu.module_from_spec(enc_spec)
     enc_spec.loader.exec_module(enc_mod)
     _encoder_helpers = {
@@ -857,7 +884,7 @@ def _load_proxy_cost_encoder(ckpt_path: Path):
     if ckpt.get("type") != "proxy_cost_encoder":
         return None
     try:
-        from lkh_model import ProxyCostPredictor
+        from submissions.lkh.model.lkh_model import ProxyCostPredictor
     except ImportError:
         return None
     model = ProxyCostPredictor(
@@ -883,6 +910,7 @@ def _load_proxy_cost_encoder(ckpt_path: Path):
 
 # ── LK chain (greedy, optionally approximator-guided) ──────────────────────
 
+
 class LKChain:
     """Cascading move chain: pick seed; move to best candidate (by trained
     approximator if available, else HPWL+overlap surrogate); follow first
@@ -895,11 +923,16 @@ class LKChain:
     hpwl) progress regardless of which scorer the chain uses.
     """
 
-    def __init__(self, state: PlacementState, seed_macro: int,
-                 rng: random.Random, approximator: dict | None = None,
-                 policy_bundle: dict | None = None,
-                 gate_mode: str = "hpwl",
-                 proxy_encoder: dict | None = None):
+    def __init__(
+        self,
+        state: PlacementState,
+        seed_macro: int,
+        rng: random.Random,
+        approximator: dict | None = None,
+        policy_bundle: dict | None = None,
+        gate_mode: str = "hpwl",
+        proxy_encoder: dict | None = None,
+    ):
         """``gate_mode`` selects the third lex-coordinate of the commit gate:
 
         * ``"hpwl"`` (default): ``(overlap_pairs, overlap_area, hpwl)``.
@@ -933,16 +966,27 @@ class LKChain:
         """Drive the chain with the trained policy via ChainEnv."""
         st = self.state
         if not st.movable[self.seed]:
-            return {"chain_gain": 0.0, "committed": False, "length": 0,
-                    "overlap_delta": 0, "best_prefix_index": 0}
+            return {
+                "chain_gain": 0.0,
+                "committed": False,
+                "length": 0,
+                "overlap_delta": 0,
+                "best_prefix_index": 0,
+            }
 
         ChainEnv = self.policy_bundle["ChainEnv"]
         policy = self.policy_bundle["policy"]
-        env = ChainEnv(st, self.seed, rng=self.rng,
-                        max_chain_length=max_length, max_candidates=8,
-                        gate_mode=self.gate_mode,
-                        approximator=self.approx)
+        env = ChainEnv(
+            st,
+            self.seed,
+            rng=self.rng,
+            max_chain_length=max_length,
+            max_candidates=8,
+            gate_mode=self.gate_mode,
+            approximator=self.approx,
+        )
         import torch.nn.functional as _F
+
         final_info: dict = {}
         while not env.done:
             sp = env.state_for_policy()
@@ -984,8 +1028,13 @@ class LKChain:
     def run_greedy(self, max_length: int = 8) -> dict:
         st = self.state
         if not st.movable[self.seed]:
-            return {"chain_gain": 0.0, "committed": False, "length": 0,
-                    "overlap_delta": 0, "best_prefix_index": 0}
+            return {
+                "chain_gain": 0.0,
+                "committed": False,
+                "length": 0,
+                "overlap_delta": 0,
+                "best_prefix_index": 0,
+            }
 
         snapshot = st.pos.copy()
         start_hpwl = st.hpwl()
@@ -1091,13 +1140,16 @@ class LKChain:
                         best_pos = (cx, cy)
                         best_predicted_delta = delta
             elif self.approx is not None:
-                feats = np.stack([
-                    _features_for_move(
-                        st, current,
-                        np.array([cx - old_x, cy - old_y], dtype=np.float64),
-                    )
-                    for (cx, cy) in cands
-                ])
+                feats = np.stack(
+                    [
+                        _features_for_move(
+                            st,
+                            current,
+                            np.array([cx - old_x, cy - old_y], dtype=np.float64),
+                        )
+                        for (cx, cy) in cands
+                    ]
+                )
                 norm = (feats - self.approx["feat_mean"]) / self.approx["feat_std"]
                 with torch.no_grad():
                     pred = self.approx["model"](torch.tensor(norm, dtype=torch.float32))
@@ -1119,7 +1171,7 @@ class LKChain:
                 # B.3: per-candidate apply + revert. The HPWL read is O(1)
                 # cached and apply_move is O(degree)+O(N) — pre-fix this
                 # was 12 * (O(E) + O(N^2)) per chain step.
-                for (cx, cy) in cands:
+                for cx, cy in cands:
                     st.apply_move(current, cx, cy)
                     new_ov = len(st.overlapping_with(current))
                     score = st.hpwl() + new_ov * hpwl_scale
@@ -1168,8 +1220,9 @@ class LKChain:
             # strongly connected, rather than pure-Manhattan (which pulls
             # the chain into geometrically nearby but topologically
             # unrelated regions). The visited set blocks oscillation.
-            displaced = [j for j in st.overlapping_with(current)
-                         if st.movable[j] and j not in visited]
+            displaced = [
+                j for j in st.overlapping_with(current) if st.movable[j] and j not in visited
+            ]
             if not displaced:
                 break  # clean landing, chain complete
             eps = 1e-3
@@ -1191,18 +1244,27 @@ class LKChain:
             st.pos[:] = best_pos_snapshot
             st.rebuild_caches()
             end_overlap_pairs = best_key[0]
-            return {"chain_gain": start_hpwl - st.hpwl(), "committed": True,
-                    "length": length,
-                    "overlap_delta": end_overlap_pairs - start_overlap_pairs,
-                    "best_prefix_index": best_prefix_index}
+            return {
+                "chain_gain": start_hpwl - st.hpwl(),
+                "committed": True,
+                "length": length,
+                "overlap_delta": end_overlap_pairs - start_overlap_pairs,
+                "best_prefix_index": best_prefix_index,
+            }
 
         st.pos[:] = snapshot
         st.rebuild_caches()
-        return {"chain_gain": 0.0, "committed": False, "length": length,
-                "overlap_delta": 0, "best_prefix_index": 0}
+        return {
+            "chain_gain": 0.0,
+            "committed": False,
+            "length": length,
+            "overlap_delta": 0,
+            "best_prefix_index": 0,
+        }
 
 
 # ── Submission placer ──────────────────────────────────────────────────────
+
 
 class LKHPlacer:
     """Run many random-seed LK chains under a wall-clock budget.
@@ -1214,17 +1276,22 @@ class LKHPlacer:
     macros when no chain has improved the best-seen placement in a while.
     """
 
-    def __init__(self, seed: int = 42, time_budget_s: float = 60.0,
-                 max_chains: int = 5000, max_chain_length: int = 8,
-                 checkpoint_path: str | None = None,
-                 policy_path: str | None = None,
-                 stagnation_threshold: int = 50,
-                 perturb_macros: int = 5,
-                 use_policy: bool = True,
-                 legalization_reserve_s: float | None = None,
-                 legalization_reserve_frac: float = 0.05,
-                 seed_refresh_interval: int = 100,
-                 gate_mode: str = "hpwl"):
+    def __init__(
+        self,
+        seed: int = 42,
+        time_budget_s: float = 60.0,
+        max_chains: int = 5000,
+        max_chain_length: int = 8,
+        checkpoint_path: str | None = None,
+        policy_path: str | None = None,
+        stagnation_threshold: int = 50,
+        perturb_macros: int = 5,
+        use_policy: bool = True,
+        legalization_reserve_s: float | None = None,
+        legalization_reserve_frac: float = 0.05,
+        seed_refresh_interval: int = 100,
+        gate_mode: str = "hpwl",
+    ):
         self.seed = seed
         self.time_budget_s = time_budget_s
         self.max_chains = max_chains
@@ -1252,8 +1319,10 @@ class LKHPlacer:
         # carries type=="proxy_cost_encoder", it supersedes the MLP approximator
         # for candidate scoring. The MLP is still loaded as a fallback in case
         # the encoder hasn't been trained yet (no checkpoint, or untrained).
-        enc_ckpt = Path(checkpoint_path) if checkpoint_path else (
-            _HERE / "checkpoints" / "proxy_cost_encoder.pt"
+        enc_ckpt = (
+            Path(checkpoint_path)
+            if checkpoint_path
+            else (_HERE / "checkpoints" / "proxy_cost_encoder.pt")
         )
         self.proxy_encoder = _load_proxy_cost_encoder(enc_ckpt)
         if self.proxy_encoder is not None:
@@ -1261,40 +1330,50 @@ class LKHPlacer:
             r_den = self.proxy_encoder.get("pearson_r_den")
             r_cong = self.proxy_encoder.get("pearson_r_cong")
             trained_on = self.proxy_encoder.get("trained_on")
-            print(f"[LKHPlacer] proxy cost encoder loaded "
-                  f"(r_wl={r_wl}, r_den={r_den}, r_cong={r_cong}, "
-                  f"trained on {trained_on})")
+            print(
+                f"[LKHPlacer] proxy cost encoder loaded "
+                f"(r_wl={r_wl}, r_den={r_den}, r_cong={r_cong}, "
+                f"trained on {trained_on})"
+            )
 
-        approx_ckpt = Path(checkpoint_path) if checkpoint_path else (
-            _HERE / "checkpoints" / "cost_approximator.pt"
+        approx_ckpt = (
+            Path(checkpoint_path)
+            if checkpoint_path
+            else (_HERE / "checkpoints" / "cost_approximator.pt")
         )
         # Only load MLP approximator if encoder isn't available (it's superseded).
-        self.approximator = None if self.proxy_encoder is not None else \
-            _load_cost_approximator(approx_ckpt)
+        self.approximator = (
+            None if self.proxy_encoder is not None else _load_cost_approximator(approx_ckpt)
+        )
         if self.approximator is not None:
             r = self.approximator.get("pearson_r_val")
             trained_on = self.approximator.get("trained_on")
-            print(f"[LKHPlacer] cost approximator loaded "
-                  f"(r={r:.3f}, trained on {trained_on})")
+            print(f"[LKHPlacer] cost approximator loaded " f"(r={r:.3f}, trained on {trained_on})")
         elif self.proxy_encoder is None:
             print(f"[LKHPlacer] no approximator at {approx_ckpt} — using HPWL surrogate")
 
         self.policy_bundle = None
         if use_policy:
-            policy_ckpt = Path(policy_path) if policy_path else (
-                _HERE / "checkpoints" / "chain_policy.pt"
+            policy_ckpt = (
+                Path(policy_path) if policy_path else (_HERE / "checkpoints" / "chain_policy.pt")
             )
             self.policy_bundle = _load_chain_policy(policy_ckpt)
             if self.policy_bundle is not None:
-                print(f"[LKHPlacer] chain policy loaded "
-                      f"(iters={self.policy_bundle.get('n_iterations')}, "
-                      f"trained on {self.policy_bundle.get('trained_on')})")
+                print(
+                    f"[LKHPlacer] chain policy loaded "
+                    f"(iters={self.policy_bundle.get('n_iterations')}, "
+                    f"trained on {self.policy_bundle.get('trained_on')})"
+                )
             else:
                 print(f"[LKHPlacer] no policy at {policy_ckpt} — using greedy chains")
 
-    def _perturb(self, state: PlacementState, rng: random.Random,
-                 seed_weights: list[float] | None = None,
-                 movable_idx: list[int] | None = None) -> None:
+    def _perturb(
+        self,
+        state: PlacementState,
+        rng: random.Random,
+        seed_weights: list[float] | None = None,
+        movable_idx: list[int] | None = None,
+    ) -> None:
         """Move ``perturb_macros`` movable macros to random positions. A.5
         (LKH critique fix): bias the picks toward the top-quartile of
         ``seed_weights`` (the highest current HPWL-contribution macros) so
@@ -1342,13 +1421,15 @@ class LKHPlacer:
                 pw = self.proxy_encoder["proxy_weights"]
                 bench_proxy_encoder = dict(self.proxy_encoder)  # shallow copy
                 bench_proxy_encoder["effective_weights"] = {
-                    "wl":   pw["wl"]  * ns["wl_std"],
-                    "den":  pw["den"] * ns["den_std"],
+                    "wl": pw["wl"] * ns["wl_std"],
+                    "den": pw["den"] * ns["den_std"],
                     "cong": pw["cong"] * ns["cong_std"],
                 }
             else:
-                print(f"[LKHPlacer] encoder has no norm_stats for {bench_name!r} "
-                      f"— falling back to HPWL surrogate")
+                print(
+                    f"[LKHPlacer] encoder has no norm_stats for {bench_name!r} "
+                    f"— falling back to HPWL surrogate"
+                )
 
         # Cost-weighted seed sampling: macros with highest neighbor-displacement
         # are sampled more often. Falls back to uniform if no edges.
@@ -1364,8 +1445,10 @@ class LKHPlacer:
             probe_estimate = _probe_legalization_cost(state, n_probe=10)
             floor = self.legalization_reserve_frac * self.time_budget_s
             legalization_reserve = max(probe_estimate * 1.5, floor, 1.0)
-            print(f"[LKHPlacer] legalization reserve: probe={probe_estimate:.2f}s "
-                  f"-> reserved {legalization_reserve:.2f}s of {self.time_budget_s:.1f}s budget")
+            print(
+                f"[LKHPlacer] legalization reserve: probe={probe_estimate:.2f}s "
+                f"-> reserved {legalization_reserve:.2f}s of {self.time_budget_s:.1f}s budget"
+            )
         # Cap the reserve at half the budget so the chain loop still gets
         # meaningful time even on a wildly mis-estimating probe.
         legalization_reserve = min(legalization_reserve, self.time_budget_s * 0.5)
@@ -1386,16 +1469,18 @@ class LKHPlacer:
 
         while chains < self.max_chains and (time.time() - start) < chain_loop_deadline:
             seed_macro = rng.choices(movable_idx, weights=seed_weights, k=1)[0]
-            result = LKChain(state, seed_macro, rng,
-                              approximator=self.approximator,
-                              policy_bundle=self.policy_bundle,
-                              gate_mode=self.gate_mode,
-                              proxy_encoder=bench_proxy_encoder,
-                              ).run(self.max_chain_length)
+            result = LKChain(
+                state,
+                seed_macro,
+                rng,
+                approximator=self.approximator,
+                policy_bundle=self.policy_bundle,
+                gate_mode=self.gate_mode,
+                proxy_encoder=bench_proxy_encoder,
+            ).run(self.max_chain_length)
             chains += 1
             if result["committed"]:
-                cur_key = (state.overlap_pairs(), state.overlap_area(),
-                           state.hpwl())
+                cur_key = (state.overlap_pairs(), state.overlap_area(), state.hpwl())
                 if cur_key < best_key:
                     best_key = cur_key
                     best_pos = state.pos.copy()
@@ -1408,16 +1493,14 @@ class LKHPlacer:
             # A.5: refresh seed weights every ``seed_refresh_interval``
             # chains so the seed-sampling distribution tracks current
             # placement, not the stale initial-placement HPWL contributions.
-            if (self.seed_refresh_interval > 0
-                    and chains % self.seed_refresh_interval == 0):
+            if self.seed_refresh_interval > 0 and chains % self.seed_refresh_interval == 0:
                 seed_weights = self._seed_weights(state, movable_idx)
 
             # Phase 6.1: kick on stagnation. A.5: bias the kick toward
             # top-quartile-cost macros, then refresh seed weights so the
             # post-kick chain loop resumes with a non-stale ranking.
             if stagnation >= self.stagnation_threshold:
-                self._perturb(state, rng, seed_weights=seed_weights,
-                              movable_idx=movable_idx)
+                self._perturb(state, rng, seed_weights=seed_weights, movable_idx=movable_idx)
                 seed_weights = self._seed_weights(state, movable_idx)
                 stagnation = 0
 
@@ -1433,8 +1516,10 @@ class LKHPlacer:
             state.pos[:] = _legalize(state)
             state.rebuild_caches()
             n_overlaps_after = state.overlap_pairs()
-            print(f"[LKHPlacer] legalization: "
-                  f"{n_overlaps_before} -> {n_overlaps_after} overlap pairs")
+            print(
+                f"[LKHPlacer] legalization: "
+                f"{n_overlaps_before} -> {n_overlaps_after} overlap pairs"
+            )
 
         # Build full placement: hard macros from LK, soft macros untouched.
         full = benchmark.macro_positions.clone()

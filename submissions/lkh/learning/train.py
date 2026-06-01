@@ -31,8 +31,8 @@ import torch
 import torch.nn as nn
 
 _HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))                       # for lkh_model
-sys.path.insert(0, str(_HERE.parent.parent))         # repo root for macro_place
+sys.path.insert(0, str(_HERE))  # for lkh_model
+sys.path.insert(0, str(_HERE.parent.parent))  # repo root for macro_place
 
 # Load placer.py without triggering the package __init__ (which fails when
 # the TILOS submodule isn't initialized in some environments).
@@ -40,7 +40,7 @@ _spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer
 _placer = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_placer)
 
-from lkh_model import CostApproximator, FEATURE_DIM
+from submissions.lkh.model.lkh_model import CostApproximator, FEATURE_DIM
 
 from macro_place.loader import load_benchmark_from_dir
 from macro_place.objective import compute_proxy_cost
@@ -53,6 +53,7 @@ from macro_place.objective import compute_proxy_cost
 # regime (everything < 0.05 ex/s prints as ``0.0/s``). These helpers show the
 # more useful inverse (s/ex) when the rate is small, and convert wall-time
 # fields to ``Xh YYm`` / ``MMmSSs`` instead of raw seconds.
+
 
 def _fmt_time(seconds: float) -> str:
     """Format wall time in human-friendly units."""
@@ -79,6 +80,7 @@ def _fmt_rate(examples: float, seconds: float) -> str:
 
 # ── Benchmark list parsing ─────────────────────────────────────────────────
 
+
 def parse_benchmarks(arg: str) -> list[str]:
     """Parse a ``--benchmark`` CLI value into a list of benchmark names.
 
@@ -95,6 +97,7 @@ def parse_benchmarks(arg: str) -> list[str]:
     arg = (arg or "").strip()
     if arg == "all":
         from macro_place.evaluate import IBM_BENCHMARKS
+
         return list(IBM_BENCHMARKS)
     names = [n.strip() for n in arg.split(",") if n.strip()]
     if not names:
@@ -104,12 +107,16 @@ def parse_benchmarks(arg: str) -> list[str]:
 
 # ── Data collection ────────────────────────────────────────────────────────
 
-def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
-                            drift_prob: float = 0.3,
-                            p_cascade: float = 0.5,
-                            cascade_min: int = 2,
-                            cascade_max: int = 4,
-                            ) -> tuple[np.ndarray, np.ndarray]:
+
+def _collect_one_benchmark(
+    benchmark_name: str,
+    num_examples: int,
+    seed: int,
+    drift_prob: float = 0.3,
+    p_cascade: float = 0.5,
+    cascade_min: int = 2,
+    cascade_max: int = 4,
+) -> tuple[np.ndarray, np.ndarray]:
     """Single-benchmark state-drift sampler. Returns (features [N, F], targets [N]).
 
     The plc object is released when this function returns so the next
@@ -146,6 +153,7 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
     targets_list: list[float] = []
 
     import random as _random
+
     py_rng = _random.Random(py_rng_seed)
 
     movable_list = movable.tolist()
@@ -162,7 +170,8 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
             best_cx, best_cy = None, None
             best_h = float("inf")
             for cx, cy in cands_cas:
-                ox = float(state.pos[i, 0]); oy = float(state.pos[i, 1])
+                ox = float(state.pos[i, 0])
+                oy = float(state.pos[i, 1])
                 state.apply_move(i, cx, cy)
                 h = state.hpwl()
                 state.apply_move(i, ox, oy)
@@ -171,7 +180,8 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
                     best_cx, best_cy = cx, cy
             if best_cx is None:
                 continue
-            ox = float(state.pos[i, 0]); oy = float(state.pos[i, 1])
+            ox = float(state.pos[i, 0])
+            oy = float(state.pos[i, 1])
             state.apply_move(i, best_cx, best_cy)
             saved.append((i, ox, oy))
         return saved
@@ -217,7 +227,7 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
 
         # Revert the preliminary cascade so the drift mechanic and the next
         # iteration's base_cost stay on the un-drifted state.
-        for (i, ox, oy) in reversed(cascade_saved):
+        for i, ox, oy in reversed(cascade_saved):
             state.apply_move(i, ox, oy)
 
         # Maybe drift: commit the best candidate as the new base. After C.2
@@ -235,24 +245,31 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
             rate = n_done / max(elapsed, 1e-6)
             remaining = num_examples - n_done
             eta = remaining / max(rate, 1e-9)
-            print(f"  collected {n_done:4d}/{num_examples}  "
-                  f"(elapsed={_fmt_time(elapsed)}, "
-                  f"rate={_fmt_rate(n_done, elapsed)}, "
-                  f"eta={_fmt_time(eta)}, base={base_cost:.3f})")
+            print(
+                f"  collected {n_done:4d}/{num_examples}  "
+                f"(elapsed={_fmt_time(elapsed)}, "
+                f"rate={_fmt_rate(n_done, elapsed)}, "
+                f"eta={_fmt_time(eta)}, base={base_cost:.3f})"
+            )
             last_log = time.time()
 
     elapsed = time.time() - t_collect
-    print(f"  done in {_fmt_time(elapsed)} "
-          f"({_fmt_rate(len(feats_list), elapsed)})  "
-          f"cascade-interior rounds: {n_cascade_samples}")
+    print(
+        f"  done in {_fmt_time(elapsed)} "
+        f"({_fmt_rate(len(feats_list), elapsed)})  "
+        f"cascade-interior rounds: {n_cascade_samples}"
+    )
     return np.stack(feats_list), np.array(targets_list, dtype=np.float32)
 
 
-def collect_calibration_samples(benchmark_name: str, n_samples: int,
-                                 time_budget_s: float,
-                                 approximator_ckpt_path: str | None,
-                                 policy_ckpt_path: str | None,
-                                 seed: int) -> tuple[np.ndarray, np.ndarray]:
+def collect_calibration_samples(
+    benchmark_name: str,
+    n_samples: int,
+    time_budget_s: float,
+    approximator_ckpt_path: str | None,
+    policy_ckpt_path: str | None,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
     """C.3 (LKH critique fix): collect (features, true_Δproxy) pairs from
     states the placer actually visits at inference time. Pre-fix the
     approximator was trained only on near-initial-placement single moves;
@@ -270,7 +287,8 @@ def collect_calibration_samples(benchmark_name: str, n_samples: int,
     benchmark, plc = load_benchmark_from_dir(str(bench_dir))
 
     placer = _placer.LKHPlacer(
-        seed=seed, time_budget_s=time_budget_s,
+        seed=seed,
+        time_budget_s=time_budget_s,
         checkpoint_path=approximator_ckpt_path,
         policy_path=policy_ckpt_path,
         use_policy=policy_ckpt_path is not None,
@@ -288,14 +306,15 @@ def collect_calibration_samples(benchmark_name: str, n_samples: int,
 
     movable = np.where(state.movable)[0]
     if len(movable) == 0:
-        return np.zeros((0, FEATURE_DIM), dtype=np.float32), \
-               np.zeros(0, dtype=np.float32)
+        return np.zeros((0, FEATURE_DIM), dtype=np.float32), np.zeros(0, dtype=np.float32)
 
     rng = np.random.RandomState(seed + 7919)
     import random as _random
+
     py_rng = _random.Random(int(rng.randint(0, 2**31 - 1)))
 
     full_placement = benchmark.macro_positions.clone()
+
     def exact_cost() -> float:
         full_placement[:n_hard] = torch.tensor(state.pos, dtype=torch.float32)
         return float(compute_proxy_cost(full_placement, benchmark, plc)["proxy_cost"])
@@ -323,13 +342,13 @@ def collect_calibration_samples(benchmark_name: str, n_samples: int,
     return np.stack(feats_list), np.array(targets_list, dtype=np.float32)
 
 
-def _save_benchmark_cache(cache_file: Path, feats: np.ndarray, targets: np.ndarray,
-                          *, num_examples: int, name: str) -> None:
+def _save_benchmark_cache(
+    cache_file: Path, feats: np.ndarray, targets: np.ndarray, *, num_examples: int, name: str
+) -> None:
     """Atomic write of one per-benchmark cache file."""
     tmp = cache_file.with_suffix(cache_file.suffix + ".tmp")
     torch.save(
-        {"features": feats, "targets": targets,
-         "num_examples": num_examples, "name": name},
+        {"features": feats, "targets": targets, "num_examples": num_examples, "name": name},
         str(tmp),
     )
     tmp.replace(cache_file)
@@ -346,7 +365,7 @@ def per_bench_caches_complete(benchmark_names: list[str], cache_dir: Path) -> bo
             d = torch.load(str(path), weights_only=False)
             if len(d.get("features", [])) == 0:
                 return False
-        except Exception:                                       # noqa: BLE001
+        except Exception:  # noqa: BLE001
             return False
     return True
 
@@ -364,15 +383,15 @@ def load_per_benchmark_caches(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Load and concatenate per-benchmark ``<name>.pt`` caches.
 
-  Used after parallel Modal collection (or any time all caches exist).
-  Set ``collect_missing=True`` only for local runs that may lack a few
-  cache files; never re-collects benchmarks whose cache already exists.
+    Used after parallel Modal collection (or any time all caches exist).
+    Set ``collect_missing=True`` only for local runs that may lack a few
+    cache files; never re-collects benchmarks whose cache already exists.
 
-  D.2 (LKH critique fix): set ``force_recollect=True`` to bypass existing
-  per-benchmark caches and re-collect each one. Pre-fix the Phase 5
-  iterative loop had ``--force-recollect-each-round`` only invalidating
-  the *aggregated* cache; per-benchmark caches were still loaded as-is,
-  silently bypassing the user's explicit "re-collect" request.
+    D.2 (LKH critique fix): set ``force_recollect=True`` to bypass existing
+    per-benchmark caches and re-collect each one. Pre-fix the Phase 5
+    iterative loop had ``--force-recollect-each-round`` only invalidating
+    the *aggregated* cache; per-benchmark caches were still loaded as-is,
+    silently bypassing the user's explicit "re-collect" request.
     """
     if not benchmark_names:
         raise ValueError("load_per_benchmark_caches: benchmark_names is empty")
@@ -391,21 +410,29 @@ def load_per_benchmark_caches(
                 d = torch.load(str(cache_file), weights_only=False)
                 feats = d["features"]
                 targets = d["targets"]
-                print(f"  [{b_idx + 1}/{len(benchmark_names)}] loaded: {name}  "
-                      f"({len(feats)} examples)")
-            except Exception as exc:                              # noqa: BLE001
+                print(
+                    f"  [{b_idx + 1}/{len(benchmark_names)}] loaded: {name}  "
+                    f"({len(feats)} examples)"
+                )
+            except Exception as exc:  # noqa: BLE001
                 if not collect_missing:
                     raise RuntimeError(
                         f"cache load failed for {name} ({cache_file}): {exc}"
                     ) from exc
-                print(f"  [{b_idx + 1}/{len(benchmark_names)}] cache unreadable "
-                      f"({exc}); collecting {name}")
+                print(
+                    f"  [{b_idx + 1}/{len(benchmark_names)}] cache unreadable "
+                    f"({exc}); collecting {name}"
+                )
                 feats, targets = _collect_one_benchmark(
-                    name, num_examples_per_benchmark or 0,
-                    seed=seed + b_idx * 7919, drift_prob=drift_prob,
+                    name,
+                    num_examples_per_benchmark or 0,
+                    seed=seed + b_idx * 7919,
+                    drift_prob=drift_prob,
                 )
                 _save_benchmark_cache(
-                    cache_file, feats, targets,
+                    cache_file,
+                    feats,
+                    targets,
                     num_examples=num_examples_per_benchmark or len(feats),
                     name=name,
                 )
@@ -416,15 +443,19 @@ def load_per_benchmark_caches(
                     "force_recollect is True"
                 )
             reason = "force_recollect=True" if force_recollect else "missing cache"
-            print(f"  [{b_idx + 1}/{len(benchmark_names)}] {reason}; "
-                  f"collecting {name}")
+            print(f"  [{b_idx + 1}/{len(benchmark_names)}] {reason}; " f"collecting {name}")
             feats, targets = _collect_one_benchmark(
-                name, num_examples_per_benchmark,
-                seed=seed + b_idx * 7919, drift_prob=drift_prob,
+                name,
+                num_examples_per_benchmark,
+                seed=seed + b_idx * 7919,
+                drift_prob=drift_prob,
             )
             _save_benchmark_cache(
-                cache_file, feats, targets,
-                num_examples=num_examples_per_benchmark, name=name,
+                cache_file,
+                feats,
+                targets,
+                num_examples=num_examples_per_benchmark,
+                name=name,
             )
         else:
             raise FileNotFoundError(
@@ -433,27 +464,31 @@ def load_per_benchmark_caches(
                 f"``collect_data(..., collect_missing=True)``."
             )
 
-        if (num_examples_per_benchmark is not None
-                and len(feats) < num_examples_per_benchmark):
-            print(f"  WARNING: {name} has {len(feats)} examples, "
-                  f"expected {num_examples_per_benchmark}")
+        if num_examples_per_benchmark is not None and len(feats) < num_examples_per_benchmark:
+            print(
+                f"  WARNING: {name} has {len(feats)} examples, "
+                f"expected {num_examples_per_benchmark}"
+            )
 
         all_feats.append(feats)
         all_targets.append(targets)
         if post_benchmark_callback is not None:
             try:
                 post_benchmark_callback(name)
-            except Exception as exc:                              # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 print(f"    post_benchmark_callback error for {name}: {exc}")
 
     return np.concatenate(all_feats, axis=0), np.concatenate(all_targets, axis=0)
 
 
-def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
-                  seed: int, drift_prob: float = 0.3,
-                  per_benchmark_cache_dir: Optional[Path] = None,
-                  post_benchmark_callback: Optional[Callable[[str], None]] = None,
-                  ) -> tuple[np.ndarray, np.ndarray]:
+def collect_data(
+    benchmark_names: list[str],
+    num_examples_per_benchmark: int,
+    seed: int,
+    drift_prob: float = 0.3,
+    per_benchmark_cache_dir: Optional[Path] = None,
+    post_benchmark_callback: Optional[Callable[[str], None]] = None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Collect (or load) per-benchmark data and concatenate.
 
     Prefer ``load_per_benchmark_caches`` when caches already exist (e.g.
@@ -469,26 +504,40 @@ def collect_data(benchmark_names: list[str], num_examples_per_benchmark: int,
         for b_idx, name in enumerate(benchmark_names):
             print(f"\n  [{b_idx + 1}/{len(benchmark_names)}] benchmark = {name}")
             feats, targets = _collect_one_benchmark(
-                name, num_examples_per_benchmark,
-                seed=seed + b_idx * 7919, drift_prob=drift_prob,
+                name,
+                num_examples_per_benchmark,
+                seed=seed + b_idx * 7919,
+                drift_prob=drift_prob,
             )
             all_feats.append(feats)
             all_targets.append(targets)
         return np.concatenate(all_feats, axis=0), np.concatenate(all_targets, axis=0)
 
     return load_per_benchmark_caches(
-        benchmark_names, Path(per_benchmark_cache_dir),
+        benchmark_names,
+        Path(per_benchmark_cache_dir),
         num_examples_per_benchmark=num_examples_per_benchmark,
-        collect_missing=True, seed=seed, drift_prob=drift_prob,
+        collect_missing=True,
+        seed=seed,
+        drift_prob=drift_prob,
         post_benchmark_callback=post_benchmark_callback,
     )
 
 
 # ── Training ───────────────────────────────────────────────────────────────
 
-def train_model(features: np.ndarray, targets: np.ndarray, *,
-                epochs: int, batch_size: int, lr: float, hidden: int,
-                val_frac: float, seed: int) -> tuple[nn.Module, dict]:
+
+def train_model(
+    features: np.ndarray,
+    targets: np.ndarray,
+    *,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    hidden: int,
+    val_frac: float,
+    seed: int,
+) -> tuple[nn.Module, dict]:
     """Standard supervised regression with normalized features and targets."""
     rng = np.random.RandomState(seed)
     n = len(features)
@@ -524,7 +573,7 @@ def train_model(features: np.ndarray, targets: np.ndarray, *,
         idx = torch.randperm(len(X_train))
         total = 0.0
         for i in range(0, len(X_train), batch_size):
-            b = idx[i:i + batch_size]
+            b = idx[i : i + batch_size]
             pred = model(X_train[b])
             loss = loss_fn(pred, y_train[b])
             opt.zero_grad()
@@ -545,8 +594,10 @@ def train_model(features: np.ndarray, targets: np.ndarray, *,
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
 
         if epoch % 5 == 0 or epoch == epochs - 1:
-            print(f"  epoch {epoch:3d}  train={train_loss:.4f}  val={val_loss:.4f}  "
-                  f"pearson_r={pearson:.3f}")
+            print(
+                f"  epoch {epoch:3d}  train={train_loss:.4f}  val={val_loss:.4f}  "
+                f"pearson_r={pearson:.3f}"
+            )
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -575,25 +626,34 @@ def train_model(features: np.ndarray, targets: np.ndarray, *,
 
 # ── CLI ────────────────────────────────────────────────────────────────────
 
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--benchmark", default="ibm01",
-                   help="Single name, comma-separated list, or 'all' for the 17 IBM benchmarks. "
-                        "Example: --benchmark ibm01,ibm02,ibm07")
-    p.add_argument("--num-examples", type=int, default=1500,
-                   help="Per-benchmark example count. Total dataset = N * len(benchmarks).")
+    p.add_argument(
+        "--benchmark",
+        default="ibm01",
+        help="Single name, comma-separated list, or 'all' for the 17 IBM benchmarks. "
+        "Example: --benchmark ibm01,ibm02,ibm07",
+    )
+    p.add_argument(
+        "--num-examples",
+        type=int,
+        default=1500,
+        help="Per-benchmark example count. Total dataset = N * len(benchmarks).",
+    )
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--hidden", type=int, default=64)
     p.add_argument("--val-frac", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--data-out",
-                   default=str(_HERE / "data" / "chain_data.pt"))
-    p.add_argument("--checkpoint-out",
-                   default=str(_HERE / "checkpoints" / "cost_approximator.pt"))
-    p.add_argument("--force-recollect", action="store_true",
-                   help="Re-run data collection even if cached data exists.")
+    p.add_argument("--data-out", default=str(_HERE / "data" / "chain_data.pt"))
+    p.add_argument("--checkpoint-out", default=str(_HERE / "checkpoints" / "cost_approximator.pt"))
+    p.add_argument(
+        "--force-recollect",
+        action="store_true",
+        help="Re-run data collection even if cached data exists.",
+    )
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmark)
@@ -603,8 +663,10 @@ def main():
 
     print(f"=== Phase 3: Cost Approximator ===")
     print(f"  benchmarks = {benchmarks}")
-    print(f"  examples/benchmark = {args.num_examples}, "
-          f"total = {args.num_examples * len(benchmarks)}")
+    print(
+        f"  examples/benchmark = {args.num_examples}, "
+        f"total = {args.num_examples * len(benchmarks)}"
+    )
 
     data_path = Path(args.data_out)
     use_cache = False
@@ -616,28 +678,43 @@ def main():
             singleton = cached.get("benchmark")
             cached_benchmarks = [singleton] if singleton else []
         if set(cached_benchmarks) == set(benchmarks):
-            print(f"\n[1/3] Loading cached data from {data_path}  "
-                  f"(benchmarks match: {sorted(cached_benchmarks)})")
+            print(
+                f"\n[1/3] Loading cached data from {data_path}  "
+                f"(benchmarks match: {sorted(cached_benchmarks)})"
+            )
             features, targets = cached["features"], cached["targets"]
             use_cache = True
         else:
-            print(f"\n[1/3] Cached data covers {sorted(cached_benchmarks)} "
-                  f"but request is {sorted(benchmarks)} — re-collecting")
+            print(
+                f"\n[1/3] Cached data covers {sorted(cached_benchmarks)} "
+                f"but request is {sorted(benchmarks)} — re-collecting"
+            )
 
     if not use_cache:
         print(f"\n[1/3] Collecting on {benchmarks}...")
         features, targets = collect_data(benchmarks, args.num_examples, args.seed)
         data_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"features": features, "targets": targets,
-                    "benchmarks": benchmarks, "feature_dim": FEATURE_DIM},
-                   data_path)
+        torch.save(
+            {
+                "features": features,
+                "targets": targets,
+                "benchmarks": benchmarks,
+                "feature_dim": FEATURE_DIM,
+            },
+            data_path,
+        )
         print(f"  saved {len(features)} examples to {data_path}")
 
     print(f"\n[2/3] Training ({features.shape[0]} examples, {features.shape[1]} feats)...")
     model, info = train_model(
-        features, targets,
-        epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
-        hidden=args.hidden, val_frac=args.val_frac, seed=args.seed,
+        features,
+        targets,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        hidden=args.hidden,
+        val_frac=args.val_frac,
+        seed=args.seed,
     )
 
     print(f"\n[3/3] Final correlation (val):")

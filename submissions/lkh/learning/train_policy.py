@@ -35,8 +35,8 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_HERE.parent.parent))
 
-from lkh_model import ChainPolicy
-from train import parse_benchmarks   # shared CLI helper
+from submissions.lkh.model.lkh_model import ChainPolicy
+from submissions.lkh.learning.train import parse_benchmarks  # shared CLI helper
 
 _spec_placer = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer.py"))
 _placer = importlib.util.module_from_spec(_spec_placer)
@@ -74,6 +74,7 @@ def _load_benchmark_cache(benchmark_names: list[str]) -> dict[str, dict]:
 
 # ── Rollout collection ─────────────────────────────────────────────────────
 
+
 def collect_rollout(env: ChainEnv, policy: ChainPolicy) -> list[dict]:
     """One chain episode using stochastic policy sampling."""
     transitions: list[dict] = []
@@ -97,19 +98,22 @@ def collect_rollout(env: ChainEnv, policy: ChainPolicy) -> list[dict]:
 
         reward, _done, _info = env.step(action, sp["raw_candidates"])
 
-        transitions.append({
-            "global": global_t, "macro": macro_t,
-            "candidates": cands_t, "chain": chain_t,
-            "action": action,
-            "log_prob_old": log_prob_old,
-            "value_old": value.detach(),
-            "reward": float(reward),
-        })
+        transitions.append(
+            {
+                "global": global_t,
+                "macro": macro_t,
+                "candidates": cands_t,
+                "chain": chain_t,
+                "action": action,
+                "log_prob_old": log_prob_old,
+                "value_old": value.detach(),
+                "reward": float(reward),
+            }
+        )
     return transitions
 
 
-def compute_gae(transitions: list[dict], gamma: float = 0.99,
-                lam: float = 0.95) -> list[dict]:
+def compute_gae(transitions: list[dict], gamma: float = 0.99, lam: float = 0.95) -> list[dict]:
     """Generalized Advantage Estimation. Terminal value is 0."""
     last_adv = 0.0
     last_val = 0.0
@@ -125,9 +129,16 @@ def compute_gae(transitions: list[dict], gamma: float = 0.99,
 
 # ── PPO update ─────────────────────────────────────────────────────────────
 
-def ppo_update(policy: ChainPolicy, optimizer: torch.optim.Optimizer,
-               batch: list[dict], clip: float = 0.2, ent_coef: float = 0.01,
-               vf_coef: float = 0.5, epochs: int = 4) -> dict:
+
+def ppo_update(
+    policy: ChainPolicy,
+    optimizer: torch.optim.Optimizer,
+    batch: list[dict],
+    clip: float = 0.2,
+    ent_coef: float = 0.01,
+    vf_coef: float = 0.5,
+    epochs: int = 4,
+) -> dict:
     if not batch:
         return {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
 
@@ -178,15 +189,28 @@ def ppo_update(policy: ChainPolicy, optimizer: torch.optim.Optimizer,
 
 # ── Training loop ──────────────────────────────────────────────────────────
 
-def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
-                        trajectories_per_iter: int, max_chain_length: int,
-                        max_candidates: int, terminal_commit_bonus: float,
-                        seed: int, lr: float, gamma: float, lam: float,
-                        clip: float, ent_coef: float, vf_coef: float,
-                        ppo_epochs: int, output_ckpt: Path,
-                        initial_policy_ckpt: Path | None = None,
-                        log_every: int = 5,
-                        terminal_reward_mode: str = "committed_gain") -> dict:
+
+def train_chain_policy(
+    benchmarks: list[str],
+    *,
+    n_iterations: int,
+    trajectories_per_iter: int,
+    max_chain_length: int,
+    max_candidates: int,
+    terminal_commit_bonus: float,
+    seed: int,
+    lr: float,
+    gamma: float,
+    lam: float,
+    clip: float,
+    ent_coef: float,
+    vf_coef: float,
+    ppo_epochs: int,
+    output_ckpt: Path,
+    initial_policy_ckpt: Path | None = None,
+    log_every: int = 5,
+    terminal_reward_mode: str = "committed_gain",
+) -> dict:
     """PPO training across one or more benchmarks. Each trajectory samples
     a random benchmark from ``benchmarks`` (plan §4.3 semantics)."""
     import random as _random
@@ -199,8 +223,10 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     torch.manual_seed(seed)
 
     print(f"=== Phase 4: PPO chain policy ===")
-    print(f"  benchmarks={benchmarks}  iterations={n_iterations}  "
-          f"traj/iter={trajectories_per_iter}")
+    print(
+        f"  benchmarks={benchmarks}  iterations={n_iterations}  "
+        f"traj/iter={trajectories_per_iter}"
+    )
     print(f"  max_chain_length={max_chain_length}  max_candidates={max_candidates}")
     print(f"  pre-loading {len(benchmarks)} benchmark(s) into RAM...")
     bench_cache = _load_benchmark_cache(benchmarks)
@@ -231,7 +257,9 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
             bc["state"].rebuild_caches()
             seed_macro = rng.choice(bc["movable"])
             env = ChainEnv(
-                bc["state"], seed_macro, rng=rng,
+                bc["state"],
+                seed_macro,
+                rng=rng,
                 max_chain_length=max_chain_length,
                 max_candidates=max_candidates,
                 terminal_commit_bonus=terminal_commit_bonus,
@@ -258,12 +286,17 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                 gain_total += env.start_hpwl - env.state.hpwl()
                 per_bench_commit_count[name] += 1
 
-        metrics = ppo_update(policy, optimizer, all_transitions,
-                             clip=clip, ent_coef=ent_coef, vf_coef=vf_coef,
-                             epochs=ppo_epochs)
+        metrics = ppo_update(
+            policy,
+            optimizer,
+            all_transitions,
+            clip=clip,
+            ent_coef=ent_coef,
+            vf_coef=vf_coef,
+            epochs=ppo_epochs,
+        )
 
-        avg_traj_reward = (sum(t["reward"] for t in all_transitions)
-                           / max(trajectories_per_iter, 1))
+        avg_traj_reward = sum(t["reward"] for t in all_transitions) / max(trajectories_per_iter, 1)
         avg_traj_length = length_total / max(trajectories_per_iter, 1)
         commit_rate = commit_count / max(trajectories_per_iter, 1)
         avg_gain = gain_total / max(commit_count, 1)
@@ -280,13 +313,15 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
 
         if it % log_every == 0 or it == n_iterations - 1:
             elapsed = time.time() - t_start
-            print(f"  it {it:4d}  R/traj={avg_traj_reward:+.4f}  "
-                  f"len={avg_traj_length:.1f}  commit={commit_rate:.0%}  "
-                  f"gain={avg_gain:+.4f}  "
-                  f"pi={metrics['policy_loss']:+.3f}  "
-                  f"vf={metrics['value_loss']:.3f}  "
-                  f"ent={metrics['entropy']:.3f}  "
-                  f"[{elapsed:.1f}s]")
+            print(
+                f"  it {it:4d}  R/traj={avg_traj_reward:+.4f}  "
+                f"len={avg_traj_length:.1f}  commit={commit_rate:.0%}  "
+                f"gain={avg_gain:+.4f}  "
+                f"pi={metrics['policy_loss']:+.3f}  "
+                f"vf={metrics['value_loss']:.3f}  "
+                f"ent={metrics['entropy']:.3f}  "
+                f"[{elapsed:.1f}s]"
+            )
 
     # Per-benchmark commit summary (helps diagnose generalization gaps).
     if len(benchmarks) > 1:
@@ -298,33 +333,42 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
             print(f"    {name:>10}  {n_commit}/{n_traj} = {rate:.0%}")
 
     output_ckpt.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "state_dict": policy.state_dict(),
-        "trained_on": benchmarks,
-        "n_iterations": n_iterations,
-        "hidden": 64,
-    }, output_ckpt)
+    torch.save(
+        {
+            "state_dict": policy.state_dict(),
+            "trained_on": benchmarks,
+            "n_iterations": n_iterations,
+            "hidden": 64,
+        },
+        output_ckpt,
+    )
     print(f"  policy -> {output_ckpt}")
     return {"history": history, "policy": policy}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
 
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--benchmark", default="ibm01",
-                   help="Single name, comma-separated list, or 'all' for the 17 IBM benchmarks.")
+    p.add_argument(
+        "--benchmark",
+        default="ibm01",
+        help="Single name, comma-separated list, or 'all' for the 17 IBM benchmarks.",
+    )
     p.add_argument("--iterations", type=int, default=200)
     p.add_argument("--trajectories-per-iter", type=int, default=4)
     p.add_argument("--max-chain-length", type=int, default=8)
     p.add_argument("--max-candidates", type=int, default=8)
     p.add_argument("--terminal-commit-bonus", type=float, default=0.0)
-    p.add_argument("--terminal-reward-mode",
-                   choices=["committed_gain", "hpwl_telescope_legacy"],
-                   default="committed_gain",
-                   help="D.1: 'committed_gain' = per-step 0 reward + terminal "
-                        "= best-prefix gain (recommended). 'hpwl_telescope_legacy' "
-                        "= per-step -Δhpwl + terminal commit bonus (pre-fix shape).")
+    p.add_argument(
+        "--terminal-reward-mode",
+        choices=["committed_gain", "hpwl_telescope_legacy"],
+        default="committed_gain",
+        help="D.1: 'committed_gain' = per-step 0 reward + terminal "
+        "= best-prefix gain (recommended). 'hpwl_telescope_legacy' "
+        "= per-step -Δhpwl + terminal commit bonus (pre-fix shape).",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--gamma", type=float, default=0.99)
@@ -333,11 +377,8 @@ def main():
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--ppo-epochs", type=int, default=4)
-    p.add_argument("--initial-policy",
-                   default=None,
-                   help="Warm-start checkpoint path (optional)")
-    p.add_argument("--output",
-                   default=str(_HERE / "checkpoints" / "chain_policy.pt"))
+    p.add_argument("--initial-policy", default=None, help="Warm-start checkpoint path (optional)")
+    p.add_argument("--output", default=str(_HERE / "checkpoints" / "chain_policy.pt"))
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmark)
@@ -350,8 +391,13 @@ def main():
         max_candidates=args.max_candidates,
         terminal_commit_bonus=args.terminal_commit_bonus,
         terminal_reward_mode=args.terminal_reward_mode,
-        seed=args.seed, lr=args.lr, gamma=args.gamma, lam=args.lam,
-        clip=args.clip, ent_coef=args.ent_coef, vf_coef=args.vf_coef,
+        seed=args.seed,
+        lr=args.lr,
+        gamma=args.gamma,
+        lam=args.lam,
+        clip=args.clip,
+        ent_coef=args.ent_coef,
+        vf_coef=args.vf_coef,
         ppo_epochs=args.ppo_epochs,
         output_ckpt=Path(args.output),
         initial_policy_ckpt=Path(args.initial_policy) if args.initial_policy else None,
