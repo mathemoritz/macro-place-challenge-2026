@@ -36,7 +36,7 @@ sys.path.insert(0, str(_HERE.parent.parent))  # repo root for macro_place
 
 # Load placer.py without triggering the package __init__ (which fails when
 # the TILOS submodule isn't initialized in some environments).
-_spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer.py"))
+_spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE.parent / "placer.py"))
 _placer = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_placer)
 

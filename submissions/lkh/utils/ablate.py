@@ -52,7 +52,7 @@ sys.path.insert(0, str(_HERE.parent.parent))
 from macro_place.loader import load_benchmark_from_dir
 from macro_place.objective import compute_proxy_cost
 
-_spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer.py"))
+_spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE.parent / "placer.py"))
 placer_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(placer_mod)
 
@@ -60,8 +60,8 @@ _spec.loader.exec_module(placer_mod)
 # Default checkpoint paths used by Milestone mode and the legacy 4-config
 # sweep. ``BOGUS`` forces the corresponding loader inside LKHPlacer to skip.
 _BOGUS_CKPT = Path("/dev/null/does_not_exist.pt")
-_APPROX_CKPT = _HERE / "checkpoints" / "cost_approximator.pt"
-_POLICY_CKPT = _HERE / "checkpoints" / "chain_policy.pt"
+_APPROX_CKPT = _HERE.parent / "checkpoints" / "cost_approximator.pt"
+_POLICY_CKPT = _HERE.parent / "checkpoints" / "chain_policy.pt"
 
 
 def _eval_placement(name: str, placement, benchmark, plc, runtime: float):

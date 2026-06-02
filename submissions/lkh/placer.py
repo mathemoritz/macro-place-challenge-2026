@@ -38,6 +38,11 @@ from macro_place.benchmark import Benchmark
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
+# Ensure the project root is on sys.path so `from submissions.lkh.model...`
+# works when placer.py is loaded as a standalone file (not as a package member).
+_PROJECT_ROOT = str(_HERE.parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 
 # ── HPWL edge graph extraction ─────────────────────────────────────────────

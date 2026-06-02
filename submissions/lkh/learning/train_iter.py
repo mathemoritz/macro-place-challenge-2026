@@ -337,7 +337,7 @@ def evaluate_round(benchmark: str, *, time_budget_s: float = 20.0) -> dict:
     from macro_place.loader import load_benchmark_from_dir
     from macro_place.objective import compute_proxy_cost
 
-    _spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer.py"))
+    _spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE.parent / "placer.py"))
     placer_mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(placer_mod)
 

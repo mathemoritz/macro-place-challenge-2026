@@ -33,7 +33,7 @@ matplotlib.use("Agg")  # headless backend
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-_spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE / "placer.py"))
+_spec = importlib.util.spec_from_file_location("lkh_placer", str(_HERE.parent / "placer.py"))
 placer_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(placer_mod)
 
