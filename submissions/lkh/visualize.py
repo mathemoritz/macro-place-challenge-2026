@@ -213,6 +213,11 @@ def main():
                    help="Displacement arrows on the right panel: 'same' = from "
                    "the left-panel placement; 'raw' = from shipped initial.plc "
                    "(use with --initial legalized to show total motion).")
+    p.add_argument("--gate-mode", choices=("hpwl", "predicted_proxy"),
+                   default="hpwl")
+    p.add_argument("--reg-weight", type=float, default=0.0)
+    p.add_argument("--use-wiremask", action="store_true")
+    p.add_argument("--use-position-mask", action="store_true")
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmark)
@@ -247,6 +252,10 @@ def main():
             time_budget_s=args.time_budget,
             max_chains=args.max_chains,
             max_chain_length=args.max_chain_length,
+            gate_mode=args.gate_mode,
+            reg_weight=args.reg_weight,
+            use_wiremask=args.use_wiremask,
+            use_position_mask=args.use_position_mask,
         )
         t0 = time.time()
         final = placer.place(bench)

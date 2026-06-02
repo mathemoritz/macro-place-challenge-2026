@@ -1108,12 +1108,42 @@ def _load_chain_policy(ckpt_path: Path):
     )
     policy.load_state_dict(ckpt["state_dict"])
     policy.eval()
+
+    # Step 3: if the checkpoint carries a co-trained StateEncoder, rebuild it
+    # and hand it back in the bundle so the placer can feed its embeddings at
+    # inference (the policy's forward already accepts encoder_global/macro).
+    # Checkpoints without an encoder leave encoder=None → legacy path.
+    encoder = None
+    enc_global_dim = int(ckpt.get("encoder_global_dim", 0))
+    enc_state = ckpt.get("encoder_state_dict")
+    if enc_global_dim > 0 and enc_state is not None:
+        try:
+            spec_enc = _ilu.spec_from_file_location(
+                "lkh_encoder", str(_HERE / "encoder.py"))
+            enc_mod = _ilu.module_from_spec(spec_enc)
+            spec_enc.loader.exec_module(enc_mod)
+            encoder = enc_mod.StateEncoder(
+                hidden_dim=int(ckpt.get("encoder_hidden", 64)),
+                num_gnn_layers=3,
+                grid_size=int(ckpt.get("encoder_grid_size", 64)),
+            )
+            encoder.load_state_dict(enc_state)
+            encoder.eval()
+        except Exception as exc:                                   # noqa: BLE001
+            # A malformed/incompatible encoder must not break inference; the
+            # policy still runs on hand-crafted features (it was trained with
+            # the encoder, so this is a degraded but valid fallback).
+            print(f"[LKHPlacer] encoder reconstruct failed ({exc}); "
+                  f"running policy without encoder")
+            encoder = None
+
     return {
         "policy": policy,
         "ChainEnv": env_mod.ChainEnv,
         "trained_on": ckpt.get("trained_on"),
         "n_iterations": ckpt.get("n_iterations"),
-        "encoder_global_dim": int(ckpt.get("encoder_global_dim", 0)),
+        "encoder": encoder,
+        "encoder_global_dim": enc_global_dim,
         "encoder_macro_dim": int(ckpt.get("encoder_macro_dim", 0)),
         "encoder_grid_size": int(ckpt.get("encoder_grid_size", 64)),
         "encoder_hidden": int(ckpt.get("encoder_hidden", 64)),
@@ -1437,6 +1467,78 @@ class LKChain:
                 "overlap_delta": 0, "best_prefix_index": 0}
 
 
+# ── Analytical warm start (Step 2: warm-start ablation) ────────────────────
+
+def _analytical_warmstart(state: PlacementState, *, n_iters: int = 40,
+                          anchor_pull: float = 1.0) -> np.ndarray:
+    """Pure-numpy quadratic / force-directed global placement.
+
+    Step 2 of the "what's holding us back" plan: the placer currently only
+    *refines* the challenge-provided ``initial.plc``, which already sits near
+    proxy 1.46. Refining a near-optimal placement is a different (and
+    lower-headroom) problem than placing from scratch — so we need a way to
+    seed the chain loop from something other than ``initial.plc`` to tell
+    whether the method has real optimization power or is only polishing.
+
+    This is the analytical-warm-start arm (RePlAce/DREAMPlace are external
+    tools that can't run under the judges' ``--network none`` image; this is
+    a self-contained stand-in in their spirit). Each movable hard macro is
+    relaxed (Jacobi sweeps) toward the weighted centroid of (a) its connected
+    hard-macro neighbours and (b) its fixed terminals (soft macros + IO
+    ports), using the same HPWL-surrogate edge weights the chain loop uses.
+    The fixed anchors are the boundary conditions that stop everything from
+    collapsing to a single point — exactly the role of fixed pins in classic
+    quadratic placement.
+
+    Returns a new ``[N, 2]`` position array. The result generally has
+    overlaps (analytical placers ignore them); the chain loop's overlap-aware
+    commit gate and the final ``_legalize`` pass drive overlaps back to zero,
+    so callers should ``rebuild_caches()`` and run the loop as usual.
+    """
+    n = state.n
+    pos = state.pos.copy()
+    movable = state.movable
+    if n == 0:
+        return pos
+
+    # Pre-extract per-macro fixed-anchor contributions (constant across sweeps).
+    hf_anchor_x = [np.zeros(0) for _ in range(n)]
+    hf_anchor_y = [np.zeros(0) for _ in range(n)]
+    hf_w = [np.zeros(0) for _ in range(n)]
+    for i in range(n):
+        hf_idx = state.macro_hf_indices[i]
+        if len(hf_idx) > 0:
+            hf_anchor_x[i] = state.hf_anchors[hf_idx, 0]
+            hf_anchor_y[i] = state.hf_anchors[hf_idx, 1]
+            hf_w[i] = state.hf_weights[hf_idx]
+
+    for _ in range(n_iters):
+        new_pos = pos.copy()
+        for i in range(n):
+            if not movable[i]:
+                continue
+            ax = ay = wsum = 0.0
+            # Connected hard-macro neighbours (current positions).
+            nw = state.neighbor_weight[i]
+            if nw:
+                for j, w in nw.items():
+                    ax += w * pos[j, 0]
+                    ay += w * pos[j, 1]
+                    wsum += w
+            # Fixed terminals (soft macros + IO ports).
+            if len(hf_w[i]) > 0:
+                wf = hf_w[i]
+                ax += anchor_pull * float((wf * hf_anchor_x[i]).sum())
+                ay += anchor_pull * float((wf * hf_anchor_y[i]).sum())
+                wsum += anchor_pull * float(wf.sum())
+            if wsum > 1e-12:
+                nx, ny = state.clamp(i, ax / wsum, ay / wsum)
+                new_pos[i, 0] = nx
+                new_pos[i, 1] = ny
+        pos = new_pos
+    return pos
+
+
 # ── Submission placer ──────────────────────────────────────────────────────
 
 class LKHPlacer:
@@ -1463,7 +1565,22 @@ class LKHPlacer:
                  reg_weight: float = 0.0,
                  use_wiremask: bool = False,
                  use_position_mask: bool = False,
-                 encoder=None):
+                 encoder=None,
+                 init_mode: str = "initial"):
+        # Step 2 (warm-start ablation): where the chain loop starts from.
+        #   "initial"    — the challenge-provided initial.plc (default, the
+        #                  competition entry behaviour; unchanged).
+        #   "random"     — every movable hard macro placed uniformly at random
+        #                  in its legal box. Tests raw optimization power.
+        #   "analytical" — a self-contained quadratic / force-directed global
+        #                  placement (``_analytical_warmstart``) in the spirit
+        #                  of RePlAce/DREAMPlace.
+        if init_mode not in ("initial", "random", "analytical"):
+            raise ValueError(
+                f"unknown init_mode={init_mode!r}; expected 'initial', "
+                f"'random', or 'analytical'"
+            )
+        self.init_mode = init_mode
         self.seed = seed
         self.time_budget_s = time_budget_s
         self.max_chains = max_chains
@@ -1518,6 +1635,14 @@ class LKHPlacer:
                 print(f"[LKHPlacer] chain policy loaded "
                       f"(iters={self.policy_bundle.get('n_iterations')}, "
                       f"trained on {self.policy_bundle.get('trained_on')})")
+                # Step 3: if the policy shipped with a co-trained encoder and
+                # the caller didn't pass one explicitly, attach it so the
+                # chain feeds the GNN+CNN embeddings the policy expects.
+                if self.encoder is None and self.policy_bundle.get("encoder") is not None:
+                    self.encoder = self.policy_bundle["encoder"]
+                    print(f"[LKHPlacer] using co-trained StateEncoder "
+                          f"(grid={self.policy_bundle.get('encoder_grid_size')}, "
+                          f"hidden={self.policy_bundle.get('encoder_hidden')})")
             else:
                 print(f"[LKHPlacer] no policy at {policy_ckpt} — using greedy chains")
 
@@ -1559,6 +1684,24 @@ class LKHPlacer:
         movable_idx = np.where(state.movable)[0].tolist()
         if not movable_idx:
             return benchmark.macro_positions.clone()
+
+        # Step 2 (warm-start ablation): optionally replace the initial.plc
+        # starting positions before the chain loop runs. Bulk pos writes
+        # bypass apply_move, so rebuild_caches() afterward (the B.3 contract).
+        if self.init_mode == "random":
+            for i in movable_idx:
+                state.pos[i, 0] = rng.uniform(state.half_w[i],
+                                              state.cw - state.half_w[i])
+                state.pos[i, 1] = rng.uniform(state.half_h[i],
+                                              state.ch - state.half_h[i])
+            state.rebuild_caches()
+            print(f"[LKHPlacer] init_mode=random: scattered {len(movable_idx)} "
+                  f"movable macros (overlap_pairs={state.overlap_pairs()})")
+        elif self.init_mode == "analytical":
+            state.pos[:] = _analytical_warmstart(state)
+            state.rebuild_caches()
+            print(f"[LKHPlacer] init_mode=analytical: quadratic warm start "
+                  f"(hpwl={state.hpwl():.2f}, overlap_pairs={state.overlap_pairs()})")
 
         # Cost-weighted seed sampling: macros with highest neighbor-displacement
         # are sampled more often. Falls back to uniform if no edges.

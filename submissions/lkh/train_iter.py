@@ -95,7 +95,13 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               reg_weight: float = 0.0,
               use_wiremask: bool = False,
               use_position_mask: bool = False,
-              use_reg_feature: bool = False) -> dict:
+              use_reg_feature: bool = False,
+              rank_loss_enabled: bool = True,
+              rank_weight: float = 1.0,
+              rank_margin: float = 0.1,
+              use_encoder: bool = False,
+              encoder_hidden: int = 64,
+              encoder_grid: int = 64) -> dict:
     """Run one round of Phase 3 + Phase 4 + per-benchmark evaluation.
 
     Canonical writes (so the placer can find the latest checkpoints) go to
@@ -194,6 +200,9 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         features, targets, epochs=cost_epochs, batch_size=64,
         lr=1e-3, hidden=64, val_frac=0.2, seed=seed + round_idx,
         n_calibration_samples=n_calibration_samples,
+        rank_loss_enabled=rank_loss_enabled,
+        rank_weight=rank_weight,
+        rank_margin=rank_margin,
     )
     cost_ckpt.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
@@ -231,6 +240,9 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         use_position_mask=use_position_mask,
         approximator_ckpt=cost_ckpt,
         use_reg_feature=use_reg_feature,
+        use_encoder=use_encoder,
+        encoder_hidden=encoder_hidden,
+        encoder_grid=encoder_grid,
     )
 
     # ── Step 3: end-to-end evaluation on every benchmark ──────────────────
@@ -420,6 +432,23 @@ def main():
     p.add_argument("--gate-mode", choices=("hpwl", "predicted_proxy"),
                    default="hpwl",
                    help="E.1: third lex coord of the commit gate.")
+    # Step 1 (ranking lever): expose the rank-loss knobs to the iterative
+    # loop so a full-suite rank-weight sweep is a single flag.
+    p.add_argument("--rank-weight", type=float, default=1.0,
+                   help="Weight on the CostApproximator's within-state pairwise "
+                        "rank loss (Fix B). 0.0 = pure regression baseline.")
+    p.add_argument("--rank-margin", type=float, default=0.1,
+                   help="Margin for the rank loss (normalized-target units).")
+    p.add_argument("--no-rank-loss", action="store_true",
+                   help="Disable the pairwise rank loss entirely.")
+    # Step 3 (encoder wiring): co-train the GNN+CNN encoder with the policy.
+    p.add_argument("--use-encoder", action="store_true",
+                   help="Co-train the GNN+CNN StateEncoder and feed its "
+                        "embeddings to the policy (and at inference).")
+    p.add_argument("--encoder-hidden", type=int, default=64,
+                   help="StateEncoder hidden dim. Default 64.")
+    p.add_argument("--encoder-grid", type=int, default=64,
+                   help="Per-macro mask raster resolution. Default 64.")
     args = p.parse_args()
 
     if args.preset is not None:
@@ -473,6 +502,12 @@ def main():
             use_wiremask=args.use_wiremask,
             use_position_mask=args.use_position_mask,
             use_reg_feature=args.use_reg_feature,
+            rank_loss_enabled=not args.no_rank_loss,
+            rank_weight=args.rank_weight,
+            rank_margin=args.rank_margin,
+            use_encoder=args.use_encoder,
+            encoder_hidden=args.encoder_hidden,
+            encoder_grid=args.encoder_grid,
         )
         history.append(record)
         # Stream the aggregated history to disk after every round so a crash

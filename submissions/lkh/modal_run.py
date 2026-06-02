@@ -372,6 +372,194 @@ def collect_one_benchmark_modal(name: str, num_examples: int, seed: int) -> dict
             "wall_s": float(wall), "from_cache": False}
 
 
+# ---------------------------------------------------------------------------
+# Multi-seed inference overfit (no training). Each container runs ablate.py
+# once on (benchmark, seed) with a fat per-seed time budget; the orchestrator
+# fans out via .starmap() and takes the lex-best across seeds.
+# ---------------------------------------------------------------------------
+
+@app.function(image=image, volumes={"/output": volume},
+              cpu=2.0, memory=4096, timeout=2 * 3600,
+              max_containers=100)
+def run_one_overfit_seed(benchmark: str, seed: int, time_budget_s: float,
+                         max_chains: int, max_chain_length: int,
+                         reg_weight: float, use_wiremask: bool,
+                         use_position_mask: bool, milestone: str,
+                         ckpt_source: str) -> dict:
+    """One (benchmark, seed) inference run via ablate.py.
+
+    If ``ckpt_source`` is non-empty, files under that volume path are copied
+    into ``submissions/lkh/checkpoints/`` so the placer loads our best
+    cost-approximator / chain-policy instead of the repo defaults.
+    """
+    import json
+    import time as _t
+    from pathlib import Path
+    _setup_env()
+
+    if ckpt_source:
+        src = Path(ckpt_source)
+        dst = Path("/root/repo/submissions/lkh/checkpoints")
+        dst.mkdir(parents=True, exist_ok=True)
+        for fname in ("cost_approximator.pt", "chain_policy.pt"):
+            sf = src / fname
+            if sf.exists():
+                shutil.copy2(sf, dst / fname)
+                print(f"[seed {seed}] using {sf}")
+
+    history_path = Path(f"/tmp/overfit_{benchmark}_seed{seed}.json")
+    if history_path.exists():
+        history_path.unlink()
+
+    cmd = ["python", "submissions/lkh/ablate.py",
+           "--benchmark", benchmark,
+           "--seed", str(seed),
+           "--time-budget", str(time_budget_s),
+           "--max-chains", str(max_chains),
+           "--max-chain-length", str(max_chain_length),
+           "--milestone", milestone,
+           "--history-file", str(history_path)]
+    if reg_weight > 0:
+        cmd += ["--reg-weight", str(reg_weight)]
+    if use_wiremask:
+        cmd += ["--use-wiremask"]
+    if use_position_mask:
+        cmd += ["--use-position-mask"]
+
+    t0 = _t.time()
+    _run(cmd)
+    wall = _t.time() - t0
+
+    history = json.loads(history_path.read_text())
+    record = history[-1] if isinstance(history, list) else history
+    per_bench = record["per_benchmark"][benchmark]
+    return {"seed": seed, "wall_s": wall, **per_bench}
+
+
+@app.function(image=image, volumes={"/output": volume},
+              cpu=2.0, memory=4096, timeout=12 * 3600,
+              nonpreemptible=True)
+def run_overfit_sweep_all(benchmarks: list, n_seeds: int, base_seed: int,
+                          time_budget_s: float, max_chains: int,
+                          max_chain_length: int, reg_weight: float,
+                          use_wiremask: bool, use_position_mask: bool,
+                          milestone: str, output_tag: str,
+                          ckpt_source: str) -> None:
+    """All-benchmarks multi-seed overfit. Fans out (bench × seed), lex-bests per bench."""
+    import json
+    from pathlib import Path
+    from collections import defaultdict
+
+    out_dir = Path(f"/output/{output_tag}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    configs = []
+    for bench in benchmarks:
+        for i in range(n_seeds):
+            configs.append((bench, base_seed + i, time_budget_s, max_chains,
+                            max_chain_length, reg_weight, use_wiremask,
+                            use_position_mask, milestone, ckpt_source))
+
+    print(f"=== overfit sweep across {len(benchmarks)} benches × {n_seeds} seeds "
+          f"= {len(configs)} containers ===")
+    print(f"  time_budget={time_budget_s}s  milestone={milestone}  "
+          f"wm={use_wiremask}  pm={use_position_mask}  reg={reg_weight}")
+    print(f"  ckpt_source={ckpt_source or '(repo default)'}")
+
+    # Re-map results to (bench, seed) -> record. starmap returns in input order,
+    # so we zip back with configs.
+    all_results: dict[str, list[dict]] = defaultdict(list)
+    n_done = 0
+    for cfg, res in zip(configs, run_one_overfit_seed.starmap(configs)):
+        bench = cfg[0]
+        res = dict(res)
+        res["benchmark"] = bench
+        all_results[bench].append(res)
+        n_done += 1
+        if n_done % 10 == 0 or n_done == len(configs):
+            (out_dir / "all_seeds.json").write_text(
+                json.dumps({b: rs for b, rs in all_results.items()}, indent=2))
+            volume.commit()
+            print(f"  [{n_done}/{len(configs)}] {bench} seed={res['seed']} "
+                  f"proxy={res['proxy']:.4f} overlaps={res.get('overlaps', 0)}")
+
+    # Final per-bench best (lex by overlaps then proxy)
+    per_bench_best = {}
+    for bench, rs in all_results.items():
+        b = min(rs, key=lambda r: (r.get("overlaps", 0), r["proxy"]))
+        per_bench_best[bench] = b
+
+    summary = {
+        "best_per_benchmark": per_bench_best,
+        "n_seeds_per_benchmark": n_seeds,
+        "config": {
+            "time_budget_s": time_budget_s,
+            "max_chains": max_chains,
+            "max_chain_length": max_chain_length,
+            "reg_weight": reg_weight,
+            "use_wiremask": use_wiremask,
+            "use_position_mask": use_position_mask,
+            "milestone": milestone,
+            "ckpt_source": ckpt_source,
+        },
+    }
+    (out_dir / "best_per_bench.json").write_text(json.dumps(summary, indent=2))
+    (out_dir / "all_seeds.json").write_text(
+        json.dumps({b: rs for b, rs in all_results.items()}, indent=2))
+    volume.commit()
+
+    print(f"\n=== best per benchmark ===")
+    for bench in sorted(per_bench_best):
+        b = per_bench_best[bench]
+        print(f"  {bench}: seed={b['seed']:>3}  proxy={b['proxy']:.4f}  "
+              f"overlaps={b.get('overlaps', 0):>3}  wall={b['wall_s']:.1f}s")
+
+
+@app.function(image=image, volumes={"/output": volume},
+              cpu=2.0, memory=4096, timeout=12 * 3600,
+              nonpreemptible=True)
+def run_overfit_sweep(benchmark: str, n_seeds: int, base_seed: int,
+                      time_budget_s: float, max_chains: int,
+                      max_chain_length: int, reg_weight: float,
+                      use_wiremask: bool, use_position_mask: bool,
+                      milestone: str, output_tag: str,
+                      ckpt_source: str) -> None:
+    """Orchestrator: fan out N seeds, write seeds.json + a brief summary."""
+    import json
+    from pathlib import Path
+
+    out_dir = Path(f"/output/{output_tag}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    configs = [(benchmark, base_seed + i, time_budget_s, max_chains,
+                max_chain_length, reg_weight, use_wiremask,
+                use_position_mask, milestone, ckpt_source)
+               for i in range(n_seeds)]
+
+    print(f"=== overfit sweep on {benchmark} ===")
+    print(f"  {n_seeds} seeds @ {time_budget_s}s each, milestone={milestone}, "
+          f"wm={use_wiremask}, pm={use_position_mask}, reg={reg_weight}")
+    print(f"  ckpt_source={ckpt_source or '(repo default)'}")
+    print(f"  -> {out_dir}/seeds.json")
+
+    results: list[dict] = []
+    for res in run_one_overfit_seed.starmap(configs):
+        results.append(res)
+        (out_dir / "seeds.json").write_text(json.dumps(results, indent=2))
+        volume.commit()
+        print(f"  seed={res['seed']:>4}  proxy={res['proxy']:.4f}  "
+              f"overlaps={res.get('overlaps', 0):>3}  "
+              f"wall={res['wall_s']:.1f}s")
+
+    best = min(results,
+               key=lambda r: (r.get("overlaps", 0), r["proxy"]))
+    print(f"\n=== best of {len(results)} seeds ===")
+    print(f"  seed={best['seed']}  proxy={best['proxy']:.4f}  "
+          f"overlaps={best.get('overlaps', 0)}")
+    (out_dir / "best.json").write_text(json.dumps(best, indent=2))
+    volume.commit()
+
+
 # Named hyperparameter bundles for ``iter_ --preset <name>``. Override any field
 # on the CLI (e.g. ``--output-tag iter_exp2``). Use distinct ``output_tag`` values
 # when launching parallel jobs on the same volume.
@@ -768,3 +956,73 @@ def iter_(preset: str = "", benchmark: str = "", rounds: int = 0,
     label = f"run_iter ({preset or 'custom'})"
     print(f"=== iter_ → /output/{params['output_tag']} ===")
     _spawn_iter(run_iter, label, **params)
+
+
+@app.local_entrypoint()
+def overfit_inference(benchmark: str = "ibm09", n_seeds: int = 32,
+                      base_seed: int = 42, time_budget: float = 300.0,
+                      max_chains: int = 2000, max_chain_length: int = 8,
+                      reg_weight: float = 0.05,
+                      use_wiremask: bool = True,
+                      use_position_mask: bool = True,
+                      milestone: str = "E",
+                      output_tag: str = "overfit_inf_ibm09",
+                      ckpt_source: str = "/output/iter_v5_pp_reg/checkpoints") -> None:
+    """Multi-seed inference overfit on a single benchmark (background spawn).
+
+    Default config = milestone E (predicted_proxy + policy) + WM + PM + reg,
+    using the v5 round-1 checkpoints, 32 seeds × 300 s on ibm09.
+    Total wall-time ≈ 5-10 min (50 containers in parallel).
+    """
+    call = run_overfit_sweep.spawn(
+        benchmark=benchmark, n_seeds=n_seeds, base_seed=base_seed,
+        time_budget_s=time_budget, max_chains=max_chains,
+        max_chain_length=max_chain_length, reg_weight=reg_weight,
+        use_wiremask=use_wiremask, use_position_mask=use_position_mask,
+        milestone=milestone, output_tag=output_tag,
+        ckpt_source=ckpt_source,
+    )
+    _print_spawn_handle(call, f"overfit_inference ({benchmark}, {n_seeds} seeds)")
+    print(f"\n  benchmark={benchmark}  n_seeds={n_seeds}  "
+          f"time_budget={time_budget}s  milestone={milestone}")
+    print(f"  wm={use_wiremask}  pm={use_position_mask}  reg={reg_weight}")
+    print(f"  ckpt_source={ckpt_source or '(repo default)'}")
+    print(f"  output -> /output/{output_tag}/")
+
+
+@app.local_entrypoint()
+def overfit_inference_all(n_seeds: int = 24, base_seed: int = 100,
+                          time_budget: float = 240.0,
+                          max_chains: int = 3000,
+                          max_chain_length: int = 10,
+                          reg_weight: float = 0.05,
+                          use_wiremask: bool = True,
+                          use_position_mask: bool = True,
+                          milestone: str = "E",
+                          output_tag: str = "overfit_inf_all",
+                          ckpt_source: str = "/output/iter_v5_pp_reg/checkpoints") -> None:
+    """Multi-seed inference overfit across ALL 17 IBM benchmarks (background spawn).
+
+    Fans out ``17 * n_seeds`` containers in parallel (50 at a time), each
+    running ablate.py once on (benchmark, seed). Reports per-bench lex-best.
+
+    Default: 17 benches × 24 seeds × 240s, milestone E + WM + PM + reg.
+    Wall-time ≈ 25-40 min with max_containers=50.
+    """
+    benches = ["ibm01","ibm02","ibm03","ibm04","ibm06","ibm07","ibm08","ibm09",
+               "ibm10","ibm11","ibm12","ibm13","ibm14","ibm15","ibm16","ibm17","ibm18"]
+    call = run_overfit_sweep_all.spawn(
+        benchmarks=benches, n_seeds=n_seeds, base_seed=base_seed,
+        time_budget_s=time_budget, max_chains=max_chains,
+        max_chain_length=max_chain_length, reg_weight=reg_weight,
+        use_wiremask=use_wiremask, use_position_mask=use_position_mask,
+        milestone=milestone, output_tag=output_tag,
+        ckpt_source=ckpt_source,
+    )
+    _print_spawn_handle(call, f"overfit_inference_all ({len(benches)}b × {n_seeds}s)")
+    print(f"\n  benchmarks={len(benches)}  n_seeds={n_seeds}  "
+          f"total={len(benches) * n_seeds} containers")
+    print(f"  time_budget={time_budget}s  milestone={milestone}")
+    print(f"  wm={use_wiremask}  pm={use_position_mask}  reg={reg_weight}")
+    print(f"  ckpt_source={ckpt_source or '(repo default)'}")
+    print(f"  output -> /output/{output_tag}/")

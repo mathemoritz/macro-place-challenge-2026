@@ -815,6 +815,21 @@ def main():
                         "Invalidates existing 16-d checkpoints; saves "
                         "use_reg_feature=True in the new ckpt for "
                         "downstream loader compatibility.")
+    # Step 1 (ranking lever): the placer picks moves by argmin over the
+    # approximator's per-candidate scores, so within-state *ranking* — not
+    # amplitude — is what matters. The pairwise margin rank loss (Fix B) is
+    # on by default but its strength was previously hardcoded; expose it so
+    # the rank-weight=0 vs >0 ablation is a one-flag change.
+    p.add_argument("--rank-weight", type=float, default=1.0,
+                   help="Weight on the within-state pairwise margin rank loss. "
+                        "0.0 = pure Smooth-L1 regression (the ablation baseline); "
+                        ">1.0 leans harder on ranking. Default 1.0.")
+    p.add_argument("--rank-margin", type=float, default=0.1,
+                   help="Margin (in normalized-target units) for the rank loss. "
+                        "Default 0.1.")
+    p.add_argument("--no-rank-loss", action="store_true",
+                   help="Disable the pairwise rank loss entirely (equivalent to "
+                        "--rank-weight 0 but also skips pair construction).")
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmark)
@@ -866,6 +881,9 @@ def main():
         features, targets,
         epochs=args.epochs, batch_size=args.batch_size, lr=args.lr,
         hidden=args.hidden, val_frac=args.val_frac, seed=args.seed,
+        rank_loss_enabled=not args.no_rank_loss,
+        rank_weight=args.rank_weight,
+        rank_margin=args.rank_margin,
     )
 
     print(f"\n[3/3] Final correlation (val):")
@@ -885,6 +903,7 @@ def main():
         "feature_dim": features.shape[1],
         "hidden": args.hidden,
         "pearson_r_val": info["pearson"],
+        "spearman_r_val": info["spearman"],
         "trained_on": benchmarks,
         "n_train": info["n_train"],
         "n_val": info["n_val"],

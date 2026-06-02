@@ -74,9 +74,26 @@ def _load_benchmark_cache(benchmark_names: list[str]) -> dict[str, dict]:
 
 # ── Rollout collection ─────────────────────────────────────────────────────
 
-def collect_rollout(env: ChainEnv, policy: ChainPolicy) -> list[dict]:
-    """One chain episode using stochastic policy sampling."""
+def collect_rollout(env: ChainEnv, policy: ChainPolicy, *,
+                    encoder=None, enc_mod=None, enc_grid: int = 64) -> list[dict]:
+    """One chain episode using stochastic policy sampling.
+
+    Step 3 (encoder wiring): when ``encoder`` is supplied we feed the policy
+    the GNN+CNN embeddings alongside the hand-crafted features. The GNN inputs
+    (node features + edges) are built ONCE at chain start and reused across the
+    chain's steps — identical to the inference-time caching in
+    ``ChainEnv.state_for_policy`` — while the CNN per-macro raster is rebuilt
+    each step. We store the *raw* encoder inputs (not the embeddings) in each
+    transition so ``ppo_update`` can recompute the encoder forward WITH
+    gradients and actually train it; the no-grad forward here is only for
+    action sampling. The encoder is intentionally NOT attached to ``env`` so
+    its inference path (detached, numpy) and this training path don't collide.
+    """
     transitions: list[dict] = []
+    enc_nf = enc_ei = enc_ea = None
+    if encoder is not None:
+        enc_nf = enc_mod.build_node_features(env.state)
+        enc_ei, enc_ea = enc_mod.build_edge_index_and_attr(env.state)
     while not env.done:
         sp = env.state_for_policy()
         K = sp["candidates"].shape[0]
@@ -89,8 +106,22 @@ def collect_rollout(env: ChainEnv, policy: ChainPolicy) -> list[dict]:
         cands_t = torch.from_numpy(sp["candidates"])
         chain_t = torch.from_numpy(sp["chain"])
 
+        enc_g_t = enc_m_t = None
+        enc_canvas = None
+        enc_macro_idx = None
+        if encoder is not None:
+            enc_macro_idx = int(env.current_macro)
+            enc_canvas = enc_mod.rasterize_canvas(
+                env.state, idx=enc_macro_idx, grid_size=enc_grid)
+            with torch.no_grad():
+                _h, _g = encoder.gnn(enc_nf, enc_ei, enc_ea)
+                _cnn = encoder.cnn(enc_canvas)
+                enc_g_t = torch.cat([_g, _cnn], dim=-1)
+                enc_m_t = _h[enc_macro_idx]
+
         with torch.no_grad():
-            logits, value = policy(global_t, macro_t, cands_t, chain_t)
+            logits, value = policy(global_t, macro_t, cands_t, chain_t,
+                                   encoder_global=enc_g_t, encoder_macro=enc_m_t)
         probs = F.softmax(logits, dim=-1)
         action = int(torch.multinomial(probs, 1).item())
         log_prob_old = F.log_softmax(logits, dim=-1)[action].detach()
@@ -104,6 +135,9 @@ def collect_rollout(env: ChainEnv, policy: ChainPolicy) -> list[dict]:
             "log_prob_old": log_prob_old,
             "value_old": value.detach(),
             "reward": float(reward),
+            # Step 3: raw encoder inputs for the grad-enabled recompute.
+            "enc_nf": enc_nf, "enc_ei": enc_ei, "enc_ea": enc_ea,
+            "enc_canvas": enc_canvas, "enc_macro_idx": enc_macro_idx,
         })
     return transitions
 
@@ -127,7 +161,7 @@ def compute_gae(transitions: list[dict], gamma: float = 0.99,
 
 def ppo_update(policy: ChainPolicy, optimizer: torch.optim.Optimizer,
                batch: list[dict], clip: float = 0.2, ent_coef: float = 0.01,
-               vf_coef: float = 0.5, epochs: int = 4) -> dict:
+               vf_coef: float = 0.5, epochs: int = 4, encoder=None) -> dict:
     if not batch:
         return {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
 
@@ -136,6 +170,12 @@ def ppo_update(policy: ChainPolicy, optimizer: torch.optim.Optimizer,
     for i, t in enumerate(batch):
         t["adv_norm"] = float(advs[i].item())
 
+    # Step 3: when an encoder is co-trained, its parameters join the policy's
+    # in the gradient-clip set (the optimizer already covers both).
+    clip_params = list(policy.parameters())
+    if encoder is not None:
+        clip_params = clip_params + list(encoder.parameters())
+
     metrics = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
     n_updates = 0
     indices = list(range(len(batch)))
@@ -143,7 +183,18 @@ def ppo_update(policy: ChainPolicy, optimizer: torch.optim.Optimizer,
         np.random.shuffle(indices)
         for idx in indices:
             t = batch[idx]
-            logits, value = policy(t["global"], t["macro"], t["candidates"], t["chain"])
+            # Step 3: recompute encoder embeddings WITH gradients from the raw
+            # inputs stored at rollout time. This is what actually trains the
+            # encoder — the rollout's forward was no-grad (sampling only).
+            enc_g = enc_m = None
+            if encoder is not None and t.get("enc_nf") is not None:
+                _h, _g = encoder.gnn(t["enc_nf"], t["enc_ei"], t["enc_ea"])
+                _cnn = encoder.cnn(t["enc_canvas"])
+                enc_g = torch.cat([_g, _cnn], dim=-1)
+                enc_m = _h[t["enc_macro_idx"]]
+            logits, value = policy(t["global"], t["macro"], t["candidates"],
+                                   t["chain"], encoder_global=enc_g,
+                                   encoder_macro=enc_m)
             log_probs = F.log_softmax(logits, dim=-1)
             probs = F.softmax(logits, dim=-1)
             log_prob_new = log_probs[t["action"]]
@@ -162,7 +213,7 @@ def ppo_update(policy: ChainPolicy, optimizer: torch.optim.Optimizer,
 
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+            nn.utils.clip_grad_norm_(clip_params, 0.5)
             optimizer.step()
 
             metrics["policy_loss"] += float(policy_loss.item())
@@ -192,9 +243,18 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                         use_wiremask: bool = False,
                         use_position_mask: bool = False,
                         approximator_ckpt: Path | None = None,
-                        use_reg_feature: bool = False) -> dict:
+                        use_reg_feature: bool = False,
+                        use_encoder: bool = False,
+                        encoder_hidden: int = 64,
+                        encoder_grid: int = 64) -> dict:
     """PPO training across one or more benchmarks. Each trajectory samples
-    a random benchmark from ``benchmarks`` (plan §4.3 semantics)."""
+    a random benchmark from ``benchmarks`` (plan §4.3 semantics).
+
+    Step 3 (encoder wiring): when ``use_encoder`` is True a ``StateEncoder``
+    (GNN over the netlist + CNN over the per-macro mask raster) is co-trained
+    with the policy and its weights are saved into the same checkpoint, so the
+    placer's loader can reconstruct it and feed its embeddings at inference.
+    """
     import random as _random
 
     if not benchmarks:
@@ -216,21 +276,60 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     # to 17 when use_reg_feature is on.
     from lkh_model import FEATURE_DIM
     cand_dim = (FEATURE_DIM + 1) if use_reg_feature else FEATURE_DIM
-    policy = ChainPolicy(hidden=64, cand_dim=cand_dim)
+
+    # Step 3: build the encoder (if requested) before the policy so the policy
+    # can be sized to accept its embeddings. encoder_global = cat(graph_pool,
+    # cnn) has width 2*hidden; encoder_macro = per-node embedding has width
+    # hidden. Load encoder.py via importlib (matches chain_env's pattern).
+    encoder = None
+    enc_mod = None
+    encoder_global_dim = 0
+    encoder_macro_dim = 0
+    if use_encoder:
+        _spec_enc = importlib.util.spec_from_file_location(
+            "lkh_encoder", str(_HERE / "encoder.py"))
+        enc_mod = importlib.util.module_from_spec(_spec_enc)
+        _spec_enc.loader.exec_module(enc_mod)
+        encoder = enc_mod.StateEncoder(hidden_dim=encoder_hidden,
+                                       num_gnn_layers=3, grid_size=encoder_grid)
+        encoder.train()
+        encoder_global_dim = 2 * encoder_hidden
+        encoder_macro_dim = encoder_hidden
+        n_enc_params = sum(p.numel() for p in encoder.parameters())
+        print(f"  encoder ENABLED: StateEncoder(hidden={encoder_hidden}, "
+              f"grid={encoder_grid}) — {n_enc_params:,} params; "
+              f"policy encoder dims = global:{encoder_global_dim} "
+              f"macro:{encoder_macro_dim}")
+
+    policy = ChainPolicy(hidden=64, cand_dim=cand_dim,
+                         encoder_global_dim=encoder_global_dim,
+                         encoder_macro_dim=encoder_macro_dim)
     if initial_policy_ckpt is not None and initial_policy_ckpt.exists():
         ckpt = torch.load(initial_policy_ckpt, map_location="cpu", weights_only=False)
-        # Cand_dim must match for state_dict to load. If the warm-start ckpt
-        # was trained at a different cand_dim (legacy 16 vs new 17), skip
-        # the warm-start and start fresh — incompatible shapes would crash
-        # state_dict load otherwise.
+        # Cand_dim AND encoder dims must match for state_dict to load. If the
+        # warm-start ckpt was trained at a different shape (legacy 16 vs new
+        # 17, or no-encoder vs encoder), skip the warm-start and start fresh —
+        # incompatible shapes would crash state_dict load otherwise.
         warm_cand_dim = int(ckpt.get("cand_dim", FEATURE_DIM))
-        if warm_cand_dim == cand_dim:
+        warm_enc_g = int(ckpt.get("encoder_global_dim", 0))
+        warm_enc_m = int(ckpt.get("encoder_macro_dim", 0))
+        if (warm_cand_dim == cand_dim and warm_enc_g == encoder_global_dim
+                and warm_enc_m == encoder_macro_dim):
             policy.load_state_dict(ckpt["state_dict"])
             print(f"  warm-started policy from {initial_policy_ckpt}")
+            if encoder is not None and ckpt.get("encoder_state_dict") is not None:
+                encoder.load_state_dict(ckpt["encoder_state_dict"])
+                print(f"  warm-started encoder from {initial_policy_ckpt}")
         else:
-            print(f"  skip warm-start: ckpt cand_dim={warm_cand_dim} "
-                  f"!= run cand_dim={cand_dim}")
-    optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+            print(f"  skip warm-start: ckpt shape "
+                  f"(cand_dim={warm_cand_dim}, enc_g={warm_enc_g}, "
+                  f"enc_m={warm_enc_m}) != run "
+                  f"(cand_dim={cand_dim}, enc_g={encoder_global_dim}, "
+                  f"enc_m={encoder_macro_dim})")
+    opt_params = list(policy.parameters())
+    if encoder is not None:
+        opt_params = opt_params + list(encoder.parameters())
+    optimizer = torch.optim.Adam(opt_params, lr=lr)
 
     # Task 1b + 4b: load approximator once. Needed when gate_mode is
     # "predicted_proxy" (for the gate's cumulative Δproxy) or whenever
@@ -259,6 +358,9 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     # lucky iteration doesn't pin the best checkpoint.
     best_commit_ema = -float("inf")
     best_state_dict = {k: v.detach().clone() for k, v in policy.state_dict().items()}
+    best_encoder_state_dict = (
+        {k: v.detach().clone() for k, v in encoder.state_dict().items()}
+        if encoder is not None else None)
     best_iter = 0
     commit_ema: float | None = None
     EMA_ALPHA = 0.1
@@ -292,7 +394,8 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                 use_wiremask=use_wiremask,
                 use_position_mask=use_position_mask,
             )
-            traj = collect_rollout(env, policy)
+            traj = collect_rollout(env, policy, encoder=encoder,
+                                   enc_mod=enc_mod, enc_grid=encoder_grid)
             per_bench_traj_count[name] += 1
             if not traj:
                 continue
@@ -315,7 +418,7 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
 
         metrics = ppo_update(policy, optimizer, all_transitions,
                              clip=clip, ent_coef=ent_coef, vf_coef=vf_coef,
-                             epochs=ppo_epochs)
+                             epochs=ppo_epochs, encoder=encoder)
 
         avg_traj_reward = (sum(t["reward"] for t in all_transitions)
                            / max(trajectories_per_iter, 1))
@@ -333,6 +436,9 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
             best_iter = it
             best_state_dict = {k: v.detach().clone()
                                for k, v in policy.state_dict().items()}
+            if encoder is not None:
+                best_encoder_state_dict = {k: v.detach().clone()
+                                           for k, v in encoder.state_dict().items()}
 
         record = {
             "iter": it,
@@ -372,10 +478,13 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     if best_commit_ema > -float("inf"):
         policy.load_state_dict(best_state_dict)
         ship_state_dict = best_state_dict
+        ship_encoder_state_dict = best_encoder_state_dict
         print(f"  shipping best-by-commit-EMA policy "
               f"(iter {best_iter}, EMA={best_commit_ema:.0%})")
     else:
         ship_state_dict = policy.state_dict()
+        ship_encoder_state_dict = (encoder.state_dict()
+                                   if encoder is not None else None)
         print(f"  shipping last-iter policy (no warmup-cleared best yet)")
 
     output_ckpt.parent.mkdir(parents=True, exist_ok=True)
@@ -394,11 +503,21 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         "reg_weight": float(reg_weight),
         "use_wiremask": bool(use_wiremask),
         "use_position_mask": bool(use_position_mask),
+        # Step 3: encoder weights + config embedded in the same checkpoint so
+        # the placer's _load_chain_policy can rebuild and attach it. Dims are
+        # 0 / None when the encoder is off (the loader then takes the legacy
+        # hand-crafted-feature path unchanged).
+        "encoder_global_dim": encoder_global_dim,
+        "encoder_macro_dim": encoder_macro_dim,
+        "encoder_hidden": int(encoder_hidden) if encoder is not None else 0,
+        "encoder_grid_size": int(encoder_grid) if encoder is not None else 0,
+        "encoder_state_dict": ship_encoder_state_dict,
     }, output_ckpt)
     print(f"  policy -> {output_ckpt}  (cand_dim={cand_dim}, "
           f"gate_mode={gate_mode}, reg_weight={reg_weight}, "
-          f"use_wiremask={use_wiremask}, use_position_mask={use_position_mask})")
-    return {"history": history, "policy": policy}
+          f"use_wiremask={use_wiremask}, use_position_mask={use_position_mask}, "
+          f"encoder={'on' if encoder is not None else 'off'})")
+    return {"history": history, "policy": policy, "encoder": encoder}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -431,6 +550,15 @@ def main():
                    help="Warm-start checkpoint path (optional)")
     p.add_argument("--output",
                    default=str(_HERE / "checkpoints" / "chain_policy.pt"))
+    # Step 3 (encoder wiring): co-train the GNN+CNN StateEncoder with the
+    # policy. Default off preserves the legacy hand-crafted-feature path.
+    p.add_argument("--use-encoder", action="store_true",
+                   help="Co-train the GNN+CNN StateEncoder and feed its "
+                        "embeddings to the policy (and at inference).")
+    p.add_argument("--encoder-hidden", type=int, default=64,
+                   help="StateEncoder hidden dim (GNN + CNN). Default 64.")
+    p.add_argument("--encoder-grid", type=int, default=64,
+                   help="Per-macro mask raster resolution for the CNN. Default 64.")
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmark)
@@ -448,6 +576,9 @@ def main():
         ppo_epochs=args.ppo_epochs,
         output_ckpt=Path(args.output),
         initial_policy_ckpt=Path(args.initial_policy) if args.initial_policy else None,
+        use_encoder=args.use_encoder,
+        encoder_hidden=args.encoder_hidden,
+        encoder_grid=args.encoder_grid,
     )
 
 
