@@ -1010,7 +1010,7 @@ def encoder(
 def policy(
     benchmark: str = "ibm01",
     iterations: int = 1000,
-    trajectories_per_iter: int = 4,
+    trajectories_per_iter: int = 16,
     seed: int = 42,
     initial_policy: str = "",
     encoder_ckpt: str = "",

@@ -819,17 +819,27 @@ def _load_chain_policy(ckpt_path: Path):
     if not ckpt_path.exists():
         return None
     try:
-        from submissions.lkh.model.lkh_model import ChainPolicy
+        from submissions.lkh.model.lkh_model import ChainPolicy, ChainPolicyWithGNN
     except ImportError:
         return None
     # Import chain_env via importlib to avoid circular imports.
+    # chain_env.py lives in the environment/ subdirectory.
     import importlib.util as _ilu
 
-    spec = _ilu.spec_from_file_location("chain_env", str(_HERE / "chain_env.py"))
+    spec = _ilu.spec_from_file_location(
+        "chain_env", str(_HERE / "environment" / "chain_env.py")
+    )
     env_mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(env_mod)
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    policy = ChainPolicy(hidden=ckpt.get("hidden", 64))
+    policy_class = ckpt.get("policy_class", "ChainPolicy")
+    hidden = ckpt.get("hidden", 64)
+    if policy_class == "ChainPolicyWithGNN":
+        gnn_H = ckpt.get("gnn_H", 32)
+        proj_dim = ckpt.get("proj_dim", 16)
+        policy = ChainPolicyWithGNN(hidden=hidden, gnn_H=gnn_H, proj_dim=proj_dim)
+    else:
+        policy = ChainPolicy(hidden=hidden)
     policy.load_state_dict(ckpt["state_dict"])
     policy.eval()
     return {
@@ -837,6 +847,8 @@ def _load_chain_policy(ckpt_path: Path):
         "ChainEnv": env_mod.ChainEnv,
         "trained_on": ckpt.get("trained_on"),
         "n_iterations": ckpt.get("n_iterations"),
+        "policy_class": policy_class,
+        "gnn_H": ckpt.get("gnn_H"),
     }
 
 
@@ -1361,7 +1373,8 @@ class LKHPlacer:
             if self.policy_bundle is not None:
                 print(
                     f"[LKHPlacer] chain policy loaded "
-                    f"(iters={self.policy_bundle.get('n_iterations')}, "
+                    f"({self.policy_bundle.get('policy_class', 'ChainPolicy')}, "
+                    f"iters={self.policy_bundle.get('n_iterations')}, "
                     f"trained on {self.policy_bundle.get('trained_on')})"
                 )
             else:

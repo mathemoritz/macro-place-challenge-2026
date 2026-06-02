@@ -417,6 +417,7 @@ def train_chain_policy(
         stop_count = 0      # trajectories where policy explicitly chose STOP
         length_total = 0
         gain_total = 0.0
+        frac_gain_total = 0.0
         best_prefix_total = 0.0
         iter_bench_traj: dict[str, int] = {n: 0 for n in benchmarks}
         iter_bench_commit: dict[str, int] = {n: 0 for n in benchmarks}
@@ -466,7 +467,9 @@ def train_chain_policy(
             committed = env.best_prefix_index > 0
             if committed:
                 commit_count += 1
-                gain_total += env.start_hpwl - env.state.hpwl()
+                abs_gain = env.start_hpwl - env.state.hpwl()
+                gain_total += abs_gain
+                frac_gain_total += abs_gain / max(env.start_hpwl, 1e-9)
                 per_bench_commit_count[name] += 1
                 iter_bench_commit[name] += 1
 
@@ -487,6 +490,7 @@ def train_chain_policy(
         commit_rate      = commit_count / n_traj
         explicit_stop_rate = stop_count / n_traj
         avg_gain         = gain_total / max(commit_count, 1)
+        avg_gain_frac    = frac_gain_total / max(commit_count, 1)
         iter_time        = time.time() - t_iter
         elapsed          = time.time() - t_start
 
@@ -508,6 +512,7 @@ def train_chain_policy(
                 "train/avg_chain_length":   avg_traj_length,
                 "train/avg_best_prefix":    avg_best_prefix,
                 "train/avg_hpwl_gain":      avg_gain if commit_count > 0 else 0.0,
+                "train/avg_hpwl_gain_frac": avg_gain_frac if commit_count > 0 else 0.0,
                 "train/explicit_stop_rate": explicit_stop_rate,
                 "train/n_transitions":      len(all_transitions),
                 # ── PPO losses ───────────────────────────────────────────
@@ -587,7 +592,7 @@ def main():
         help="Single name, comma-separated list, or 'all' for the 17 IBM benchmarks.",
     )
     p.add_argument("--iterations", type=int, default=200)
-    p.add_argument("--trajectories-per-iter", type=int, default=4)
+    p.add_argument("--trajectories-per-iter", type=int, default=16)
     p.add_argument("--max-chain-length", type=int, default=8)
     p.add_argument("--max-candidates", type=int, default=8)
     p.add_argument("--terminal-commit-bonus", type=float, default=0.0)

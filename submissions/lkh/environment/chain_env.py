@@ -410,7 +410,10 @@ class ChainEnv:
                 # Negative predicted cumulative = improvement = reward.
                 reward = -float(self.best_key[2])
             else:
-                reward = committed_hpwl_gain
+                # Normalize by start_hpwl so reward scale is consistent across
+                # benchmarks regardless of circuit size (ibm01 vs ibm18).
+                reward = (committed_hpwl_gain / self.start_hpwl
+                          if self.start_hpwl > 0 else committed_hpwl_gain)
         else:  # legacy telescope
             if committed:
                 reward += self.terminal_commit_bonus
