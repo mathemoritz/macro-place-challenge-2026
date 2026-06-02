@@ -75,6 +75,10 @@ def main():
     p.add_argument("--seeds", type=int, default=1,
                    help="Number of seeds per (benchmark, init_mode); results "
                         "are averaged. random/analytical benefit from >1.")
+    p.add_argument("--plot", default="",
+                   help="If set, write a grouped-bar PNG of proxy by init_mode.")
+    p.add_argument("--json", default="",
+                   help="If set, dump the results dict to this JSON path.")
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmark)
@@ -129,6 +133,43 @@ def main():
             tot_ov = sum(results[n][mode]["overlaps"] for n in benchmarks)
             print(f"{'':>10} {mode:>11} {np.mean(proxies):>8.4f} "
                   f"{'':>7} {tot_ov:>9}")
+
+    if args.json:
+        import json
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(json.dumps(
+            {"time_budget_s": args.time_budget, "seeds": args.seeds,
+             "results": results}, indent=2))
+        print(f"\n[warmstart] results -> {args.json}")
+
+    if args.plot:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        colors = {"initial": "#2ca02c", "random": "#d62728",
+                  "analytical": "#1f77b4"}
+        x = np.arange(len(benchmarks))
+        width = 0.8 / max(len(init_modes), 1)
+        fig, ax = plt.subplots(figsize=(1.6 * len(benchmarks) + 3, 4.5))
+        for k, mode in enumerate(init_modes):
+            vals = [results[n][mode]["proxy_cost"] for n in benchmarks]
+            errs = [results[n][mode].get("proxy_std", 0.0) for n in benchmarks]
+            ax.bar(x + k * width, vals, width, yerr=errs, capsize=3,
+                   label=mode, color=colors.get(mode, None))
+        ax.set_xticks(x + width * (len(init_modes) - 1) / 2)
+        ax.set_xticklabels(benchmarks)
+        ax.set_ylabel("proxy cost (lower = better)")
+        ax.set_title(f"Step 2: warm-start ablation "
+                     f"({args.time_budget:.0f}s budget, {args.seeds} seed(s))")
+        ax.axhline(1.4578, color="k", ls="--", lw=1,
+                   label="RePlAce baseline (1.458)")
+        ax.legend(fontsize=9)
+        ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
+        Path(args.plot).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(args.plot, dpi=130)
+        print(f"[warmstart] plot -> {args.plot}")
 
 
 if __name__ == "__main__":

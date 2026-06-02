@@ -1,0 +1,37 @@
+{
+  "source": "chain_data.pt (['ibm01', 'ibm07'])",
+  "epochs": 60,
+  "margin": 0.1,
+  "results": [
+    {
+      "rank_weight": 0.0,
+      "pearson": 0.7098430717439363,
+      "spearman": 0.6696011937059142
+    },
+    {
+      "rank_weight": 0.5,
+      "pearson": 0.5135133347818324,
+      "spearman": 0.5820944112859469
+    },
+    {
+      "rank_weight": 1.0,
+      "pearson": 0.5078425574215533,
+      "spearman": 0.5526858383071079
+    },
+    {
+      "rank_weight": 2.0,
+      "pearson": 0.5197468340694041,
+      "spearman": 0.5763564839934888
+    },
+    {
+      "rank_weight": 4.0,
+      "pearson": 0.44090117358550246,
+      "spearman": 0.570252306022789
+    },
+    {
+      "rank_weight": 8.0,
+      "pearson": 0.5496234177852903,
+      "spearman": 0.5374932175800325
+    }
+  ]
+}
