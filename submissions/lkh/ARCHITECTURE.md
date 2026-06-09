@@ -137,19 +137,14 @@ self.neighbors      # list[list[int]] — adjacency list for fast lookups
 | `hpwl()` | Sum over edges of (w · (|Δx| + |Δy|)) | O(E) |
 | `candidate_positions(idx)` | Generate move candidates for macro `idx` | O(K), K ≈ 16 |
 
-### A subtle bug we hit
+### Overlap-gap invariant
 
-Overlap tests originally used `gap=0.05`, which counted "close but not
-touching" pairs as overlapping. On `ibm01`, this inflated the count from
-the evaluator's 69 to ~277, and the commit gate was lex-comparing on the
-inflated count. Chains could then "improve" by *decreasing the inflated
-count while increasing the real count*. The fix was `gap=1e-6` (matches
-the evaluator's strict semantics up to float precision) — `placer.py` calls
-this out in a long comment.
-
-**Moral:** when your fast surrogate has a *different* zero-point from the
-ground-truth measure you optimize against, your search will optimize the
-gap.
+The cached `overlap_pairs` count uses `gap=1e-6` so its zero-point matches
+the evaluator's strict `<` semantics up to float precision. Any larger
+gap would treat close-but-not-touching pairs as overlapping, and the
+commit gate would lex-compare on an inflated count; chains could then
+"improve" by decreasing the inflated count while increasing the real
+count. `placer.py` calls this invariant out in a long comment.
 
 ---
 
@@ -423,9 +418,8 @@ out-of-distribution.
 
 ### Exit criterion
 
-Plan calls for Spearman ρ > 0.8 on a held-out 20% split. On
-multi-benchmark runs with 1000+ examples this is usually achieved
-within 30 epochs.
+Target is Spearman ρ > 0.8 on a held-out 20% split. On multi-benchmark
+runs with 1000+ examples this is usually achieved within 30 epochs.
 
 ---
 

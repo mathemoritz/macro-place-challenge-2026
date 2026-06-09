@@ -30,14 +30,25 @@ ENV/
 env/
 .venv
 
-# IDE
+# IDE / agent tooling
 .vscode/
 .idea/
 .cursor/
+.claude/
+.aider*
 *.swp
 *.swo
 *~
 .DS_Store
+
+# Local-only project files
+AGENTS.md
+CLAUDE.md
+poster/
+modal_output*/
+wandb/
+mlruns/
+.env*
 
 # Testing
 .pytest_cache/

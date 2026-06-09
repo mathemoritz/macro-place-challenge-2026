@@ -14,7 +14,7 @@ either locally or on Modal cloud.
 > tuning, troubleshooting. For the **architecture walkthrough** — what each
 > component does and why — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-## TL;DR — the 3 commands main commands:
+## TL;DR — the 3 main commands
 
 **1. Start a training run on Modal** (one-time `uv add modal && uv run modal setup` first):
 
@@ -324,14 +324,14 @@ You will get a Modal email when the run finishes.
 modal volume get lkh-results /iter ./modal_output
 
 # Inspect
-ls modal_output/
+ls modal_output/iter/
 # checkpoints/, data/, history.json, per_bench/, round_0/, round_1/, ...
 
 # See training progress numerically
-cat modal_output/history.json
+cat modal_output/iter/history.json
 
 # Promote the trained checkpoints to local
-cp modal_output/checkpoints/*.pt submissions/lkh/checkpoints/
+cp modal_output/iter/checkpoints/*.pt submissions/lkh/checkpoints/
 
 # Test the placer locally
 uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01

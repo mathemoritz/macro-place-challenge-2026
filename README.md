@@ -6,7 +6,7 @@ guided by three learned components: a GNN state encoder, an MLP cost
 approximator, and a PPO actor-critic policy. Training infrastructure runs
 either locally or on Modal cloud.
 
-## TL;DR — the 3 commands main commands:
+## TL;DR — the 3 main commands
 
 **1. Start a training run on Modal** (one-time `uv add modal && uv run modal setup` first):
 
@@ -34,7 +34,7 @@ modal volume ls lkh-results /iter            # which rounds finished
 modal volume get lkh-results /iter ./modal_output
 
 # Promote trained checkpoints to local
-cp modal_output/checkpoints/*.pt submissions/lkh/checkpoints/
+cp modal_output/iter/checkpoints/*.pt submissions/lkh/checkpoints/
 
 # Verify the placer with the new models
 uv run python -m macro_place.evaluate submissions/lkh/placer.py --all
@@ -252,14 +252,14 @@ You will get a Modal email when the run finishes.
 modal volume get lkh-results /iter ./modal_output
 
 # Inspect
-ls modal_output/
+ls modal_output/iter/
 # checkpoints/, data/, history.json, per_bench/, round_0/, round_1/, ...
 
 # See training progress numerically
-cat modal_output/history.json
+cat modal_output/iter/history.json
 
 # Promote the trained checkpoints to local
-cp modal_output/checkpoints/*.pt submissions/lkh/checkpoints/
+cp modal_output/iter/checkpoints/*.pt submissions/lkh/checkpoints/
 
 # Test the placer locally
 uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01
@@ -273,9 +273,9 @@ You can also inspect or test the per-round snapshots:
 
 ```bash
 # Round 2 vs round 3 on ibm01
-cp modal_output/round_2/*.pt submissions/lkh/checkpoints/
+cp modal_output/iter/round_2/*.pt submissions/lkh/checkpoints/
 uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01
-cp modal_output/round_3/*.pt submissions/lkh/checkpoints/
+cp modal_output/iter/round_3/*.pt submissions/lkh/checkpoints/
 uv run python -m macro_place.evaluate submissions/lkh/placer.py -b ibm01
 ```
 
