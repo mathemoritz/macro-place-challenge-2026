@@ -238,15 +238,24 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                         initial_policy_ckpt: Path | None = None,
                         log_every: int = 5,
                         terminal_reward_mode: str = "committed_gain",
+                        # MaskRegulate flags
                         gate_mode: str = "hpwl",
                         reg_weight: float = 0.0,
                         use_wiremask: bool = False,
                         use_position_mask: bool = False,
-                        approximator_ckpt: Path | None = None,
+                        approximator_ckpt: str | None = None,
                         use_reg_feature: bool = False,
                         use_encoder: bool = False,
                         encoder_hidden: int = 64,
-                        encoder_grid: int = 64) -> dict:
+                        encoder_grid: int = 64,
+                        # Session building-block opt-ins
+                        feature_mode: str = "handcrafted",
+                        encoder_kind: str = "gnn",
+                        encoder_ckpt: str | None = None,
+                        scalar_lam: float = 0.01,
+                        seed_mode: str = "heuristic",
+                        seed_head_hidden: int = 64,
+                        encoder_fine_tune_in_ppo: bool = False) -> dict:
     """PPO training across one or more benchmarks. Each trajectory samples
     a random benchmark from ``benchmarks`` (plan §4.3 semantics).
 
@@ -254,6 +263,15 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     (GNN over the netlist + CNN over the per-macro mask raster) is co-trained
     with the policy and its weights are saved into the same checkpoint, so the
     placer's loader can reconstruct it and feed its embeddings at inference.
+
+    Session building-block opt-ins (all default off → legacy behavior):
+    - ``feature_mode="encoder"``: load encoder ckpt, build per-rollout
+      encoder cache, use encoder-aware ChainPolicy dims.
+    - ``gate_mode="scalar_penalty"`` + ``approximator_ckpt``: scalar gate.
+    - ``terminal_reward_mode="predicted_proxy_with_postleg"``: post-leg
+      reward via predicted Δproxy.
+    - ``seed_mode="policy"``: add a SeedSelectionHead, train it jointly
+      with the policy.
     """
     import random as _random
 
@@ -268,6 +286,8 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     print(f"  benchmarks={benchmarks}  iterations={n_iterations}  "
           f"traj/iter={trajectories_per_iter}")
     print(f"  max_chain_length={max_chain_length}  max_candidates={max_candidates}")
+    print(f"  feature_mode={feature_mode}  gate_mode={gate_mode}  "
+          f"seed_mode={seed_mode}  reward={terminal_reward_mode}")
     print(f"  pre-loading {len(benchmarks)} benchmark(s) into RAM...")
     bench_cache = _load_benchmark_cache(benchmarks)
 
@@ -277,10 +297,16 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     from lkh_model import FEATURE_DIM
     cand_dim = (FEATURE_DIM + 1) if use_reg_feature else FEATURE_DIM
 
-    # Step 3: build the encoder (if requested) before the policy so the policy
-    # can be sized to accept its embeddings. encoder_global = cat(graph_pool,
-    # cnn) has width 2*hidden; encoder_macro = per-node embedding has width
-    # hidden. Load encoder.py via importlib (matches chain_env's pattern).
+    # ── Encoder: MaskRegulate (use_encoder) path is the primary integration.
+    # If our session building-block path (feature_mode="encoder") is requested,
+    # promote it to use_encoder so the two stay in sync. The runtime-wrapper
+    # files (encoder_runtime.py / encoder_runtime_gnncnn.py) are alternative
+    # *inference-time* loaders for the placer; PPO co-training always goes
+    # through the StateEncoder directly here.
+    if feature_mode == "encoder" and not use_encoder:
+        use_encoder = True
+        print(f"  feature_mode='encoder' → use_encoder=True (joint path)")
+
     encoder = None
     enc_mod = None
     encoder_global_dim = 0
@@ -292,7 +318,24 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         _spec_enc.loader.exec_module(enc_mod)
         encoder = enc_mod.StateEncoder(hidden_dim=encoder_hidden,
                                        num_gnn_layers=3, grid_size=encoder_grid)
-        encoder.train()
+        # MaskRegulate trains encoder by default; the session opt-in
+        # ``encoder_fine_tune_in_ppo`` keeps backward compatibility with
+        # the frozen-encoder convention from the wrapper path.
+        if encoder_fine_tune_in_ppo or not Path(encoder_ckpt or "").exists():
+            encoder.train()
+        else:
+            # If a pretrained encoder was supplied and fine-tune is off,
+            # honor the freeze (matches the session-building-block default).
+            try:
+                ck = torch.load(encoder_ckpt, map_location="cpu", weights_only=False)
+                if "state_dict" in ck:
+                    encoder.load_state_dict(ck["state_dict"], strict=False)
+                    print(f"  encoder warm-started from {encoder_ckpt}")
+            except Exception as _e:
+                print(f"  encoder ckpt unreadable; starting fresh ({_e})")
+            encoder.eval()
+            for p in encoder.parameters():
+                p.requires_grad_(False)
         encoder_global_dim = 2 * encoder_hidden
         encoder_macro_dim = encoder_hidden
         n_enc_params = sum(p.numel() for p in encoder.parameters())
@@ -306,10 +349,6 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                          encoder_macro_dim=encoder_macro_dim)
     if initial_policy_ckpt is not None and initial_policy_ckpt.exists():
         ckpt = torch.load(initial_policy_ckpt, map_location="cpu", weights_only=False)
-        # Cand_dim AND encoder dims must match for state_dict to load. If the
-        # warm-start ckpt was trained at a different shape (legacy 16 vs new
-        # 17, or no-encoder vs encoder), skip the warm-start and start fresh —
-        # incompatible shapes would crash state_dict load otherwise.
         warm_cand_dim = int(ckpt.get("cand_dim", FEATURE_DIM))
         warm_enc_g = int(ckpt.get("encoder_global_dim", 0))
         warm_enc_m = int(ckpt.get("encoder_macro_dim", 0))
@@ -326,21 +365,49 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                   f"enc_m={warm_enc_m}) != run "
                   f"(cand_dim={cand_dim}, enc_g={encoder_global_dim}, "
                   f"enc_m={encoder_macro_dim})")
-    opt_params = list(policy.parameters())
-    if encoder is not None:
-        opt_params = opt_params + list(encoder.parameters())
-    optimizer = torch.optim.Adam(opt_params, lr=lr)
 
-    # Task 1b + 4b: load approximator once. Needed when gate_mode is
-    # "predicted_proxy" (for the gate's cumulative Δproxy) or whenever
-    # ChainEnv would otherwise silently fall back to the hpwl gate.
+    # ── Approximator: needed for MaskRegulate's predicted_proxy gate, the
+    # session's scalar_penalty gate, or the post-leg predicted-proxy reward.
     approx_bundle = None
-    if approximator_ckpt is not None and Path(approximator_ckpt).exists():
-        approx_bundle = _placer._load_cost_approximator(Path(approximator_ckpt))
+    if (approximator_ckpt is not None and Path(approximator_ckpt).exists()) or \
+            gate_mode in ("predicted_proxy", "scalar_penalty") or \
+            terminal_reward_mode == "predicted_proxy_with_postleg":
+        a_ckpt = Path(approximator_ckpt) if approximator_ckpt else (
+            _HERE / "checkpoints" / "cost_approximator.pt"
+        )
+        approx_bundle = _placer._load_cost_approximator(a_ckpt)
         if approx_bundle is not None:
-            print(f"  approximator loaded for PPO env "
+            print(f"  approximator loaded "
                   f"(r={approx_bundle.get('pearson_r_val', float('nan')):.3f}, "
                   f"use_reg_feature={approx_bundle.get('use_reg_feature', False)})")
+        else:
+            print(f"  using fallback scorer")
+    # Alias for downstream code that referenced our earlier name.
+    approximator = approx_bundle
+
+    # ── Optional learned seed-selection head (session building-block).
+    # Requires encoder embeddings; falls back to heuristic when disabled.
+    seed_head = None
+    if seed_mode == "policy":
+        if not use_encoder or encoder is None:
+            print(f"  using default seed selection")
+            seed_mode = "heuristic"
+        else:
+            from seed_head import SeedSelectionHead
+            seed_head = SeedSelectionHead(
+                per_macro_dim=encoder_macro_dim,
+                global_dim=encoder_global_dim,
+                hidden=seed_head_hidden,
+            )
+            print(f"  seed head built")
+
+    # Optimizer: union of policy + encoder (if joint) + seed_head params.
+    opt_params = list(policy.parameters())
+    if encoder is not None and (encoder_fine_tune_in_ppo or encoder.training):
+        opt_params = opt_params + list(encoder.parameters())
+    if seed_head is not None:
+        opt_params = opt_params + list(seed_head.parameters())
+    optimizer = torch.optim.Adam(opt_params, lr=lr)
 
     # Per-benchmark counters for diagnostics (only emitted at end-of-run).
     per_bench_traj_count = {n: 0 for n in benchmarks}
@@ -381,7 +448,26 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
             # B.3: per-rollout reset bypasses apply_move; rebuild caches.
             bc["state"].pos[:] = bc["init_pos"]
             bc["state"].rebuild_caches()
-            seed_macro = rng.choice(bc["movable"])
+
+            # Fix 2: refresh encoder cache once per rollout (frozen
+            # encoder, no_grad). per_node and graph_vec are reused across
+            # every step of this episode.
+            encoder_cache = None
+            if encoder is not None:
+                per_node, graph_vec = encode_fn(bc["state"], encoder, with_grad=False)
+                encoder_cache = {"per_node": per_node, "graph_vec": graph_vec}
+
+            # Fix 3: seed pick. Either heuristic (default) or seed-head.
+            if seed_head is not None and encoder_cache is not None:
+                from seed_head import choose_seed_by_policy
+                seed_macro, _logp = choose_seed_by_policy(
+                    encoder_cache["per_node"], encoder_cache["graph_vec"],
+                    bc["state"].movable, seed_head,
+                    stochastic=True, rng=rng,
+                )
+            else:
+                seed_macro = rng.choice(bc["movable"])
+
             env = ChainEnv(
                 bc["state"], seed_macro, rng=rng,
                 max_chain_length=max_chain_length,
@@ -393,6 +479,8 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                 reg_weight=reg_weight,
                 use_wiremask=use_wiremask,
                 use_position_mask=use_position_mask,
+                feature_mode=feature_mode,
+                lam=scalar_lam,
             )
             traj = collect_rollout(env, policy, encoder=encoder,
                                    enc_mod=enc_mod, enc_grid=encoder_grid)
@@ -488,36 +576,47 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         print(f"  shipping last-iter policy (no warmup-cleared best yet)")
 
     output_ckpt.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
+    payload = {
         "state_dict": ship_state_dict,
         "trained_on": benchmarks,
         "n_iterations": n_iterations,
         "hidden": 64,
         "best_commit_ema": best_commit_ema,
         "best_iter": best_iter,
-        # Task 1c / 4b: schema flags so the placer's loader reconstructs
-        # the policy at the right shape and routes ChainEnv inputs correctly.
+        # MaskRegulate schema flags: cand_dim, gate_mode, reg/mask flags,
+        # encoder config — so the placer's loader rebuilds the policy at
+        # the right shape and routes ChainEnv inputs correctly.
         "cand_dim": cand_dim,
         "use_reg_feature": bool(use_reg_feature),
         "gate_mode": gate_mode,
         "reg_weight": float(reg_weight),
         "use_wiremask": bool(use_wiremask),
         "use_position_mask": bool(use_position_mask),
-        # Step 3: encoder weights + config embedded in the same checkpoint so
-        # the placer's _load_chain_policy can rebuild and attach it. Dims are
-        # 0 / None when the encoder is off (the loader then takes the legacy
-        # hand-crafted-feature path unchanged).
         "encoder_global_dim": encoder_global_dim,
         "encoder_macro_dim": encoder_macro_dim,
         "encoder_hidden": int(encoder_hidden) if encoder is not None else 0,
         "encoder_grid_size": int(encoder_grid) if encoder is not None else 0,
         "encoder_state_dict": ship_encoder_state_dict,
-    }, output_ckpt)
+        # Session building-block dims (for ChainPolicy reconstruction
+        # under the runtime-wrapper code path).
+        "global_dim": policy.global_dim,
+        "macro_dim": policy.macro_dim,
+        "chain_dim": policy.chain_dim,
+        "feature_mode": feature_mode,
+    }
+    if seed_head is not None:
+        payload["seed_head_state_dict"] = seed_head.state_dict()
+        payload["seed_head_per_macro_dim"] = seed_head.per_macro_dim
+        payload["seed_head_global_dim"] = seed_head.global_dim
+        payload["seed_head_hidden"] = seed_head.hidden
+    torch.save(payload, output_ckpt)
     print(f"  policy -> {output_ckpt}  (cand_dim={cand_dim}, "
           f"gate_mode={gate_mode}, reg_weight={reg_weight}, "
           f"use_wiremask={use_wiremask}, use_position_mask={use_position_mask}, "
-          f"encoder={'on' if encoder is not None else 'off'})")
-    return {"history": history, "policy": policy, "encoder": encoder}
+          f"encoder={'on' if encoder is not None else 'off'}, "
+          f"seed_head={'on' if seed_head is not None else 'off'})")
+    return {"history": history, "policy": policy,
+            "encoder": encoder, "seed_head": seed_head}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -532,11 +631,14 @@ def main():
     p.add_argument("--max-candidates", type=int, default=8)
     p.add_argument("--terminal-commit-bonus", type=float, default=0.0)
     p.add_argument("--terminal-reward-mode",
-                   choices=["committed_gain", "hpwl_telescope_legacy"],
+                   choices=["committed_gain", "hpwl_telescope_legacy",
+                            "predicted_proxy_with_postleg"],
                    default="committed_gain",
-                   help="D.1: 'committed_gain' = per-step 0 reward + terminal "
-                        "= best-prefix gain (recommended). 'hpwl_telescope_legacy' "
-                        "= per-step -Δhpwl + terminal commit bonus (pre-fix shape).")
+                   help="D.1 + Fix 4: 'committed_gain' = per-step 0 + terminal "
+                        "= best-prefix gain (default). 'hpwl_telescope_legacy' "
+                        "= per-step -Δhpwl + terminal bonus. "
+                        "'predicted_proxy_with_postleg' = post-leg predicted Δproxy "
+                        "reward (Fix 4, poster-aligned).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--gamma", type=float, default=0.99)
@@ -550,8 +652,8 @@ def main():
                    help="Warm-start checkpoint path (optional)")
     p.add_argument("--output",
                    default=str(_HERE / "checkpoints" / "chain_policy.pt"))
-    # Step 3 (encoder wiring): co-train the GNN+CNN StateEncoder with the
-    # policy. Default off preserves the legacy hand-crafted-feature path.
+    # MaskRegulate encoder wiring: co-train the GNN+CNN StateEncoder with
+    # the policy. Default off preserves the legacy hand-crafted path.
     p.add_argument("--use-encoder", action="store_true",
                    help="Co-train the GNN+CNN StateEncoder and feed its "
                         "embeddings to the policy (and at inference).")
@@ -559,6 +661,35 @@ def main():
                    help="StateEncoder hidden dim (GNN + CNN). Default 64.")
     p.add_argument("--encoder-grid", type=int, default=64,
                    help="Per-macro mask raster resolution for the CNN. Default 64.")
+    # Session building-block flags. Defaults preserve legacy behavior.
+    p.add_argument("--feature-mode",
+                   choices=["handcrafted", "encoder"],
+                   default="handcrafted",
+                   help="'encoder' uses the GNN encoder embedding for features.")
+    p.add_argument("--encoder-kind",
+                   choices=["gnn", "gnncnn"],
+                   default="gnn")
+    p.add_argument("--encoder-ckpt", default=None,
+                   help="Path to encoder checkpoint (default: checkpoints/encoder.pt).")
+    p.add_argument("--approximator-ckpt", default=None,
+                   help="Path to cost approximator (default: checkpoints/cost_approximator.pt).")
+    # gate-mode supports MaskRegulate's hpwl/predicted_proxy + the session
+    # building-block 'scalar_penalty' (single scalar score).
+    p.add_argument("--gate-mode",
+                   choices=["hpwl", "predicted_proxy", "scalar_penalty"],
+                   default="hpwl",
+                   help="Third lex coord of the commit gate, or scalar "
+                        "predicted_Δproxy + lam × n_new_overlap_pairs.")
+    p.add_argument("--scalar-lam", type=float, default=0.01,
+                   help="Overlap penalty weight for the scalar gate.")
+    p.add_argument("--seed-mode",
+                   choices=["heuristic", "policy"],
+                   default="heuristic",
+                   help="'policy' adds a learned SeedSelectionHead.")
+    p.add_argument("--encoder-fine-tune-in-ppo", action="store_true",
+                   help="Experimental: also update encoder parameters during "
+                        "PPO. Default off — encoder is frozen after regression "
+                        "pretraining for stability.")
     args = p.parse_args()
 
     benchmarks = parse_benchmarks(args.benchmark)
@@ -576,9 +707,19 @@ def main():
         ppo_epochs=args.ppo_epochs,
         output_ckpt=Path(args.output),
         initial_policy_ckpt=Path(args.initial_policy) if args.initial_policy else None,
+        # MaskRegulate
         use_encoder=args.use_encoder,
         encoder_hidden=args.encoder_hidden,
         encoder_grid=args.encoder_grid,
+        # Session building-block flags
+        feature_mode=args.feature_mode,
+        encoder_kind=args.encoder_kind,
+        encoder_ckpt=args.encoder_ckpt,
+        approximator_ckpt=args.approximator_ckpt,
+        gate_mode=args.gate_mode,
+        scalar_lam=args.scalar_lam,
+        seed_mode=args.seed_mode,
+        encoder_fine_tune_in_ppo=args.encoder_fine_tune_in_ppo,
     )
 
 

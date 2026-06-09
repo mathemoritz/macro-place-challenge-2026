@@ -1083,7 +1083,12 @@ def _load_cost_approximator(ckpt_path: Path):
 # ── Chain policy loading (Phase 4) ─────────────────────────────────────────
 
 def _load_chain_policy(ckpt_path: Path):
-    """Returns a dict with policy + chain_env helpers, or None if missing."""
+    """Returns a dict with policy + chain_env helpers, or None if missing.
+
+    Also reconstructs the optional ``SeedSelectionHead`` (Fix 3) if the
+    checkpoint co-stored it under ``seed_head_state_dict``. The head is
+    returned under bundle key ``"seed_head"`` or None.
+    """
     if not ckpt_path.exists():
         return None
     try:
@@ -1096,23 +1101,20 @@ def _load_chain_policy(ckpt_path: Path):
     env_mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(env_mod)
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    # Task 1c: ChainPolicy accepts a non-default cand_dim. Older 16-d
-    # checkpoints don't carry the field; fall back to FEATURE_DIM.
-    # Task 4b: optional encoder dims; default 0 so pre-Task-4 checkpoints
-    # load with the same shape they were trained at.
-    policy = ChainPolicy(
-        hidden=ckpt.get("hidden", 64),
-        cand_dim=int(ckpt.get("cand_dim", FEATURE_DIM)),
-        encoder_global_dim=int(ckpt.get("encoder_global_dim", 0)),
-        encoder_macro_dim=int(ckpt.get("encoder_macro_dim", 0)),
-    )
+    # ChainPolicy may have been trained with MaskRegulate's cand_dim /
+    # encoder dims or the session building-block's base-dim overrides.
+    # Take whichever is present in the checkpoint; default to legacy.
+    policy_kwargs = {"hidden": ckpt.get("hidden", 64)}
+    for k in ("global_dim", "macro_dim", "cand_dim", "chain_dim",
+              "encoder_global_dim", "encoder_macro_dim"):
+        if k in ckpt:
+            policy_kwargs[k] = int(ckpt[k])
+    policy = ChainPolicy(**policy_kwargs)
     policy.load_state_dict(ckpt["state_dict"])
     policy.eval()
 
-    # Step 3: if the checkpoint carries a co-trained StateEncoder, rebuild it
-    # and hand it back in the bundle so the placer can feed its embeddings at
-    # inference (the policy's forward already accepts encoder_global/macro).
-    # Checkpoints without an encoder leave encoder=None → legacy path.
+    # MaskRegulate Task 4b: if the checkpoint co-stored a StateEncoder,
+    # rebuild it for inference. Legacy checkpoints have no encoder.
     encoder = None
     enc_global_dim = int(ckpt.get("encoder_global_dim", 0))
     enc_state = ckpt.get("encoder_state_dict")
@@ -1130,12 +1132,18 @@ def _load_chain_policy(ckpt_path: Path):
             encoder.load_state_dict(enc_state)
             encoder.eval()
         except Exception as exc:                                   # noqa: BLE001
-            # A malformed/incompatible encoder must not break inference; the
-            # policy still runs on hand-crafted features (it was trained with
-            # the encoder, so this is a degraded but valid fallback).
             print(f"[LKHPlacer] encoder reconstruct failed ({exc}); "
                   f"running policy without encoder")
             encoder = None
+
+    # Session building-block: seed-head co-stored in checkpoint dict.
+    seed_head = None
+    if "seed_head_state_dict" in ckpt:
+        try:
+            from seed_head import rebuild_seed_head_from_policy_ckpt
+            seed_head = rebuild_seed_head_from_policy_ckpt(ckpt)
+        except Exception:                                             # noqa: BLE001
+            seed_head = None
 
     return {
         "policy": policy,
@@ -1148,7 +1156,27 @@ def _load_chain_policy(ckpt_path: Path):
         "encoder_grid_size": int(ckpt.get("encoder_grid_size", 64)),
         "encoder_hidden": int(ckpt.get("encoder_hidden", 64)),
         "encoder_path": ckpt.get("encoder_path"),
+        "seed_head": seed_head,
     }
+
+
+def _load_encoder(ckpt_path: Path, kind: str = "gnn"):
+    """Load a GNN encoder runtime (Fix 2). ``kind`` selects which runtime
+    module to use: ``"gnn"`` (primary) or ``"gnncnn"`` (optional extra).
+    Returns the bundle dict from the respective ``load_encoder`` or None.
+    """
+    if not ckpt_path.exists():
+        return None
+    try:
+        if kind == "gnn":
+            from encoder_runtime import load_encoder
+        elif kind == "gnncnn":
+            from encoder_runtime_gnncnn import load_encoder
+        else:
+            raise ValueError(f"unknown encoder kind={kind!r}; expected 'gnn' or 'gnncnn'")
+    except ImportError:
+        return None
+    return load_encoder(ckpt_path)
 
 
 # ── LK chain (greedy, optionally approximator-guided) ──────────────────────
@@ -1169,10 +1197,15 @@ class LKChain:
                  rng: random.Random, approximator: dict | None = None,
                  policy_bundle: dict | None = None,
                  gate_mode: str = "hpwl",
+                 # MaskRegulate opt-ins
                  reg_weight: float = 0.0,
                  use_wiremask: bool = False,
                  use_position_mask: bool = False,
-                 encoder=None):
+                 encoder=None,
+                 # Session building-block opt-ins
+                 feature_mode: str = "handcrafted",
+                 encoder_cache: dict | None = None,
+                 lam: float = 0.01):
         """``gate_mode`` selects the third lex-coordinate of the commit gate:
 
         * ``"hpwl"`` (default): ``(overlap_pairs, overlap_area, hpwl)``.
@@ -1180,15 +1213,22 @@ class LKChain:
         * ``"predicted_proxy"``: ``(overlap_pairs, overlap_area,
           cumulative_predicted_Δproxy)``. Requires an approximator. Milestone E
           (LKH critique fix §3.3 deferred).
+        * ``"scalar_penalty"``: single-scalar commit (session). Score is
+          ``predicted_Δproxy + lam × n_new_overlap_pairs``. Requires an
+          approximator. See ``commit_gate_scalar.py``.
 
         MaskRegulate Task 1b: ``reg_weight`` (default 0.0 → unchanged) blends
         an analytic regularity term into the third lex coordinate. When
         ``reg_weight > 0``, the third coord becomes
         ``base_norm + reg_weight * reg_norm`` where ``base_norm`` is HPWL
         (or predicted Δproxy) divided by ``max(cw, ch)`` and ``reg_norm`` is
-        ``total_regularity()`` divided by ``cw + ch``. The two scales are
-        chosen so the unweighted (`reg_weight=1`) coords carry comparable
-        magnitudes — MaskRegulate's ablation found this matters.
+        ``total_regularity()`` divided by ``cw + ch``.
+
+        ``feature_mode`` selects the candidate-feature pipeline:
+
+        * ``"handcrafted"`` (default): ``_features_for_move`` 16-dim vector.
+        * ``"encoder"``: GNN-encoder embedding + hand_feats; needs
+          ``encoder_cache`` (``{"per_node": Tensor, "graph_vec": Tensor}``).
         """
         self.state = state
         self.rng = rng
@@ -1196,21 +1236,24 @@ class LKChain:
         self.approx = approximator
         self.policy_bundle = policy_bundle
         self.gate_mode = gate_mode
+        # MaskRegulate Task 1b/2/3/4b state
         self.reg_weight = float(reg_weight)
-        # MaskRegulate Task 2: substitute analytic HPWL-best cells for some
-        # random-jump slots. ``self.use_wiremask`` is consulted at every
-        # candidate_positions() call from ``run_greedy`` and ``ChainEnv``.
         self.use_wiremask = bool(use_wiremask)
-        # MaskRegulate Task 3: pre-filter WireMask cells through the
-        # legality mask. Pair with use_wiremask=True to get safe analytic
-        # candidates; with use_wiremask=False the flag is a no-op.
         self.use_position_mask = bool(use_position_mask)
-        # Task 4b: optional StateEncoder propagated to ChainEnv when the
-        # learned policy path is taken. None = legacy path (no encoder).
         self.encoder = encoder
-        if gate_mode not in ("hpwl", "predicted_proxy"):
+        # Session building-block state
+        self.feature_mode = feature_mode
+        self.encoder_cache = encoder_cache
+        self.lam = float(lam)
+        if gate_mode not in ("hpwl", "predicted_proxy", "scalar_penalty"):
             raise ValueError(
-                f"unknown gate_mode={gate_mode!r}; expected 'hpwl' or 'predicted_proxy'"
+                f"unknown gate_mode={gate_mode!r}; expected 'hpwl', "
+                f"'predicted_proxy', or 'scalar_penalty'"
+            )
+        if feature_mode not in ("handcrafted", "encoder"):
+            raise ValueError(
+                f"unknown feature_mode={feature_mode!r}; expected "
+                f"'handcrafted' or 'encoder'"
             )
         if gate_mode == "predicted_proxy" and approximator is None:
             # Soft fallback: predicted_proxy without an approximator is
@@ -1218,6 +1261,14 @@ class LKChain:
             # ablation harness from blowing up when the user pairs the new
             # gate with a pre-Milestone-C checkpoint that's been removed.
             self.gate_mode = "hpwl"
+        if gate_mode == "scalar_penalty" and approximator is None:
+            # Same fallback rationale as predicted_proxy.
+            self.gate_mode = "hpwl"
+        if feature_mode == "encoder" and encoder_cache is None:
+            # Encoder mode without a cache silently falls back; PPO rollouts
+            # never enter this state because the placer fills the cache, but
+            # this protects ablation harnesses.
+            self.feature_mode = "handcrafted"
 
     def _compute_third(self, st: PlacementState,
                        predicted_cumulative: float) -> float:
@@ -1256,7 +1307,10 @@ class LKChain:
                         reg_weight=self.reg_weight,
                         use_wiremask=self.use_wiremask,
                         use_position_mask=self.use_position_mask,
-                        encoder=self.encoder)
+                        encoder=self.encoder,
+                        feature_mode=self.feature_mode,
+                        encoder_cache=self.encoder_cache,
+                        lam=self.lam)
         import torch.nn.functional as _F
         final_info: dict = {}
         while not env.done:
@@ -1321,17 +1375,28 @@ class LKChain:
         # Best-prefix tracking (A.1): the canonical Lin-Kernighan gain
         # criterion commits the lex-best PREFIX of the cascade, not the
         # endpoint. Lex order on (overlap_pairs, overlap_area, third) is
-        # the gate. Third coordinate depends on gate_mode (E.1) and
-        # ``reg_weight`` (Task 1b):
+        # the gate. Third coordinate depends on gate_mode + reg_weight:
         #   - "hpwl"             -> st.hpwl() [+ reg_weight * reg_norm]
         #   - "predicted_proxy"  -> cumulative Δproxy [+ reg_weight * reg_norm]
-        # When reg_weight > 0 the base coord is also canvas-normalized so
-        # the blend is scale-balanced; see ``_compute_third``.
-        start_third = self._compute_third(st, predicted_cumulative=0.0)
-        start_key = (start_overlap_pairs, start_overlap_area, start_third)
-        best_key = start_key
-        best_pos_snapshot = snapshot
-        best_prefix_index = 0
+        #   - "scalar_penalty"   -> single scalar via ScalarBestTracker
+        use_scalar_gate = (self.gate_mode == "scalar_penalty")
+        if use_scalar_gate:
+            from commit_gate_scalar import ScalarBestTracker
+            scalar_tracker = ScalarBestTracker(
+                start_overlap_pairs=start_overlap_pairs,
+                start_pos_snapshot=snapshot,
+                lam=self.lam,
+            )
+            best_key = (start_overlap_pairs, start_overlap_area, 0.0)
+            best_pos_snapshot = snapshot
+            best_prefix_index = 0
+        else:
+            scalar_tracker = None
+            start_third = self._compute_third(st, predicted_cumulative=0.0)
+            start_key = (start_overlap_pairs, start_overlap_area, start_third)
+            best_key = start_key
+            best_pos_snapshot = snapshot
+            best_prefix_index = 0
         predicted_cumulative = 0.0
 
         current = self.seed
@@ -1364,18 +1429,32 @@ class LKChain:
             old_x = float(st.pos[current, 0])
             old_y = float(st.pos[current, 1])
 
-            best_predicted_delta = 0.0  # used iff gate_mode == "predicted_proxy"
+            best_predicted_delta = 0.0  # used iff gate uses predicted Δproxy
             if self.approx is not None:
-                # Task 1c: feature schema follows the loaded checkpoint.
+                # Feature schema follows the loaded checkpoint (MaskRegulate
+                # 17-dim vs legacy 16-dim). In session encoder mode we
+                # further wrap with [macro_emb; global_vec; hand_feats]
+                # using the chain-level encoder cache.
                 use_reg_feat = bool(self.approx.get("use_reg_feature", False))
-                feats = np.stack([
+                hand_feats_list = [
                     _features_for_move(
                         st, current,
                         np.array([cx - old_x, cy - old_y], dtype=np.float64),
                         use_reg_feature=use_reg_feat,
                     )
                     for (cx, cy) in cands
-                ])
+                ]
+                if self.feature_mode == "encoder" and self.encoder_cache is not None:
+                    per_node = self.encoder_cache["per_node"]
+                    graph_vec = self.encoder_cache["graph_vec"]
+                    macro_emb = per_node[current].detach().numpy().astype(np.float32)
+                    global_emb = graph_vec.detach().numpy().astype(np.float32)
+                    feats = np.stack([
+                        np.concatenate([macro_emb, global_emb, hf.astype(np.float32)])
+                        for hf in hand_feats_list
+                    ])
+                else:
+                    feats = np.stack(hand_feats_list)
                 norm = (feats - self.approx["feat_mean"]) / self.approx["feat_std"]
                 with torch.no_grad():
                     pred = self.approx["model"](torch.tensor(norm, dtype=torch.float32))
@@ -1412,20 +1491,23 @@ class LKChain:
             # Apply best move (B.3: cache-aware).
             st.apply_move(current, best_pos[0], best_pos[1])
             length += 1
-            if self.gate_mode == "predicted_proxy":
+            if self.gate_mode in ("predicted_proxy", "scalar_penalty"):
                 predicted_cumulative += best_predicted_delta
 
             # Best-prefix snapshot (A.1): the state *after* this move is a
-            # candidate commit point. If it lex-beats the current best, take
-            # a pos snapshot. Only one snapshot is retained (the running
-            # winner), so the per-chain memory cost is one extra N-by-2
-            # array, not max_length of them.
-            third = self._compute_third(st, predicted_cumulative)
-            cur_key = (st.overlap_pairs(), st.overlap_area(), third)
-            if cur_key < best_key:
-                best_key = cur_key
-                best_pos_snapshot = st.pos.copy()
-                best_prefix_index = length
+            # candidate commit point.
+            if use_scalar_gate:
+                scalar_tracker.update(
+                    st, predicted_delta=best_predicted_delta,
+                    chain_step_after_move=length,
+                )
+            else:
+                third = self._compute_third(st, predicted_cumulative)
+                cur_key = (st.overlap_pairs(), st.overlap_area(), third)
+                if cur_key < best_key:
+                    best_key = cur_key
+                    best_pos_snapshot = st.pos.copy()
+                    best_prefix_index = length
 
             # Cascade to a displaced macro, if any. A.3: combined score
             # = manhattan_dist / (connectivity_weight + eps). Lower is
@@ -1452,6 +1534,19 @@ class LKChain:
         # current behavior). Bulk pos[:]= writes bypass apply_move so we
         # rebuild_caches() afterward (B.3 contract). chain_gain is reported
         # in actual HPWL units regardless of gate_mode for monitoring.
+        if use_scalar_gate:
+            committed = scalar_tracker.commit_best(st)
+            if committed:
+                end_overlap_pairs = st.overlap_pairs()
+                return {"chain_gain": start_hpwl - st.hpwl(), "committed": True,
+                        "length": length,
+                        "overlap_delta": end_overlap_pairs - start_overlap_pairs,
+                        "best_prefix_index": scalar_tracker.best_prefix_index}
+            # commit_best already restored snapshot when no prefix won; just
+            # report the no-op outcome.
+            return {"chain_gain": 0.0, "committed": False, "length": length,
+                    "overlap_delta": 0, "best_prefix_index": 0}
+
         if best_prefix_index > 0:
             st.pos[:] = best_pos_snapshot
             st.rebuild_caches()
@@ -1562,25 +1657,32 @@ class LKHPlacer:
                  legalization_reserve_frac: float = 0.05,
                  seed_refresh_interval: int = 100,
                  gate_mode: str = "hpwl",
+                 # MaskRegulate opt-ins
                  reg_weight: float = 0.0,
                  use_wiremask: bool = False,
                  use_position_mask: bool = False,
                  encoder=None,
-                 init_mode: str = "initial"):
-        # Step 2 (warm-start ablation): where the chain loop starts from.
-        #   "initial"    — the challenge-provided initial.plc (default, the
-        #                  competition entry behaviour; unchanged).
-        #   "random"     — every movable hard macro placed uniformly at random
-        #                  in its legal box. Tests raw optimization power.
-        #   "analytical" — a self-contained quadratic / force-directed global
-        #                  placement (``_analytical_warmstart``) in the spirit
-        #                  of RePlAce/DREAMPlace.
-        if init_mode not in ("initial", "random", "analytical"):
+                 # Where the chain loop starts from:
+                 #   "initial"    — initial.plc (default).
+                 #   "random"     — random valid positions.
+                 #   "analytical" — built-in quadratic warm-start (RePlAce-like).
+                 #   "replace"    — load a pre-computed .plc from ``seeds_dir``
+                 #                  (e.g. external RePlAce/DREAMPlace output).
+                 init_mode: str = "initial",
+                 seeds_dir: str | None = None,
+                 # Session building-block opt-ins
+                 feature_mode: str = "handcrafted",
+                 encoder_kind: str = "gnn",
+                 encoder_path: str | None = None,
+                 seed_mode: str = "heuristic",
+                 lam: float = 0.01):
+        if init_mode not in ("initial", "random", "analytical", "replace"):
             raise ValueError(
                 f"unknown init_mode={init_mode!r}; expected 'initial', "
-                f"'random', or 'analytical'"
+                f"'random', 'analytical', or 'replace'"
             )
         self.init_mode = init_mode
+        self.seeds_dir = seeds_dir
         self.seed = seed
         self.time_budget_s = time_budget_s
         self.max_chains = max_chains
@@ -1601,7 +1703,8 @@ class LKHPlacer:
         self.seed_refresh_interval = seed_refresh_interval
         # E.1: commit-gate mode propagated to every LKChain spawned by this
         # placer. ``"hpwl"`` is the Milestone-A default (no retrain needed);
-        # ``"predicted_proxy"`` requires a cascade-aware approximator from C.
+        # ``"predicted_proxy"`` and ``"scalar_penalty"`` (Fix 5) require an
+        # approximator.
         self.gate_mode = gate_mode
         # MaskRegulate Task 1b: regularity blend weight (0.0 = unchanged).
         self.reg_weight = float(reg_weight)
@@ -1613,6 +1716,30 @@ class LKHPlacer:
         # None = legacy path (no encoder branch in the policy forward).
         self.encoder = encoder
 
+        # Fix 2: feature pipeline selection.
+        if feature_mode not in ("handcrafted", "encoder"):
+            raise ValueError(
+                f"unknown feature_mode={feature_mode!r}; expected "
+                f"'handcrafted' or 'encoder'"
+            )
+        if encoder_kind not in ("gnn", "gnncnn"):
+            raise ValueError(
+                f"unknown encoder_kind={encoder_kind!r}; expected "
+                f"'gnn' or 'gnncnn'"
+            )
+        self.feature_mode = feature_mode
+        self.encoder_kind = encoder_kind
+
+        # Fix 3: who picks the seed macro.
+        if seed_mode not in ("heuristic", "policy"):
+            raise ValueError(
+                f"unknown seed_mode={seed_mode!r}; expected 'heuristic' or 'policy'"
+            )
+        self.seed_mode = seed_mode
+
+        # Fix 5: scalar-gate overlap weight.
+        self.lam = float(lam)
+
         approx_ckpt = Path(checkpoint_path) if checkpoint_path else (
             _HERE / "checkpoints" / "cost_approximator.pt"
         )
@@ -1623,7 +1750,21 @@ class LKHPlacer:
             print(f"[LKHPlacer] cost approximator loaded "
                   f"(r={r:.3f}, trained on {trained_on})")
         else:
-            print(f"[LKHPlacer] no approximator at {approx_ckpt} — using HPWL surrogate")
+            print(f"[LKHPlacer] using HPWL surrogate")
+
+        # Fix 2: optionally load the encoder. Only attempted when the user
+        # asks for encoder feature mode — saves load time + memory in default.
+        self.encoder_bundle = None
+        if self.feature_mode == "encoder":
+            enc_ckpt = Path(encoder_path) if encoder_path else (
+                _HERE / "checkpoints" / "encoder.pt"
+            )
+            self.encoder_bundle = _load_encoder(enc_ckpt, kind=self.encoder_kind)
+            if self.encoder_bundle is not None:
+                print(f"[LKHPlacer] encoder loaded")
+            else:
+                print(f"[LKHPlacer] using default features")
+                self.feature_mode = "handcrafted"
 
         self.policy_bundle = None
         if use_policy:
@@ -1635,16 +1776,14 @@ class LKHPlacer:
                 print(f"[LKHPlacer] chain policy loaded "
                       f"(iters={self.policy_bundle.get('n_iterations')}, "
                       f"trained on {self.policy_bundle.get('trained_on')})")
-                # Step 3: if the policy shipped with a co-trained encoder and
-                # the caller didn't pass one explicitly, attach it so the
-                # chain feeds the GNN+CNN embeddings the policy expects.
+                # MaskRegulate: attach co-trained StateEncoder if present.
                 if self.encoder is None and self.policy_bundle.get("encoder") is not None:
                     self.encoder = self.policy_bundle["encoder"]
-                    print(f"[LKHPlacer] using co-trained StateEncoder "
-                          f"(grid={self.policy_bundle.get('encoder_grid_size')}, "
-                          f"hidden={self.policy_bundle.get('encoder_hidden')})")
+                    print(f"[LKHPlacer] using co-trained StateEncoder")
+                if self.policy_bundle.get("seed_head") is not None:
+                    print(f"[LKHPlacer] seed head loaded")
             else:
-                print(f"[LKHPlacer] no policy at {policy_ckpt} — using greedy chains")
+                print(f"[LKHPlacer] using greedy chains")
 
     def _perturb(self, state: PlacementState, rng: random.Random,
                  seed_weights: list[float] | None = None,
@@ -1685,10 +1824,22 @@ class LKHPlacer:
         if not movable_idx:
             return benchmark.macro_positions.clone()
 
-        # Step 2 (warm-start ablation): optionally replace the initial.plc
-        # starting positions before the chain loop runs. Bulk pos writes
-        # bypass apply_move, so rebuild_caches() afterward (the B.3 contract).
-        if self.init_mode == "random":
+        # init_mode controls where the chain loop starts from. Bulk pos
+        # writes bypass apply_move so we rebuild_caches() afterwards (B.3).
+        if self.init_mode == "replace":
+            # Load a pre-computed .plc from seeds_dir (e.g. external
+            # RePlAce/DREAMPlace output). Falls back loudly if missing.
+            from seed_loader import load_seed_positions
+            seed_positions = load_seed_positions(
+                benchmark, seeds_dir=self.seeds_dir
+            )
+            if seed_positions is None:
+                print(f"[LKHPlacer] using default seed")
+            else:
+                state.pos[:] = seed_positions[: state.n]
+                state.rebuild_caches()
+                print(f"[LKHPlacer] seed loaded")
+        elif self.init_mode == "random":
             for i in movable_idx:
                 state.pos[i, 0] = rng.uniform(state.half_w[i],
                                               state.cw - state.half_w[i])
@@ -1706,6 +1857,20 @@ class LKHPlacer:
         # Cost-weighted seed sampling: macros with highest neighbor-displacement
         # are sampled more often. Falls back to uniform if no edges.
         seed_weights = self._seed_weights(state, movable_idx)
+
+        # Fix 3: optionally use the learned seed-selection head. Requires
+        # both feature_mode="encoder" (so we have embeddings) and a policy
+        # bundle that includes a seed head.
+        seed_head = None
+        if (self.seed_mode == "policy"
+                and self.policy_bundle is not None
+                and self.policy_bundle.get("seed_head") is not None
+                and self.feature_mode == "encoder"
+                and self.encoder_bundle is not None):
+            seed_head = self.policy_bundle["seed_head"]
+            print(f"[LKHPlacer] learned seed selection enabled")
+        elif self.seed_mode == "policy":
+            print(f"[LKHPlacer] using default seed selection")
 
         # A.4: reserve wall time for the post-loop _legalize step. If the
         # caller didn't pin a value, probe the spiral on the 10 largest
@@ -1767,7 +1932,33 @@ class LKHPlacer:
         stagnation = 0
 
         while chains < self.max_chains and (time.time() - start) < chain_loop_deadline:
-            seed_macro = rng.choices(movable_idx, weights=seed_weights, k=1)[0]
+            # Fix 2: refresh encoder cache once per chain. The same per-node
+            # + graph embeddings are reused for the chain's seed selection
+            # and every candidate-scoring decision inside the chain.
+            encoder_cache = None
+            if self.feature_mode == "encoder" and self.encoder_bundle is not None:
+                encoder = self.encoder_bundle["encoder"]
+                if self.encoder_kind == "gnn":
+                    from encoder_runtime import encode_state_gnn
+                    per_node, graph_vec = encode_state_gnn(state, encoder, with_grad=False)
+                else:
+                    from encoder_runtime_gnncnn import encode_state_gnncnn
+                    per_node, graph_vec = encode_state_gnncnn(state, encoder, with_grad=False)
+                encoder_cache = {"per_node": per_node, "graph_vec": graph_vec}
+
+            # Fix 3: seed pick. Either heuristic (default) or policy-driven.
+            if seed_head is not None and encoder_cache is not None:
+                from seed_head import choose_seed_by_policy
+                movable_mask_arr = state.movable
+                macro_idx, _logp = choose_seed_by_policy(
+                    encoder_cache["per_node"], encoder_cache["graph_vec"],
+                    movable_mask_arr, seed_head,
+                    stochastic=False, rng=rng,
+                )
+                seed_macro = int(macro_idx)
+            else:
+                seed_macro = rng.choices(movable_idx, weights=seed_weights, k=1)[0]
+
             result = LKChain(state, seed_macro, rng,
                               approximator=self.approximator,
                               policy_bundle=self.policy_bundle,
@@ -1776,6 +1967,9 @@ class LKHPlacer:
                               use_wiremask=self.use_wiremask,
                               use_position_mask=self.use_position_mask,
                               encoder=self.encoder,
+                              feature_mode=self.feature_mode,
+                              encoder_cache=encoder_cache,
+                              lam=self.lam,
                               ).run(self.max_chain_length)
             chains += 1
             if result["committed"]:

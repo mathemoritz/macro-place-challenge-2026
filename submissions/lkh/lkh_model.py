@@ -63,16 +63,31 @@ class ChainPolicy(nn.Module):
     accepts those embeddings via ``forward`` and concatenates them with the
     hand-crafted features. Defaults of 0 preserve the pre-Task-4 shape so
     existing checkpoints load unchanged.
+
+    Session building blocks: the four base dims (``global_dim``,
+    ``macro_dim``, ``cand_dim``, ``chain_dim``) are also overridable for
+    cases where the entire feature pipeline is swapped (e.g. encoder-fed
+    features replacing the 5/6/16/3 default schema). Defaults preserve
+    the legacy schema so unchanged checkpoints still load.
     """
 
-    def __init__(self, hidden: int = 64, cand_dim: int = CAND_DIM,
+    def __init__(self, hidden: int = 64,
+                 global_dim: int = GLOBAL_DIM,
+                 macro_dim: int = MACRO_DIM,
+                 cand_dim: int = CAND_DIM,
+                 chain_dim: int = CHAIN_DIM,
                  encoder_global_dim: int = 0,
                  encoder_macro_dim: int = 0):
         super().__init__()
+        # Remember dims so save/load + downstream code can reconstruct.
+        self.global_dim = int(global_dim)
+        self.macro_dim = int(macro_dim)
         self.cand_dim = int(cand_dim)
+        self.chain_dim = int(chain_dim)
         self.encoder_global_dim = int(encoder_global_dim)
         self.encoder_macro_dim = int(encoder_macro_dim)
-        gd, md, cd, chd = GLOBAL_DIM, MACRO_DIM, self.cand_dim, CHAIN_DIM
+        self.hidden = int(hidden)
+        gd, md, cd, chd = self.global_dim, self.macro_dim, self.cand_dim, self.chain_dim
         egd = self.encoder_global_dim
         emd = self.encoder_macro_dim
         # Move head sees (per-candidate): global + macro + cand + chain

@@ -680,11 +680,19 @@ def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
                    calibration_time_budget_s: float,
                    output_tag: str, cache_read_dir: str,
                    skip_collection: bool,
+                   # MaskRegulate opt-ins
                    gate_mode: str = "hpwl",
                    reg_weight: float = 0.0,
                    use_wiremask: bool = False,
                    use_position_mask: bool = False,
-                   use_reg_feature: bool = False) -> None:
+                   use_reg_feature: bool = False,
+                   # Session building-block opt-ins
+                   feature_mode: str = "handcrafted",
+                   encoder_kind: str = "gnn",
+                   encoder_ckpt: str = "",
+                   scalar_lam: float = 0.01,
+                   seed_mode: str = "heuristic",
+                   terminal_reward_mode: str = "committed_gain") -> None:
     import json as _json
     _setup_env()
     import train as _train
@@ -767,11 +775,19 @@ def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
             per_benchmark_cache_dir=per_benchmark_cache_dir,
             calibration_samples_per_bench=calibration_samples_per_bench,
             calibration_time_budget_s=calibration_time_budget_s,
+            # MaskRegulate
             gate_mode=gate_mode,
             reg_weight=reg_weight,
             use_wiremask=use_wiremask,
             use_position_mask=use_position_mask,
             use_reg_feature=use_reg_feature,
+            # Session building-block flags
+            feature_mode=feature_mode,
+            encoder_kind=encoder_kind,
+            encoder_ckpt=encoder_ckpt or None,
+            scalar_lam=scalar_lam,
+            seed_mode=seed_mode,
+            terminal_reward_mode=terminal_reward_mode,
         )
         history.append(record)
         (output_root / "history.json").write_text(
@@ -792,19 +808,37 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
              calibration_time_budget_s: float = 10.0,
              output_tag: str = "iter", cache_read_dir: str = "",
              skip_collection: bool = False,
+             # MaskRegulate flags
              gate_mode: str = "hpwl",
              reg_weight: float = 0.0,
              use_wiremask: bool = False,
              use_position_mask: bool = False,
-             use_reg_feature: bool = False) -> None:
+             use_reg_feature: bool = False,
+             # Session building-block flags
+             feature_mode: str = "handcrafted",
+             encoder_kind: str = "gnn",
+             encoder_ckpt: str = "",
+             scalar_lam: float = 0.01,
+             seed_mode: str = "heuristic",
+             terminal_reward_mode: str = "committed_gain") -> None:
     _run_iter_impl(
         benchmark, rounds, examples, cost_epochs, policy_iterations,
         trajectories_per_iter, eval_time_budget, seed, force_recollect,
         calibration_samples_per_bench, calibration_time_budget_s,
         output_tag, cache_read_dir, skip_collection,
-        gate_mode=gate_mode, reg_weight=reg_weight,
-        use_wiremask=use_wiremask, use_position_mask=use_position_mask,
+        # MaskRegulate
+        gate_mode=gate_mode,
+        reg_weight=reg_weight,
+        use_wiremask=use_wiremask,
+        use_position_mask=use_position_mask,
         use_reg_feature=use_reg_feature,
+        # Session building-block flags
+        feature_mode=feature_mode,
+        encoder_kind=encoder_kind,
+        encoder_ckpt=encoder_ckpt,
+        scalar_lam=scalar_lam,
+        seed_mode=seed_mode,
+        terminal_reward_mode=terminal_reward_mode,
     )
 
 
@@ -909,11 +943,19 @@ def iter_(preset: str = "", benchmark: str = "", rounds: int = 0,
           seed: int = 0, force_recollect: bool = False,
           output_tag: str = "", cache_read_dir: str = "",
           skip_collection: bool = False,
+          # MaskRegulate flags
           gate_mode: str = "hpwl",
           reg_weight: float = 0.0,
           use_wiremask: bool = False,
           use_position_mask: bool = False,
-          use_reg_feature: bool = False) -> None:
+          use_reg_feature: bool = False,
+          # Session building-block flags
+          feature_mode: str = "handcrafted",
+          encoder_kind: str = "gnn",
+          encoder_ckpt: str = "",
+          scalar_lam: float = 0.01,
+          seed_mode: str = "heuristic",
+          terminal_reward_mode: str = "committed_gain") -> None:
     """Phase 5 — iterative training (background spawn). All knobs configurable.
 
     Presets: ``long12h``, ``medium4h`` (see ``ITER_PRESETS``). Override any CLI
@@ -925,12 +967,15 @@ def iter_(preset: str = "", benchmark: str = "", rounds: int = 0,
             --preset long12h --force-recollect
 
         modal run --detach submissions/lkh/modal_run.py::iter_ \\
-            --preset medium4h --output-tag iter_exp2 --seed 44
-
-        modal run --detach submissions/lkh/modal_run.py::iter_ \\
             --benchmark all --rounds 3 --examples 240 \\
             --output-tag iter_custom --skip-collection \\
             --cache-read-dir /output/iter/per_bench
+
+        # Session building-block path (encoder features + scalar gate + post-leg reward)
+        modal run --detach submissions/lkh/modal_run.py::iter_ \\
+            --benchmark all --feature-mode encoder --seed-mode policy \\
+            --gate-mode scalar_penalty \\
+            --terminal-reward-mode predicted_proxy_with_postleg
 
     Always use ``--detach`` with ``.spawn()`` so the job survives CLI exit.
     """
@@ -944,6 +989,11 @@ def iter_(preset: str = "", benchmark: str = "", rounds: int = 0,
         seed=seed, force_recollect=force_recollect,
         output_tag=output_tag, cache_read_dir=cache_read_dir,
         skip_collection=skip_collection,
+        # Session building-block flags (forwarded through preset resolver)
+        feature_mode=feature_mode, encoder_kind=encoder_kind,
+        encoder_ckpt=encoder_ckpt,
+        scalar_lam=scalar_lam, seed_mode=seed_mode,
+        terminal_reward_mode=terminal_reward_mode,
     )
     # MaskRegulate Tasks 1-3 toggles pass through unconditionally — they're
     # not part of the preset bundle (so a preset doesn't accidentally turn

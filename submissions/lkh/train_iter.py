@@ -91,6 +91,7 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               enable_calibration: bool = True,
               calibration_samples_per_bench: int = 50,
               calibration_time_budget_s: float = 10.0,
+              # MaskRegulate flags
               gate_mode: str = "hpwl",
               reg_weight: float = 0.0,
               use_wiremask: bool = False,
@@ -101,7 +102,15 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               rank_margin: float = 0.1,
               use_encoder: bool = False,
               encoder_hidden: int = 64,
-              encoder_grid: int = 64) -> dict:
+              encoder_grid: int = 64,
+              # Session building-block opt-ins
+              feature_mode: str = "handcrafted",
+              encoder_kind: str = "gnn",
+              encoder_ckpt: str | None = None,
+              scalar_lam: float = 0.01,
+              seed_mode: str = "heuristic",
+              terminal_reward_mode: str = "committed_gain",
+              encoder_fine_tune_in_ppo: bool = False) -> dict:
     """Run one round of Phase 3 + Phase 4 + per-benchmark evaluation.
 
     Canonical writes (so the placer can find the latest checkpoints) go to
@@ -234,15 +243,24 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         output_ckpt=policy_ckpt,
         initial_policy_ckpt=warm_start,
         log_every=max(policy_iterations // 5, 1),
+        # MaskRegulate flags
         gate_mode=gate_mode,
         reg_weight=reg_weight,
         use_wiremask=use_wiremask,
         use_position_mask=use_position_mask,
-        approximator_ckpt=cost_ckpt,
+        approximator_ckpt=str(cost_ckpt),
         use_reg_feature=use_reg_feature,
         use_encoder=use_encoder,
         encoder_hidden=encoder_hidden,
         encoder_grid=encoder_grid,
+        # Session building-block flags
+        feature_mode=feature_mode,
+        encoder_kind=encoder_kind,
+        encoder_ckpt=encoder_ckpt,
+        scalar_lam=scalar_lam,
+        seed_mode=seed_mode,
+        terminal_reward_mode=terminal_reward_mode,
+        encoder_fine_tune_in_ppo=encoder_fine_tune_in_ppo,
     )
 
     # ── Step 3: end-to-end evaluation on every benchmark ──────────────────
@@ -429,9 +447,13 @@ def main():
                    help="Task 2: inject analytic HPWL-best cells as candidates.")
     p.add_argument("--use-position-mask", action="store_true",
                    help="Task 3: legality-filter WireMask candidates.")
-    p.add_argument("--gate-mode", choices=("hpwl", "predicted_proxy"),
+    # gate-mode supports MaskRegulate's hpwl/predicted_proxy + session
+    # building-block 'scalar_penalty'.
+    p.add_argument("--gate-mode",
+                   choices=("hpwl", "predicted_proxy", "scalar_penalty"),
                    default="hpwl",
-                   help="E.1: third lex coord of the commit gate.")
+                   help="Third lex coord of the commit gate "
+                        "(or scalar score under 'scalar_penalty').")
     # Step 1 (ranking lever): expose the rank-loss knobs to the iterative
     # loop so a full-suite rank-weight sweep is a single flag.
     p.add_argument("--rank-weight", type=float, default=1.0,
@@ -449,6 +471,25 @@ def main():
                    help="StateEncoder hidden dim. Default 64.")
     p.add_argument("--encoder-grid", type=int, default=64,
                    help="Per-macro mask raster resolution. Default 64.")
+    # Session building-block flags. Defaults preserve legacy behavior.
+    p.add_argument("--feature-mode", choices=["handcrafted", "encoder"],
+                   default="handcrafted",
+                   help="'encoder' uses GNN encoder features in PPO.")
+    p.add_argument("--encoder-kind", choices=["gnn", "gnncnn"], default="gnn")
+    p.add_argument("--encoder-ckpt", default=None,
+                   help="Path to encoder checkpoint (default: checkpoints/encoder.pt).")
+    p.add_argument("--scalar-lam", type=float, default=0.01)
+    p.add_argument("--seed-mode", choices=["heuristic", "policy"],
+                   default="heuristic",
+                   help="'policy' uses a learned SeedSelectionHead.")
+    p.add_argument("--terminal-reward-mode",
+                   choices=["committed_gain", "hpwl_telescope_legacy",
+                            "predicted_proxy_with_postleg"],
+                   default="committed_gain",
+                   help="'predicted_proxy_with_postleg' rewards post-legalization "
+                        "predicted Δproxy via the approximator.")
+    p.add_argument("--encoder-fine-tune-in-ppo", action="store_true",
+                   help="Experimental: also update encoder during PPO. Default off.")
     args = p.parse_args()
 
     if args.preset is not None:
@@ -497,6 +538,7 @@ def main():
             enable_calibration=not args.no_calibration,
             calibration_samples_per_bench=args.calibration_samples_per_bench,
             calibration_time_budget_s=args.calibration_time_budget,
+            # MaskRegulate flags
             gate_mode=args.gate_mode,
             reg_weight=args.reg_weight,
             use_wiremask=args.use_wiremask,
@@ -508,6 +550,14 @@ def main():
             use_encoder=args.use_encoder,
             encoder_hidden=args.encoder_hidden,
             encoder_grid=args.encoder_grid,
+            # Session building-block flags
+            feature_mode=args.feature_mode,
+            encoder_kind=args.encoder_kind,
+            encoder_ckpt=args.encoder_ckpt,
+            scalar_lam=args.scalar_lam,
+            seed_mode=args.seed_mode,
+            terminal_reward_mode=args.terminal_reward_mode,
+            encoder_fine_tune_in_ppo=args.encoder_fine_tune_in_ppo,
         )
         history.append(record)
         # Stream the aggregated history to disk after every round so a crash

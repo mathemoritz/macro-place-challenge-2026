@@ -347,9 +347,9 @@ step that snaps the remaining overlapping macros into legal spots.
 ### Trade-off
 
 Legalization tends to *increase* HPWL slightly: a macro that was happily
-overlapping in a tight cluster gets pushed to the cluster's edge. On
-`ibm01` we see proxy 1.0385 (initial, 69 overlaps) → 1.1620 (legalized,
-0 overlaps). The competition rewards validity, so this is the right trade.
+overlapping in a tight cluster gets pushed to the cluster's edge. The
+proxy cost can go up modestly after legalization, but the competition
+rewards validity, so this is the right trade.
 
 ### Why not "always legalize"?
 
@@ -515,19 +515,13 @@ loss = policy_loss + 0.5 · value_loss - 0.01 · entropy_bonus
 
 ### Reading PPO logs
 
-Healthy training looks like:
-
-```
-it    0  R/traj=-12.25  commit=0%   ent=2.18      ← random init
-it   10  R/traj= +3.51  commit=50%  ent=1.79      ← finding good moves
-it 1500  R/traj=+24.10  commit=68%  ent=1.10      ← exploiting
-```
+Healthy training signals:
 
 - `ent` (entropy) dropping → policy is becoming less random
 - `commit` rate climbing → policy finds improving chains
 - `R/traj` positive → chains are net-improving
 
-If `ent` collapses below ~0.5 too early, bump `--ent-coef`.
+If `ent` collapses too early, bump `--ent-coef`.
 
 ---
 

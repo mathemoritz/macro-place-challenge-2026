@@ -114,14 +114,7 @@ A valid submission has `overlaps=0` on every benchmark.
 uv run python submissions/lkh/ablate.py --time-budget 30 --benchmark ibm01
 ```
 
-Prints a table:
-
-| method                     | proxy | overlaps |
-|----------------------------|------:|---------:|
-| A: initial.plc             | 1.04  | 69       |
-| B: surrogate only          | 1.22  | 49       |
-| C: + CostApproximator      | 1.05  | 61       |
-| D: + ChainPolicy (full)    | 1.16  | 0 (valid)|
+Prints a comparison table of the four configurations.
 
 ### Visualize a placement
 
