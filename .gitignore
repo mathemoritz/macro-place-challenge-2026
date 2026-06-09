@@ -30,20 +30,16 @@ ENV/
 env/
 .venv
 
-# IDE / agent tooling
+# IDE
 .vscode/
 .idea/
 .cursor/
-.claude/
-.aider*
 *.swp
 *.swo
 *~
 .DS_Store
 
-# Local-only project files
-AGENTS.md
-CLAUDE.md
+# Local-only
 poster/
 modal_output*/
 wandb/
