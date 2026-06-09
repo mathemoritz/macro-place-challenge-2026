@@ -1,14 +1,13 @@
-"""Phase 4 — PPO trainer for the LK chain policy.
+"""PPO trainer for the LK chain policy.
 
 Algorithm: standard PPO with GAE. Rollouts collected from ChainEnv (HPWL
 surrogate reward). Each chain step has a variable number of candidates K,
 so transitions are processed individually inside the update — for the
-modest batch sizes implied by the plan (~40 transitions/iter), no padding
-is needed.
+modest batch sizes used here (~40 transitions/iter), no padding is needed.
 
-Multi-benchmark support (plan §4.3): all benchmarks are pre-loaded into a
-lightweight cache (the PlacementCost object is dropped — PPO only needs the
-HPWL surrogate, not exact proxy cost), and each rollout samples a random
+Multi-benchmark support: all benchmarks are pre-loaded into a lightweight
+cache (the PlacementCost object is dropped — PPO only needs the HPWL
+surrogate, not exact proxy cost), and each rollout samples a random
 benchmark from the cache. State is reset to the benchmark's initial.plc
 positions before every rollout so trajectories are independent.
 
@@ -78,16 +77,16 @@ def collect_rollout(env: ChainEnv, policy: ChainPolicy, *,
                     encoder=None, enc_mod=None, enc_grid: int = 64) -> list[dict]:
     """One chain episode using stochastic policy sampling.
 
-    Step 3 (encoder wiring): when ``encoder`` is supplied we feed the policy
-    the GNN+CNN embeddings alongside the hand-crafted features. The GNN inputs
-    (node features + edges) are built ONCE at chain start and reused across the
-    chain's steps — identical to the inference-time caching in
-    ``ChainEnv.state_for_policy`` — while the CNN per-macro raster is rebuilt
-    each step. We store the *raw* encoder inputs (not the embeddings) in each
-    transition so ``ppo_update`` can recompute the encoder forward WITH
-    gradients and actually train it; the no-grad forward here is only for
-    action sampling. The encoder is intentionally NOT attached to ``env`` so
-    its inference path (detached, numpy) and this training path don't collide.
+    When ``encoder`` is supplied we feed the policy the GNN+CNN embeddings
+    alongside the hand-crafted features. The GNN inputs (node features + edges)
+    are built ONCE at chain start and reused across the chain's steps —
+    identical to the inference-time caching in ``ChainEnv.state_for_policy`` —
+    while the CNN per-macro raster is rebuilt each step. We store the *raw*
+    encoder inputs (not the embeddings) in each transition so ``ppo_update``
+    can recompute the encoder forward WITH gradients and actually train it;
+    the no-grad forward here is only for action sampling. The encoder is
+    intentionally NOT attached to ``env`` so its inference path (detached,
+    numpy) and this training path don't collide.
     """
     transitions: list[dict] = []
     enc_nf = enc_ei = enc_ea = None
@@ -135,7 +134,7 @@ def collect_rollout(env: ChainEnv, policy: ChainPolicy, *,
             "log_prob_old": log_prob_old,
             "value_old": value.detach(),
             "reward": float(reward),
-            # Step 3: raw encoder inputs for the grad-enabled recompute.
+            # Raw encoder inputs for the grad-enabled recompute.
             "enc_nf": enc_nf, "enc_ei": enc_ei, "enc_ea": enc_ea,
             "enc_canvas": enc_canvas, "enc_macro_idx": enc_macro_idx,
         })
@@ -170,7 +169,7 @@ def ppo_update(policy: ChainPolicy, optimizer: torch.optim.Optimizer,
     for i, t in enumerate(batch):
         t["adv_norm"] = float(advs[i].item())
 
-    # Step 3: when an encoder is co-trained, its parameters join the policy's
+    # When an encoder is co-trained, its parameters join the policy's
     # in the gradient-clip set (the optimizer already covers both).
     clip_params = list(policy.parameters())
     if encoder is not None:
@@ -183,7 +182,7 @@ def ppo_update(policy: ChainPolicy, optimizer: torch.optim.Optimizer,
         np.random.shuffle(indices)
         for idx in indices:
             t = batch[idx]
-            # Step 3: recompute encoder embeddings WITH gradients from the raw
+            # Recompute encoder embeddings WITH gradients from the raw
             # inputs stored at rollout time. This is what actually trains the
             # encoder — the rollout's forward was no-grad (sampling only).
             enc_g = enc_m = None
@@ -238,7 +237,7 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                         initial_policy_ckpt: Path | None = None,
                         log_every: int = 5,
                         terminal_reward_mode: str = "committed_gain",
-                        # MaskRegulate flags
+                        # Gate / regularization flags
                         gate_mode: str = "hpwl",
                         reg_weight: float = 0.0,
                         use_wiremask: bool = False,
@@ -248,7 +247,7 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                         use_encoder: bool = False,
                         encoder_hidden: int = 64,
                         encoder_grid: int = 64,
-                        # Session building-block opt-ins
+                        # Optional opt-ins
                         feature_mode: str = "handcrafted",
                         encoder_kind: str = "gnn",
                         encoder_ckpt: str | None = None,
@@ -257,14 +256,14 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                         seed_head_hidden: int = 64,
                         encoder_fine_tune_in_ppo: bool = False) -> dict:
     """PPO training across one or more benchmarks. Each trajectory samples
-    a random benchmark from ``benchmarks`` (plan §4.3 semantics).
+    a random benchmark from ``benchmarks``.
 
-    Step 3 (encoder wiring): when ``use_encoder`` is True a ``StateEncoder``
-    (GNN over the netlist + CNN over the per-macro mask raster) is co-trained
-    with the policy and its weights are saved into the same checkpoint, so the
-    placer's loader can reconstruct it and feed its embeddings at inference.
+    When ``use_encoder`` is True a ``StateEncoder`` (GNN over the netlist +
+    CNN over the per-macro mask raster) is co-trained with the policy and its
+    weights are saved into the same checkpoint, so the placer's loader can
+    reconstruct it and feed its embeddings at inference.
 
-    Session building-block opt-ins (all default off → legacy behavior):
+    Optional opt-ins (all default off → legacy behavior):
     - ``feature_mode="encoder"``: load encoder ckpt, build per-rollout
       encoder cache, use encoder-aware ChainPolicy dims.
     - ``gate_mode="scalar_penalty"`` + ``approximator_ckpt``: scalar gate.
@@ -282,7 +281,7 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    print(f"=== Phase 4: PPO chain policy ===")
+    print(f"=== PPO chain policy ===")
     print(f"  benchmarks={benchmarks}  iterations={n_iterations}  "
           f"traj/iter={trajectories_per_iter}")
     print(f"  max_chain_length={max_chain_length}  max_candidates={max_candidates}")
@@ -291,18 +290,18 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     print(f"  pre-loading {len(benchmarks)} benchmark(s) into RAM...")
     bench_cache = _load_benchmark_cache(benchmarks)
 
-    # Task 1c: cand_dim follows the approximator's schema so the policy and
+    # cand_dim follows the approximator's schema so the policy and
     # approximator agree on per-candidate feature size. Default 16; bumps
     # to 17 when use_reg_feature is on.
     from lkh_model import FEATURE_DIM
     cand_dim = (FEATURE_DIM + 1) if use_reg_feature else FEATURE_DIM
 
-    # ── Encoder: MaskRegulate (use_encoder) path is the primary integration.
-    # If our session building-block path (feature_mode="encoder") is requested,
-    # promote it to use_encoder so the two stay in sync. The runtime-wrapper
-    # files (encoder_runtime.py / encoder_runtime_gnncnn.py) are alternative
-    # *inference-time* loaders for the placer; PPO co-training always goes
-    # through the StateEncoder directly here.
+    # ── Encoder: the ``use_encoder`` path is the primary integration.
+    # If ``feature_mode="encoder"`` is requested, promote it to use_encoder
+    # so the two stay in sync. The runtime-wrapper files (encoder_runtime.py
+    # / encoder_runtime_gnncnn.py) are alternative *inference-time* loaders
+    # for the placer; PPO co-training always goes through the StateEncoder
+    # directly here.
     if feature_mode == "encoder" and not use_encoder:
         use_encoder = True
         print(f"  feature_mode='encoder' → use_encoder=True (joint path)")
@@ -318,14 +317,14 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         _spec_enc.loader.exec_module(enc_mod)
         encoder = enc_mod.StateEncoder(hidden_dim=encoder_hidden,
                                        num_gnn_layers=3, grid_size=encoder_grid)
-        # MaskRegulate trains encoder by default; the session opt-in
+        # The default trains the encoder jointly; the opt-in
         # ``encoder_fine_tune_in_ppo`` keeps backward compatibility with
         # the frozen-encoder convention from the wrapper path.
         if encoder_fine_tune_in_ppo or not Path(encoder_ckpt or "").exists():
             encoder.train()
         else:
             # If a pretrained encoder was supplied and fine-tune is off,
-            # honor the freeze (matches the session-building-block default).
+            # honor the freeze.
             try:
                 ck = torch.load(encoder_ckpt, map_location="cpu", weights_only=False)
                 if "state_dict" in ck:
@@ -366,8 +365,8 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                   f"(cand_dim={cand_dim}, enc_g={encoder_global_dim}, "
                   f"enc_m={encoder_macro_dim})")
 
-    # ── Approximator: needed for MaskRegulate's predicted_proxy gate, the
-    # session's scalar_penalty gate, or the post-leg predicted-proxy reward.
+    # ── Approximator: needed for the predicted_proxy gate, the
+    # scalar_penalty gate, or the post-leg predicted-proxy reward.
     approx_bundle = None
     if (approximator_ckpt is not None and Path(approximator_ckpt).exists()) or \
             gate_mode in ("predicted_proxy", "scalar_penalty") or \
@@ -385,7 +384,7 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     # Alias for downstream code that referenced our earlier name.
     approximator = approx_bundle
 
-    # ── Optional learned seed-selection head (session building-block).
+    # ── Optional learned seed-selection head.
     # Requires encoder embeddings; falls back to heuristic when disabled.
     seed_head = None
     if seed_mode == "policy":
@@ -413,11 +412,10 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
     per_bench_traj_count = {n: 0 for n in benchmarks}
     per_bench_commit_count = {n: 0 for n in benchmarks}
 
-    # Tier-1 Fix C: track the best policy by EMA-smoothed commit rate, not
-    # the last iteration's weights. PPO can collapse late in training
-    # (entropy → 0, policy outputs the same action everywhere) and the
-    # last-iter checkpoint then ships that collapsed policy. The README
-    # explicitly lists "best-policy tracking" as deferred work; this is it.
+    # Track the best policy by EMA-smoothed commit rate, not the last
+    # iteration's weights. PPO can collapse late in training (entropy → 0,
+    # policy outputs the same action everywhere) and the last-iter checkpoint
+    # would then ship that collapsed policy.
     #
     # Commit rate (per-iter fraction of trajectories that committed an
     # improvement) is the right proxy for "how often is this policy doing
@@ -445,11 +443,11 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         for _ in range(trajectories_per_iter):
             name = rng.choice(benchmarks)
             bc = bench_cache[name]
-            # B.3: per-rollout reset bypasses apply_move; rebuild caches.
+            # Per-rollout reset bypasses apply_move; rebuild caches.
             bc["state"].pos[:] = bc["init_pos"]
             bc["state"].rebuild_caches()
 
-            # Fix 2: refresh encoder cache once per rollout (frozen
+            # Refresh encoder cache once per rollout (frozen
             # encoder, no_grad). per_node and graph_vec are reused across
             # every step of this episode.
             encoder_cache = None
@@ -457,7 +455,7 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
                 per_node, graph_vec = encode_fn(bc["state"], encoder, with_grad=False)
                 encoder_cache = {"per_node": per_node, "graph_vec": graph_vec}
 
-            # Fix 3: seed pick. Either heuristic (default) or seed-head.
+            # Seed pick: heuristic (default) or seed-head.
             if seed_head is not None and encoder_cache is not None:
                 from seed_head import choose_seed_by_policy
                 seed_macro, _logp = choose_seed_by_policy(
@@ -514,9 +512,9 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         commit_rate = commit_count / max(trajectories_per_iter, 1)
         avg_gain = gain_total / max(commit_count, 1)
 
-        # Tier-1 Fix C: smooth commit rate via EMA, and snapshot the policy
-        # at the running peak. After WARMUP_ITERS we treat the EMA as
-        # stable enough to act on; before that we just initialize it.
+        # Smooth commit rate via EMA and snapshot the policy at the running
+        # peak. After WARMUP_ITERS we treat the EMA as stable enough to act
+        # on; before that we just initialize it.
         commit_ema = (commit_rate if commit_ema is None
                        else EMA_ALPHA * commit_rate + (1 - EMA_ALPHA) * commit_ema)
         if it >= WARMUP_ITERS and commit_ema > best_commit_ema:
@@ -560,9 +558,9 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
             rate = n_commit / max(n_traj, 1)
             print(f"    {name:>10}  {n_commit}/{n_traj} = {rate:.0%}")
 
-    # Tier-1 Fix C: ship the best-by-commit-EMA snapshot, not the last
-    # iteration's weights. Fall back to the last state only if we never
-    # cleared the warmup gate (very short training runs).
+    # Ship the best-by-commit-EMA snapshot, not the last iteration's
+    # weights. Fall back to the last state only if we never cleared the
+    # warmup gate (very short training runs).
     if best_commit_ema > -float("inf"):
         policy.load_state_dict(best_state_dict)
         ship_state_dict = best_state_dict
@@ -583,9 +581,9 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         "hidden": 64,
         "best_commit_ema": best_commit_ema,
         "best_iter": best_iter,
-        # MaskRegulate schema flags: cand_dim, gate_mode, reg/mask flags,
-        # encoder config — so the placer's loader rebuilds the policy at
-        # the right shape and routes ChainEnv inputs correctly.
+        # Schema flags: cand_dim, gate_mode, reg/mask flags, encoder config —
+        # so the placer's loader rebuilds the policy at the right shape and
+        # routes ChainEnv inputs correctly.
         "cand_dim": cand_dim,
         "use_reg_feature": bool(use_reg_feature),
         "gate_mode": gate_mode,
@@ -597,8 +595,8 @@ def train_chain_policy(benchmarks: list[str], *, n_iterations: int,
         "encoder_hidden": int(encoder_hidden) if encoder is not None else 0,
         "encoder_grid_size": int(encoder_grid) if encoder is not None else 0,
         "encoder_state_dict": ship_encoder_state_dict,
-        # Session building-block dims (for ChainPolicy reconstruction
-        # under the runtime-wrapper code path).
+        # Policy dims (for ChainPolicy reconstruction under the
+        # runtime-wrapper code path).
         "global_dim": policy.global_dim,
         "macro_dim": policy.macro_dim,
         "chain_dim": policy.chain_dim,
@@ -634,11 +632,11 @@ def main():
                    choices=["committed_gain", "hpwl_telescope_legacy",
                             "predicted_proxy_with_postleg"],
                    default="committed_gain",
-                   help="D.1 + Fix 4: 'committed_gain' = per-step 0 + terminal "
+                   help="'committed_gain' = per-step 0 + terminal "
                         "= best-prefix gain (default). 'hpwl_telescope_legacy' "
                         "= per-step -Δhpwl + terminal bonus. "
                         "'predicted_proxy_with_postleg' = post-leg predicted Δproxy "
-                        "reward (Fix 4, poster-aligned).")
+                        "reward.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--gamma", type=float, default=0.99)
@@ -652,8 +650,8 @@ def main():
                    help="Warm-start checkpoint path (optional)")
     p.add_argument("--output",
                    default=str(_HERE / "checkpoints" / "chain_policy.pt"))
-    # MaskRegulate encoder wiring: co-train the GNN+CNN StateEncoder with
-    # the policy. Default off preserves the legacy hand-crafted path.
+    # Encoder wiring: co-train the GNN+CNN StateEncoder with the policy.
+    # Default off preserves the legacy hand-crafted path.
     p.add_argument("--use-encoder", action="store_true",
                    help="Co-train the GNN+CNN StateEncoder and feed its "
                         "embeddings to the policy (and at inference).")
@@ -661,7 +659,7 @@ def main():
                    help="StateEncoder hidden dim (GNN + CNN). Default 64.")
     p.add_argument("--encoder-grid", type=int, default=64,
                    help="Per-macro mask raster resolution for the CNN. Default 64.")
-    # Session building-block flags. Defaults preserve legacy behavior.
+    # Optional flags. Defaults preserve legacy behavior.
     p.add_argument("--feature-mode",
                    choices=["handcrafted", "encoder"],
                    default="handcrafted",
@@ -673,8 +671,8 @@ def main():
                    help="Path to encoder checkpoint (default: checkpoints/encoder.pt).")
     p.add_argument("--approximator-ckpt", default=None,
                    help="Path to cost approximator (default: checkpoints/cost_approximator.pt).")
-    # gate-mode supports MaskRegulate's hpwl/predicted_proxy + the session
-    # building-block 'scalar_penalty' (single scalar score).
+    # gate-mode supports hpwl/predicted_proxy + 'scalar_penalty'
+    # (single scalar score).
     p.add_argument("--gate-mode",
                    choices=["hpwl", "predicted_proxy", "scalar_penalty"],
                    default="hpwl",
@@ -707,11 +705,11 @@ def main():
         ppo_epochs=args.ppo_epochs,
         output_ckpt=Path(args.output),
         initial_policy_ckpt=Path(args.initial_policy) if args.initial_policy else None,
-        # MaskRegulate
+        # Encoder
         use_encoder=args.use_encoder,
         encoder_hidden=args.encoder_hidden,
         encoder_grid=args.encoder_grid,
-        # Session building-block flags
+        # Optional flags
         feature_mode=args.feature_mode,
         encoder_kind=args.encoder_kind,
         encoder_ckpt=args.encoder_ckpt,

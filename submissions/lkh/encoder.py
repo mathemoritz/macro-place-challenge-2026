@@ -1,4 +1,4 @@
-"""Phase 2 — placement state encoder (GNN + CNN).
+"""Placement state encoder (GNN + CNN).
 
 Pure-PyTorch implementation; no torch-geometric / torch-scatter dependency
 (both have CUDA-version-pinned binary wheels and would force a custom
@@ -9,7 +9,7 @@ The encoder produces:
     per_node  [N, hidden_dim]            — one embedding per hard macro
     global    [2 * hidden_dim]           — graph-pool concat with canvas CNN
 
-Components match the plan §2:
+Components:
     PlacementGNN: 3-layer message-passing over the hard-macro netlist graph.
     CanvasCNN:    3-channel raster (occupancy, density, edge-endpoint
                   weights) → fixed-size vector.
@@ -219,9 +219,7 @@ def rasterize_canvas(state, idx: int | None = None,
                      grid_size: int = 128) -> torch.Tensor:
     """3-channel raster of the canvas ``[3, grid_size, grid_size]``.
 
-    Task 4 (MaskRegulate): when ``idx`` is provided, the channels are the
-    per-macro mask triplet — exactly what MaskRegulate's NeurIPS 2024 paper
-    feeds its ResNet-18 backbone:
+    When ``idx`` is provided, the channels are the per-macro mask triplet:
         channel 0: PositionMask — 1.0 where placing macro ``idx`` would NOT
                    overlap any other macro.
         channel 1: WireMask — normalized HPWL Δ over the legal box for
@@ -229,9 +227,9 @@ def rasterize_canvas(state, idx: int | None = None,
         channel 2: RegularMask — distance from each cell to the nearest
                    canvas edge for macro ``idx``'s legal box (low = good).
 
-    When ``idx is None`` (legacy / pre-Task-4 path), the channels are the
-    generic occupancy + density + edge-endpoint scatter — same as the
-    pre-fix code. Retained so the existing smoke test still passes.
+    When ``idx is None``, the channels are the generic
+    occupancy + density + edge-endpoint scatter. Retained so the existing
+    smoke test still passes.
 
     All three per-macro channels are normalized to ~[0, 1] so the CNN sees
     inputs on a consistent scale across designs of different canvas sizes.
@@ -267,7 +265,7 @@ def _rasterize_global(state, grid_size: int) -> torch.Tensor:
 
 
 def _rasterize_per_macro(state, idx: int, grid_size: int) -> torch.Tensor:
-    """Task 4: per-macro [PositionMask, WireMask, RegularMask] raster.
+    """Per-macro [PositionMask, WireMask, RegularMask] raster.
 
     All three are evaluated on the same ``grid_size × grid_size`` mesh of
     the legal placement box for macro ``idx`` (the same mesh
@@ -305,7 +303,7 @@ def _rasterize_per_macro(state, idx: int, grid_size: int) -> torch.Tensor:
 def encode_state(state, encoder: StateEncoder, idx: int | None = None
                   ) -> tuple[torch.Tensor, torch.Tensor]:
     """End-to-end: build inputs and run the encoder. Returns
-    ``(per_node, global)``. Pass ``idx`` to enable Task 4's per-macro
+    ``(per_node, global)``. Pass ``idx`` to enable the per-macro
     mask raster; omit it (or pass ``None``) for the legacy global raster.
     """
     node_feats = build_node_features(state)
@@ -329,7 +327,7 @@ def _smoke_test():
     hpwl_edges = placer._hard_macro_edges(benchmark)
     state = placer.PlacementState(benchmark, hpwl_edges)
 
-    print(f"=== Phase 2 encoder smoke test ===")
+    print(f"=== encoder smoke test ===")
     print(f"  benchmark = {benchmark.name}")
     print(f"  num_hard_macros = {state.n}, num_edges = {len(state.edges)}")
 

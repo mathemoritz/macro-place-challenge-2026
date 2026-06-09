@@ -1,10 +1,8 @@
-"""Building block — GNN-only encoder runtime (Fix 2, primary path).
+"""GNN-only encoder runtime.
 
-The poster diagram shows a single GNN encoder feeding both the cost
-approximator and the policy. Our existing ``encoder.py`` implements a
-combined GNN+CNN ``StateEncoder``; this file wraps only the GNN half
-(``PlacementGNN``) to match the poster literally. The GNN+CNN combined
-variant lives in ``encoder_runtime_gnncnn.py`` and exposes the same API.
+Wraps ``encoder.PlacementGNN`` so the cost approximator and the policy
+can consume a single GNN-only encoder. The combined GNN+CNN variant
+lives in ``encoder_runtime_gnncnn.py`` and exposes the same API.
 
 Output convention:
     per_node : [N, hidden_dim]      — one embedding per hard macro
@@ -19,10 +17,9 @@ The embedding the cost approximator sees for a single move is::
 So ``embed_dim = 2 * hidden_dim``. With hidden=128 and the 16-dim
 hand-feature vector, the approximator's input dim is 272.
 
-Performance note: the encoder forward is ~5-30 ms per state on CPU. To
-honor the poster's "thousands of moves per second" claim, the placer
-caches the encoder output once per chain and reuses ``per_node`` and
-``graph_vec`` across all candidate scores within the chain.
+Performance note: the encoder forward is ~5-30 ms per state on CPU. The
+placer caches the encoder output once per chain and reuses ``per_node``
+and ``graph_vec`` across all candidate scores within the chain.
 """
 
 from __future__ import annotations

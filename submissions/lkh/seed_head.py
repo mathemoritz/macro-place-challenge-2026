@@ -1,16 +1,17 @@
-"""Building block — learned seed-selection head (Fix 3).
+"""Learned seed-selection head.
 
-The poster's chain policy decides three things: which macro to start a
-chain from (seed), which action to take at each step, and when to stop.
-The existing ``ChainPolicy`` (lkh_model.py) already handles action +
-STOP via a single softmax over K+1 logits. Seed selection is currently
-a heuristic (HPWL-weighted random sampling in placer.py).
+The chain policy decides three things: which macro to start a chain
+from (seed), which action to take at each step, and when to stop. The
+existing ``ChainPolicy`` (lkh_model.py) handles action + STOP via a
+single softmax over K+1 logits. Seed selection defaults to an
+HPWL-weighted heuristic in placer.py.
 
-This module adds the missing seed head as a separate ``nn.Module`` so
-the existing ``ChainPolicy`` stays untouched. The head consumes the
-encoder's per-macro embeddings + the global vector and emits one score
-per macro. At chain spawn time the placer (or PPO rollout) consults the
-head, samples or argmaxes, and uses the chosen macro as the seed.
+This module adds an optional learned seed head as a separate
+``nn.Module`` so ``ChainPolicy`` stays untouched. The head consumes
+the encoder's per-macro embeddings + the global vector and emits one
+score per macro. At chain spawn time the placer (or PPO rollout)
+consults the head, samples or argmaxes, and uses the chosen macro as
+the seed.
 
 Storage: the seed head's weights are co-saved inside ``chain_policy.pt``
 under the key ``seed_head_state_dict`` so the placer loads them in one

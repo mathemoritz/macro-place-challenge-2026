@@ -1,6 +1,6 @@
-"""Step 2 — warm-start ablation.
+"""Warm-start ablation.
 
-Question: is our placer actually *optimizing*, or just polishing a placement
+Is our placer actually *optimizing*, or just polishing a placement
 (initial.plc) that already sits near proxy 1.46? To find out, run the exact
 same LKHPlacer (same checkpoints, same time budget) from three different
 starting points and compare the real proxy cost the official evaluator reports:
@@ -160,7 +160,7 @@ def main():
         ax.set_xticks(x + width * (len(init_modes) - 1) / 2)
         ax.set_xticklabels(benchmarks)
         ax.set_ylabel("proxy cost (lower = better)")
-        ax.set_title(f"Step 2: warm-start ablation "
+        ax.set_title(f"warm-start ablation "
                      f"({args.time_budget:.0f}s budget, {args.seeds} seed(s))")
         ax.axhline(1.4578, color="k", ls="--", lw=1,
                    label="RePlAce baseline (1.458)")

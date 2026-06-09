@@ -1,4 +1,4 @@
-"""ChainEnv — LK chain as an RL environment for Phase 4 PPO training.
+"""ChainEnv — LK chain as an RL environment for PPO training.
 
 Episode:
     reset implicitly at __init__: snapshot the placement, pick a seed macro
@@ -39,8 +39,8 @@ PlacementState = _placer.PlacementState
 _features_for_move = _placer._features_for_move
 FEATURE_DIM = _placer.FEATURE_DIM
 
-# Task 4: encoder for per-macro mask channels. Loaded lazily so the legacy
-# pre-Task-4 inference path doesn't import torch_geometric-shaped code on
+# Encoder for per-macro mask channels. Loaded lazily so the legacy
+# inference path doesn't import torch_geometric-shaped code on
 # Modal images that don't carry it.
 _encoder_mod = None
 def _get_encoder_module():
@@ -105,32 +105,32 @@ class ChainEnv:
                  terminal_reward_mode: str = "committed_gain",
                  gate_mode: str = "hpwl",
                  approximator: dict | None = None,
-                 # MaskRegulate opt-ins
+                 # Regularity / mask opt-ins
                  reg_weight: float = 0.0,
                  use_wiremask: bool = False,
                  use_position_mask: bool = False,
                  encoder=None,
-                 # Session building-block opt-ins
+                 # Feature-mode opt-ins
                  feature_mode: str = "handcrafted",
                  encoder_cache: dict | None = None,
                  lam: float = 0.01):
         """
-        D.1: ``terminal_reward_mode`` options:
+        ``terminal_reward_mode`` options:
         * ``"committed_gain"`` (default): per-step 0, terminal = best-prefix HPWL gain.
         * ``"hpwl_telescope_legacy"``: per-step ``-Δhpwl`` + terminal bonus.
-        * ``"predicted_proxy_with_postleg"`` (Fix 4): reward is the negative
+        * ``"predicted_proxy_with_postleg"``: reward is the negative
           cumulative predicted Δproxy across (committed chain moves + the
           ``fast_legalize`` moves applied to the committed best-prefix
-          state). Matches the poster's "post-legalization" reward signal.
+          state). Post-legalization reward signal.
           Requires ``approximator`` (uses predictions, not real proxy).
 
-        E.1 + Fix 5: ``gate_mode`` options:
+        ``gate_mode`` options:
         * ``"hpwl"`` (default): lex (overlap_pairs, overlap_area, hpwl).
         * ``"predicted_proxy"``: lex with cumulative predicted Δproxy third.
-        * ``"scalar_penalty"`` (Fix 5): single scalar
+        * ``"scalar_penalty"``: single scalar
           ``predicted_Δproxy + lam × n_new_overlap_pairs``.
 
-        Fix 2: ``feature_mode`` options:
+        ``feature_mode`` options:
         * ``"handcrafted"`` (default): hand-built 16/5/6/3-dim features.
         * ``"encoder"``: encoder embeddings + chain features (lengths).
           Requires ``encoder_cache`` with ``per_node`` and ``graph_vec``
@@ -167,12 +167,12 @@ class ChainEnv:
             # Soft fallback so policy rollouts without an approximator
             # don't blow up; matches LKChain.__init__ contract.
             self.gate_mode = "hpwl"
-        # MaskRegulate Task 1b: regularity blend weight. 0.0 = unchanged.
+        # Regularity blend weight. 0.0 = unchanged.
         self.reg_weight = float(reg_weight)
-        # Task 2/3: WireMask + position-mask candidate handling.
+        # WireMask + position-mask candidate handling.
         self.use_wiremask = bool(use_wiremask)
         self.use_position_mask = bool(use_position_mask)
-        # Task 4b: optional StateEncoder. The encoder's GNN forward depends
+        # Optional StateEncoder. The encoder's GNN forward depends
         # on the WHOLE state (positions + edges), so we cache it ONCE at
         # chain init — subsequent steps recompute only the CNN branch (per-
         # macro mask raster). The cache is invalidated naturally because
@@ -189,7 +189,7 @@ class ChainEnv:
         # Pre-compute scales so per-step ``_compute_third`` is allocation-free.
         self._hpwl_scale = max(state.cw, state.ch)
         self._reg_scale = state.cw + state.ch
-        # Session building-block fallbacks
+        # Fallbacks for missing dependencies.
         if feature_mode == "encoder" and encoder_cache is None:
             self.feature_mode = "handcrafted"
         if (terminal_reward_mode == "predicted_proxy_with_postleg"
@@ -204,10 +204,10 @@ class ChainEnv:
         self.start_regularity = (state.total_regularity()
                                   if self.reg_weight > 0.0 else 0.0)
 
-        # Best-prefix tracking. Session building-block: scalar gate uses
-        # ScalarBestTracker. Else: MaskRegulate's lex (overlap_pairs,
-        # overlap_area, _compute_third) where _compute_third blends
-        # hpwl/predicted_proxy with optional reg_weight regularity.
+        # Best-prefix tracking. Scalar gate uses ScalarBestTracker.
+        # Else: lex (overlap_pairs, overlap_area, _compute_third) where
+        # _compute_third blends hpwl/predicted_proxy with optional
+        # reg_weight regularity.
         self.use_scalar_gate = (self.gate_mode == "scalar_penalty")
         if self.use_scalar_gate:
             from commit_gate_scalar import ScalarBestTracker
@@ -234,7 +234,7 @@ class ChainEnv:
         self.chain_length = 0
         self.hpwl_gain = 0.0
         self.done = False
-        # A.3: visited set blocks the cascade from oscillating between the
+        # Visited set blocks the cascade from oscillating between the
         # same two macros under the combined manhattan/connectivity follow
         # rule.
         self.visited: set[int] = {seed_macro}
@@ -262,7 +262,7 @@ class ChainEnv:
 
         In handcrafted mode this is the 16-dim (or 17-dim under
         ``use_reg_feature``) ``_features_for_move`` vector.
-        In session encoder mode, the vector is
+        In encoder mode, the vector is
         ``[per_node[macro]; graph_vec; hand_feats]`` using the chain-level
         encoder cache. The approximator's stored ``feat_mean``/``feat_std``
         normalization matches whichever schema it was trained on.
@@ -342,11 +342,11 @@ class ChainEnv:
 
         n_displaced = len(self.state.overlapping_with(self.current_macro))
 
-        # Session encoder-mode global/macro features come from the
+        # Encoder-mode global/macro features come from the
         # encoder cache; chain features stay hand-crafted (the chain
         # progress signals — length, gain, n_displaced — aren't
         # network-derived). When encoder_cache is absent we fall back
-        # to the MaskRegulate / handcrafted features.
+        # to the handcrafted features.
         if self.feature_mode == "encoder" and self.encoder_cache is not None:
             per_node = self.encoder_cache["per_node"]
             graph_vec = self.encoder_cache["graph_vec"]
@@ -366,7 +366,7 @@ class ChainEnv:
             ),
             "raw_candidates": cands,
         }
-        # Task 4b: when an encoder is attached, append per-macro mask-CNN
+        # When an encoder is attached, append per-macro mask-CNN
         # output to the cached GNN globals, plus the cached per-node
         # embedding for the current macro. ``state_for_policy`` is the only
         # call site at which the encoder fires — once per chain step.
@@ -399,20 +399,20 @@ class ChainEnv:
         old_hpwl = self.state.hpwl()
         old_x = float(self.state.pos[self.current_macro, 0])
         old_y = float(self.state.pos[self.current_macro, 1])
-        # E.1 / Fix 5: predicted Δproxy needed for both predicted_proxy and
+        # Predicted Δproxy needed for both predicted_proxy and
         # scalar_penalty gates. Measured *before* apply_move (approximator
         # was trained on pre-move features).
         if self.gate_mode in ("predicted_proxy", "scalar_penalty"):
             step_pred_delta = self._predict_delta(old_x, old_y, cx, cy)
         else:
             step_pred_delta = 0.0
-        # B.3: apply_move keeps the incremental caches consistent so the
+        # apply_move keeps the incremental caches consistent so the
         # gate evaluation in _finalize and the per-step state_for_policy
         # features both read O(1) cached quantities.
         self.state.apply_move(self.current_macro, cx, cy)
         new_hpwl = self.state.hpwl()
         delta_hpwl = new_hpwl - old_hpwl
-        # D.1: per-step reward depends on terminal_reward_mode.
+        # Per-step reward depends on terminal_reward_mode.
         if self.terminal_reward_mode in ("committed_gain",
                                            "predicted_proxy_with_postleg"):
             reward = 0.0
@@ -423,8 +423,8 @@ class ChainEnv:
         if self.gate_mode in ("predicted_proxy", "scalar_penalty"):
             self.predicted_cumulative += step_pred_delta
 
-        # Best-prefix snapshot. Session: scalar gate uses ScalarBestTracker.
-        # MaskRegulate: lex tuple with _compute_third blending reg term.
+        # Best-prefix snapshot. Scalar gate uses ScalarBestTracker.
+        # Otherwise: lex tuple with _compute_third blending reg term.
         if self.use_scalar_gate:
             self.scalar_tracker.update(
                 self.state,
@@ -445,7 +445,7 @@ class ChainEnv:
                 self.best_prefix_index = self.chain_length
 
         # Cascade to a displaced macro under the combined manhattan/
-        # connectivity score (A.3); visited set blocks oscillation.
+        # connectivity score; visited set blocks oscillation.
         displaced = [j for j in self.state.overlapping_with(self.current_macro)
                      if self.state.movable[j] and j not in self.visited]
         if not displaced or self.chain_length >= self.max_chain_length:
@@ -463,9 +463,9 @@ class ChainEnv:
         return reward, False, {}
 
     def _finalize(self, reward: float = 0.0) -> tuple[float, bool, dict]:
-        # Best-prefix commit (A.1 + A.2 + E.1 + Fix 5): restore the lex-best
-        # (or scalar-best) prefix. Bulk pos[:]= writes bypass apply_move so
-        # we rebuild_caches() afterward (B.3 contract).
+        # Best-prefix commit: restore the lex-best (or scalar-best) prefix.
+        # Bulk pos[:]= writes bypass apply_move so we rebuild_caches()
+        # afterward (cache contract).
         if self.use_scalar_gate:
             committed = self.scalar_tracker.commit_best(self.state)
             self.best_prefix_index = self.scalar_tracker.best_prefix_index
@@ -478,7 +478,7 @@ class ChainEnv:
             self.state.rebuild_caches()
         self.done = True
 
-        # Fix 4: optional post-legalization reward via predicted Δproxy.
+        # Optional post-legalization reward via predicted Δproxy.
         # Runs fast_legalize on the committed best-prefix state and scores
         # each legalization move via the approximator. We pass the env's
         # ``_build_feat_vec`` so legalization features include encoder
@@ -492,7 +492,7 @@ class ChainEnv:
 
         end_overlaps = self.state.overlap_pairs() if self.use_scalar_gate else self.best_key[0]
         committed_hpwl_gain = (self.start_hpwl - self.state.hpwl()) if committed else 0.0
-        # MaskRegulate: committed regularity gain (start - end).
+        # Committed regularity gain (start - end).
         committed_reg_gain = (
             (self.start_regularity - self.state.total_regularity())
             if (committed and self.reg_weight > 0.0) else 0.0
@@ -503,7 +503,7 @@ class ChainEnv:
 
         # Terminal reward shape.
         if self.terminal_reward_mode == "predicted_proxy_with_postleg":
-            # Session: negative cumulative predicted Δproxy = improvement.
+            # Negative cumulative predicted Δproxy = improvement.
             if committed:
                 reward = -float(committed_predicted_cum + leg_predicted)
             else:
@@ -514,7 +514,7 @@ class ChainEnv:
             elif self.use_scalar_gate and committed:
                 reward = -float(committed_predicted_cum)
             elif self.reg_weight > 0.0:
-                # MaskRegulate: convex blend of canvas-normalized hpwl gain
+                # Convex blend of canvas-normalized hpwl gain
                 # and regularity gain. α = 1/(1+reg_weight) puts the two
                 # on comparable footing.
                 hpwl_gain_norm = (committed_hpwl_gain

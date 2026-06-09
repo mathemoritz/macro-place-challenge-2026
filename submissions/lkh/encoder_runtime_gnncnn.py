@@ -1,10 +1,9 @@
-"""Building block — GNN + CNN encoder runtime (Fix 2, optional secondary path).
+"""GNN + CNN encoder runtime.
 
-The poster diagram shows a single GNN encoder; the primary runtime path
-(``encoder_runtime.py``) matches that literally. This file is an optional
-extra: it wraps the existing ``encoder.StateEncoder`` which combines a
-GNN with a canvas CNN for spatial context. Enable with
-``encoder_kind="gnncnn"`` at placer construction.
+Wraps ``encoder.StateEncoder`` which combines a GNN with a canvas CNN
+for spatial context. Enable with ``encoder_kind="gnncnn"`` at placer
+construction; the GNN-only variant in ``encoder_runtime.py`` is the
+default.
 
 Output convention:
     per_node : [N, hidden_dim]                   — one per macro

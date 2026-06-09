@@ -1,12 +1,14 @@
-"""Building block — state snapshot for deferred-feature training (Fix 2 support).
+"""State snapshot for deferred-feature training.
 
-Why this exists: ``train.py`` currently freezes ``(features, target)``
-tensors at collect time. If we wire in the encoder, the cached features
-become a snapshot of the encoder at random init — training the encoder
-afterward does nothing because the cache is frozen.
+``train.py`` freezes ``(features, target)`` tensors at collect time.
+That works for the hand-feature path, but with the encoder wired in
+the cached features would be a snapshot of the encoder at random init
+— training the encoder afterward would do nothing because the cache
+is frozen.
 
-Fix: store the *state* at collect time, re-run the encoder forward inside
-each batch step at training time, gradient flows into the encoder.
+This module stores the *state* at collect time and re-runs the
+encoder forward inside each batch step at training time, so the
+gradient flows into the encoder.
 
 A snapshot bundles:
 - ``benchmark_name``      to look up cached netlist edges + sizes

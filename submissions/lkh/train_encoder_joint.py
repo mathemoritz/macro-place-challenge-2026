@@ -1,9 +1,8 @@
-"""Building block — joint regression trainer for encoder + cost approximator.
+"""Joint regression trainer for encoder + cost approximator.
 
-The poster says the encoder is "first trained via regression on proxy
-cost for stability, then updated jointly with the policy." This file
-handles the regression stage: collect snapshots, then for each batch
-re-run encoder + approximator together with one joint optimizer.
+Handles the regression-pretraining stage: collect snapshots, then for
+each batch re-run encoder + approximator together with one joint
+optimizer.
 
 Writes two checkpoints:
 - ``checkpoints/encoder.pt`` — encoder weights + architecture.
@@ -207,7 +206,7 @@ def train_encoder_and_approximator_joint(
 
     Returns ``(encoder_module, approximator_module, info_dict)``.
     The returned encoder is in ``eval()`` mode and the approximator weights
-    are the best-by-Spearman checkpoint (matches train.py Tier-1 fix A).
+    are the best-by-Spearman checkpoint (matches train.py's selection rule).
     """
     if encoder_kind == "gnn":
         from encoder_runtime import GNNEncoderRuntime as EncoderCls

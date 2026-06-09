@@ -1,19 +1,19 @@
-"""Building block — fast per-chain legalizer (Fix 4 part 1).
+"""Fast per-chain legalizer.
 
-The poster's PPO reward is measured AFTER legalization. To compute that
-reward inside a training rollout we need a legalization pass that's both
-(a) fast enough to run thousands of times during PPO, and (b) able to
-report the moves it applied so the cost approximator can score each one
-and we can sum predicted Δproxy for the post-legalization reward signal.
+Used to compute the post-legalization reward signal during PPO. The pass
+needs to be (a) fast enough to run thousands of times during training and
+(b) report the moves it applied so the cost approximator can score each
+one and the predicted post-leg Δproxy can be summed.
 
-This module provides ``fast_legalize`` — same outward-spiral algorithm as
-``placer._legalize`` but uses the incremental ``state.apply_move`` cache
-machinery and skips macros that don't need to move, and returns the move
-list with the 16-dim feature vector captured *before* each move is applied.
+``fast_legalize`` uses the same outward-spiral algorithm as
+``placer._legalize`` but routes moves through ``state.apply_move`` (so
+the incremental caches stay coherent), skips already-legal macros, and
+returns the moves with the feature vector captured *before* each move
+is applied.
 
-Note: this is meant to run inside ``ChainEnv._finalize`` and (optionally)
-elsewhere during training. The careful spiral legalizer in
-``placer._legalize`` is still the safety net at the end of ``LKHPlacer.place``.
+Meant to run inside ``ChainEnv._finalize`` and other training-time
+contexts. The careful spiral legalizer in ``placer._legalize`` is still
+the final safety net at the end of ``LKHPlacer.place``.
 """
 
 from __future__ import annotations

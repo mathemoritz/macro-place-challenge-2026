@@ -1,17 +1,16 @@
-"""Building block — analytical-seed loader (Fix 1).
+"""Analytical-seed loader.
 
-The poster claims inference is seeded by a state-of-the-art analytical
-placement (RePlAce or DREAMPlace), not by the ``initial.plc`` shipped with
-the benchmark. This module loads such a seed from ``seeds/<bench>.plc``.
+Loads a pre-computed analytical placement (e.g. RePlAce or DREAMPlace
+output) from ``seeds/<bench>.plc`` so the chain refinement loop can start
+from an analytical seed instead of the ``initial.plc`` shipped with the
+benchmark.
 
-Drop a pre-computed RePlAce/DREAMPlace ``.plc`` output for each benchmark
-into ``submissions/lkh/seeds/`` and the placer (with
-``seed_source="replace"``) will pick it up instead of the default
-initial.plc positions.
+Drop a ``.plc`` output for each benchmark into
+``submissions/lkh/seeds/`` and the placer (with ``init_mode="replace"``)
+will pick it up.
 
 If the seed file is missing the loader returns ``None`` so the caller can
-decide whether to raise (recommended — silent fallback to initial.plc is
-exactly the bug the poster was meant to avoid) or warn.
+either raise (no silent fall-back to initial.plc) or warn and continue.
 """
 
 from __future__ import annotations

@@ -4,9 +4,10 @@
 > [`README.md`](../../README.md), which shows this documentation first and the
 > original challenge readme below when you scroll down on GitHub.
 
-A macro placement system that beats the `initial.plc` placement by combining
-non-learned Lin-Kernighan chain refinement with two learned models. Based on
-`background/mvp_implementation_plan_lkh.md`. All training infrastructure runs
+A macro placement system that refines an analytical seed placement
+(RePlAce or DREAMPlace) via a Lin-Kernighan-style cascading local search
+guided by three learned components: a GNN state encoder, an MLP cost
+approximator, and a PPO actor-critic policy. Training infrastructure runs
 either locally or on Modal cloud.
 
 > **Two docs.** This `README.md` is the **operational guide** — commands,
@@ -88,18 +89,27 @@ overlaps to zero so the output is a valid competition submission.
 | File | Role |
 |---|---|
 | `placer.py` | The placer (`LKHPlacer`). Contains `PlacementState`, `LKChain`, `_legalize`, checkpoint loaders. This is what the competition evaluator calls. |
-| `lkh_model.py` | The two neural models: `CostApproximator` (Phase 3) and `ChainPolicy` (Phase 4 actor-critic). |
+| `lkh_model.py` | The two MLP/actor-critic models: `CostApproximator` and `ChainPolicy`. |
 | `chain_env.py` | `ChainEnv` — wraps `PlacementState` as a Gym-style RL environment for PPO. |
-| `encoder.py` | `PlacementGNN` + `CanvasCNN` + `StateEncoder` (Phase 2). Implemented but **not yet wired** into the rest of the pipeline; uses hand-crafted features by default. |
-| `train.py` | Phase 3 trainer for `CostApproximator`. Collects `(features, exact_Δproxy_cost)` triples and trains an MLP. |
-| `train_policy.py` | Phase 4 PPO trainer for `ChainPolicy`. |
-| `train_iter.py` | Phase 5 iterative loop: Phase 3 + Phase 4 + per-benchmark evaluation, repeated N rounds. |
-| `ablate.py` | Phase 7 ablation: compares initial / HPWL-surrogate / +approximator / +policy on a benchmark. |
+| `encoder.py` | `PlacementGNN` + `CanvasCNN` + `StateEncoder`. Consumed by the runtime wrappers and training scripts. |
+| `encoder_runtime.py` | GNN-only encoder runtime used at inference and during joint training. |
+| `encoder_runtime_gnncnn.py` | Optional GNN+CNN encoder runtime variant. |
+| `seed_head.py` | Learned seed-selection head; co-stored with the chain policy checkpoint. |
+| `seed_loader.py` | Loads an analytical seed placement (RePlAce / DREAMPlace) from `seeds/`. |
+| `fast_legalize.py` | Fast in-loop legalizer used for the post-legalization reward signal. |
+| `commit_gate_scalar.py` | Scalar commit-gate scoring: predicted Δproxy + overlap penalty. |
+| `state_snapshot.py` | Frozen state snapshots used by the joint encoder + approximator regression trainer. |
+| `train.py` | Trainer for `CostApproximator`. Collects `(features, exact_Δproxy_cost)` triples and trains an MLP. |
+| `train_encoder_joint.py` | Joint regression trainer for encoder + cost approximator. |
+| `train_policy.py` | PPO trainer for `ChainPolicy` (and seed head when enabled). |
+| `train_iter.py` | Iterative loop: cost-model training + PPO + per-benchmark evaluation + calibration. |
+| `ablate.py` | Ablation runner: compares placer configurations on a benchmark. |
 | `visualize.py` | Side-by-side renders: initial placement vs LKHPlacer output, with displacement arrows. |
-| `modal_run.py` | Modal entry points (smoke, train, policy, iter\_). All long-running training jobs go through this. |
-| `checkpoints/` | Trained weights (`cost_approximator.pt`, `chain_policy.pt`). The placer auto-loads if present. |
+| `modal_run.py` | Modal entry points (smoke, train, policy, iter\_). Long-running training jobs go through this. |
+| `seeds/` | Drop pre-computed analytical seed `.plc` files here (one per benchmark). |
+| `checkpoints/` | Trained weights (`encoder.pt`, `cost_approximator.pt`, `chain_policy.pt`). The placer auto-loads if present. |
 | `data/` | Cached training data. `chain_data.pt` is the aggregated dataset; `per_bench/` has per-benchmark caches that survive preemption. |
-| `iter_output/` | Per-round archival from `train_iter.py` (round\_0/, round\_1/, ..., history.json). |
+| `iter_output/` | Per-round archival from `train_iter.py` (`round_<i>/`, `history.json`). |
 
 ## Local Workflows
 
@@ -142,13 +152,13 @@ uv run python submissions/lkh/visualize.py --benchmark ibm01,ibm07 --no-arrows
 ### Train locally (for quick experiments)
 
 ```bash
-# Phase 3 only (cost approximator on ibm01)
+# Cost approximator alone (on ibm01)
 uv run python submissions/lkh/train.py --benchmark ibm01 --num-examples 200
 
-# Phase 4 only (PPO policy on ibm01)
+# PPO policy alone (on ibm01)
 uv run python submissions/lkh/train_policy.py --benchmark ibm01 --iterations 200
 
-# Phase 5 full pipeline (small, ~5 min)
+# Full iterative pipeline (small, ~5 min)
 uv run python submissions/lkh/train_iter.py \
     --benchmark ibm01,ibm07 --rounds 1 --examples 20 --policy-iterations 100
 ```
@@ -167,8 +177,7 @@ that needs more than a few minutes.
 # Install the Modal CLI in this project
 uv add modal
 
-# Authenticate (opens browser to your Modal account; you should have credits
-# from the CS224R compute email)
+# Authenticate (opens browser to your Modal account)
 uv run modal setup
 ```
 
@@ -255,7 +264,7 @@ your laptop; the run continues on Modal.
 |---|---:|---|
 | `--benchmark` | `ibm01` | `all` = full IBM suite (17). Comma list for subsets. |
 | `--rounds` | `2` | More rounds = longer PPO warm-start. Each round after the first is fast (data cached). |
-| `--examples` | `400` | Per-benchmark sample count for Phase 3. `compute_proxy_cost` cost scales with examples × benchmark size. |
+| `--examples` | `400` | Per-benchmark sample count for cost-approximator data collection. `compute_proxy_cost` cost scales with examples × benchmark size. |
 | `--policy-iterations` | `1000` | PPO update count per round. 1500-3000 is reasonable. |
 | `--trajectories-per-iter` | `4` | Higher = better gradient estimates but slower PPO. |
 | `--eval-time-budget` | `20.0` | Seconds per benchmark during eval phase. Bigger = better placement quality. |
@@ -263,7 +272,7 @@ your laptop; the run continues on Modal.
 | `--output-tag` | `iter` | Volume subtree `/output/<tag>/` (required for parallel jobs). |
 | `--cache-read-dir` | `` | e.g. `/output/iter/per_bench` to reuse another run's caches. |
 | `--skip-collection` | off | Require existing per-bench `.pt` under `cache-read-dir`. |
-| `--calibration-samples-per-bench` | `50` | C.3 samples after each round. |
+| `--calibration-samples-per-bench` | `50` | Calibration samples after each round. |
 | `--calibration-time-budget-s` | `10.0` | Placer seconds per benchmark during calibration. |
 | `--force-recollect` | off | Wipes per-benchmark cache before collection. Use on first `long12h` run. |
 
@@ -385,8 +394,8 @@ Three layers of resilience, in order of how often they help:
 | `LKHPlacer.__init__` | `max_chain_length` | 8 | 5-10 reasonable; longer chains rarely help |
 | `LKHPlacer.__init__` | `stagnation_threshold` | 50 | Chains without improvement before random perturbation |
 | `LKHPlacer.__init__` | `perturb_macros` | 5 | How many macros to randomly move on stagnation |
-| `train.py` `--num-examples` | 1500 | Per-benchmark Phase 3 data count |
-| `train.py` `--epochs` | 60 | Phase 3 training epochs |
+| `train.py` `--num-examples` | 1500 | Per-benchmark data collection count |
+| `train.py` `--epochs` | 60 | Cost approximator training epochs |
 | `train.py` `--hidden` | 64 | CostApproximator hidden dim |
 | `train_policy.py` `--iterations` | 200 | PPO iterations (1500-3000 for real runs) |
 | `train_policy.py` `--ent-coef` | 0.01 | Bump up if policy collapses too fast |
@@ -402,33 +411,25 @@ Three layers of resilience, in order of how often they help:
 | Modal "Cancellation signal" mid-collection | `.remote()` instead of `.spawn()` or attached `modal run` instead of `--detach` | Use the documented launch command (`.spawn()` + `--detach`) |
 | Modal `App ... has no attribute 'Mount'` | Modal 1.x removed `Mount.from_local_dir` | Already using `image.add_local_dir(...)` |
 | `modal call logs` errors with "No such command" | Modal 1.x uses `modal app logs`, not `modal call` | Use `modal app logs lkh-macro-place` |
-| Phase 3 Pearson stays low (< 0.6) | Not enough multi-benchmark data | Bump `--examples` |
+| Cost approximator Pearson stays low | Not enough multi-benchmark data | Bump `--examples` |
 | PPO commit rate stuck at 0% | Entropy collapsed too fast | Increase `--ent-coef` to 0.05 |
 | Long benchmark hangs at "first call: > 100s" | `compute_proxy_cost` natural slowness on big designs (ibm17, ibm18) | Expected. Parallel mode bounds wall time. |
 
-## Deferred Work (Not Yet Used)
+## Future Directions
 
-- **Phase 2 GNN+CNN encoder.** `encoder.py` is implemented and smoke-tested
-  (3-layer message-passing GNN over the netlist + 3-channel canvas CNN), but
-  not wired into the rest of the pipeline. The current models use the
-  hand-crafted 16-dim feature vector from `placer._features_for_move` and
-  the global/macro/chain features from `chain_env.py`. To wire the encoder
-  in, replace those feature constructors with `encoder.encode_state(...)` and
-  bump the input dims on `CostApproximator` and `ChainPolicy`. See the
-  docstring in `encoder.py` for the exact recipe.
-
-- **Best-policy tracking in PPO.** PPO can collapse late in training; we
-  currently save the *last* policy. A "best by commit rate" tracker is a
-  small addition.
-
-- **Mid-PPO validation.** Currently we validate the policy only via the
-  per-round `evaluate_round` call. Periodic in-training eval would help
-  diagnose training dynamics.
+- **Gradient-based local refinement.** The cost approximator is
+  differentiable; gradient steps through it could refine macro positions
+  locally, using the cost model as a continuous optimizer rather than
+  only a per-candidate scorer.
+- **Wider models.** Defaults are deliberately small (hidden=64);
+  higher-capacity approximator + wider policy should fit the proxy more
+  closely.
+- **Larger neighborhoods.** Extending the maximum chain length and
+  proposing more candidate positions per step would let one cascade rework
+  a larger neighborhood.
 
 ## Reference
 
-- Plan: `background/mvp_implementation_plan_lkh.md`
 - Macro Placement Challenge: `CHALLENGE_README.md`, `SETUP.md`, `SCORING.md`
 - Evaluator: `macro_place/evaluate.py`
 - Baseline placers: `submissions/examples/`, `submissions/will_seed/`
-- Modal compute guide: CS224R Modal Compute Guide PDF (see TA email)

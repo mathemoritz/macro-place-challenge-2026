@@ -62,15 +62,22 @@ All of `submissions/lkh/`. Key files:
 
 | Path | Role |
 |---|---|
-| `placer.py` | `LKHPlacer` (Phase 6 inference), `PlacementState`, `LKChain`, `_legalize`, `_features_for_move` (16-dim), checkpoint loaders |
-| `lkh_model.py` | `CostApproximator` (16→64→64→1 MLP), `ChainPolicy` (actor-critic, K+1 logits) |
-| `chain_env.py` | `ChainEnv` Gym wrapper; `compute_global/macro/chain_features` |
-| `train.py` | Phase 3: state-drift data collection + C.2 mini-cascade pre-roll + C.3 calibration sampling + Tier-1 rank loss / Spearman-best selection |
-| `train_policy.py` | Phase 4: PPO + Tier-1 Fix C (best-by-commit-EMA snapshot, 20-iter warmup) |
-| `train_iter.py` | Phase 5: round = load/collect → train approx → PPO → per-bench eval → calibration |
-| `modal_run.py` | Modal cloud app `lkh-macro-place`, `lkh-results` volume, `iter_`/`iter_12h`/`iter_medium` entry points |
-| `ablate.py` | Phase 7: legacy A/B/C/D + milestone-mode A→E with history-file deltas |
-| `encoder.py` | Phase 2 pure-PyTorch GNN+CNN — **implemented, smoke-tested, not wired in** |
+| `placer.py` | `LKHPlacer` inference entry point, `PlacementState`, `LKChain`, `_legalize`, `_features_for_move`, checkpoint loaders |
+| `lkh_model.py` | `CostApproximator` MLP, `ChainPolicy` actor-critic with K+1 logits |
+| `chain_env.py` | `ChainEnv` Gym wrapper; per-step feature builders |
+| `encoder.py` | `PlacementGNN` + `CanvasCNN` + `StateEncoder`; consumed by the runtime wrappers |
+| `encoder_runtime.py`, `encoder_runtime_gnncnn.py` | Encoder loaders + caching helpers used at inference and training |
+| `seed_loader.py`, `seeds/` | Analytical-seed loader and where pre-computed `.plc` files live |
+| `seed_head.py` | Learned seed-selection head, co-stored with the policy checkpoint |
+| `fast_legalize.py` | Fast in-loop legalizer for the post-legalization reward signal |
+| `commit_gate_scalar.py` | Scalar commit-gate scorer with overlap penalty |
+| `state_snapshot.py` | Frozen snapshots used by the joint encoder + approximator trainer |
+| `train.py` | Cost-approximator data collection + MLP training |
+| `train_encoder_joint.py` | Joint regression trainer for encoder + cost approximator |
+| `train_policy.py` | PPO trainer for chain policy (and seed head when enabled) |
+| `train_iter.py` | Iterative loop: collect/load → train cost model → PPO → eval → calibration |
+| `modal_run.py` | Modal cloud entry points; parallel per-benchmark collection + iterative training |
+| `ablate.py` | Ablation runner |
 | `visualize.py`, `visualize_comprehensive.py` | Side-by-side and panel renders |
 | `ARCHITECTURE.md`, `README.md` | The walkthrough and the operational guide |
 
@@ -89,9 +96,9 @@ onto Moritz's fork (`mathemoritz/LKH-macro-placer`). Current layout:
 - `origin` → `git@github.com:mathemoritz/LKH-macro-placer.git` (default for push/fetch)
 - `danny` → `git@github.com:dannyhagenlocker/macro-place-challenge-2026.git` (preserved, read-only in practice)
 
-The branch `session-on-mosch` (HEAD) holds our building-block work on top
-of Moritz's 8 MaskRegulate commits. `main` tracks `origin/main` (= mosch's
-main, 8 commits ahead of the baseline `1db4642`).
+The branch `session-on-mosch` (HEAD) holds our session work on top of
+Moritz's 8 commits. `main` tracks `origin/main` (= mosch's main, 8
+commits ahead of the baseline `1db4642`).
 
 Future development should push to `origin` (= mosch). Do NOT push to
 `danny` unless explicitly requested — Danny's fork is intentionally
@@ -136,9 +143,9 @@ them in mind when changing related code.
    download with `modal volume get lkh-results /iter ./modal_output`, then
    `cp modal_output/iter/checkpoints/*.pt submissions/lkh/checkpoints/`.
    The judges expect to find them at `submissions/lkh/checkpoints/`.
-9. **Tier-1 selection metric is Spearman ρ, not Smooth-L1.** The placer
-   uses `CostApproximator` as an argmin-over-candidates ranker; rank
-   correlation, not amplitude, is what predicts downstream proxy gain.
+9. **Cost-approximator best-checkpoint metric is Spearman ρ, not Smooth-L1.**
+   The placer uses `CostApproximator` as an argmin-over-candidates ranker;
+   rank correlation, not amplitude, is what predicts downstream proxy gain.
 10. **PPO ships the best-by-commit-EMA snapshot, not the last iteration.**
     Late PPO can collapse (entropy → 0). EMA α=0.1, warmup 20 iters.
 
@@ -169,7 +176,7 @@ modal volume ls lkh-results /iter/per_bench
 ## Pointers
 
 - Operational guide and tuning knobs: `submissions/lkh/README.md`
-- Architectural walkthrough (Phase 1–7 + Modal arch + feature schema): `submissions/lkh/ARCHITECTURE.md`
+- Architectural walkthrough (per-component breakdown + Modal arch + feature schema): `submissions/lkh/ARCHITECTURE.md`
 - Challenge rules + leaderboard: `CHALLENGE_README.md`
 - Tier-2 scoring formula: `SCORING.md`
 - Repo API reference: `SETUP.md`

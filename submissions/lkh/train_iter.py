@@ -1,24 +1,23 @@
-"""Phase 5 — iterative training loop (single or multi-benchmark).
+"""Iterative training loop (single or multi-benchmark).
 
 Each round:
     1. Load (or re-collect) per-benchmark caches (``per_bench/<name>.pt``)
-       and train the CostApproximator on the combined dataset (Phase 3).
+       and train the CostApproximator on the combined dataset.
        Caches are populated by Modal parallel collection or
-       ``train.collect_data``. After D.2 of the LKH critique fix plan,
-       data is RE-COLLECTED EACH ROUND by default — the iterative loop's
-       stated purpose is to drift training data toward the inference
-       distribution, and the pre-fix loop silently bypassed
-       ``--force-recollect-each-round`` for per-benchmark caches.
+       ``train.collect_data``. Data is RE-COLLECTED EACH ROUND by
+       default — the iterative loop's stated purpose is to drift
+       training data toward the inference distribution, and the earlier
+       loop silently bypassed ``--force-recollect-each-round`` for
+       per-benchmark caches.
     2. Train the ChainPolicy with PPO sampling rollouts uniformly across
-       the same benchmark list (Phase 4).
+       the same benchmark list.
     3. Run end-to-end placer evaluation on EACH benchmark and report
        proxy / overlaps / wall-time.
-    4. (C.3) Calibration sampling: capture (features, true_Δproxy) at
+    4. Calibration sampling: capture (features, true_Δproxy) at
        inference-time states and stash for next round's training data.
 
-Multi-benchmark training addresses the generalization gap noted in the
-review — both models otherwise overfit to whichever single benchmark they
-were trained on.
+Multi-benchmark training addresses the generalization gap — both models
+otherwise overfit to whichever single benchmark they were trained on.
 
 Usage:
     uv run python submissions/lkh/train_iter.py --rounds 3 --examples 500
@@ -50,8 +49,8 @@ sys.path.insert(0, str(_HERE.parent.parent))
 
 # Load helper modules without dragging the macro_place package init through
 # importlib for a second time.
-import train as _train          # Phase 3 trainer
-import train_policy as _trainp  # Phase 4 trainer
+import train as _train          # CostApproximator trainer
+import train_policy as _trainp  # PPO policy trainer
 from lkh_model import FEATURE_DIM
 
 # Mirror of ``modal_run.ITER_PRESETS`` (training knobs only; no output_tag).
@@ -91,7 +90,7 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               enable_calibration: bool = True,
               calibration_samples_per_bench: int = 50,
               calibration_time_budget_s: float = 10.0,
-              # MaskRegulate flags
+              # Regularity / wiremask flags
               gate_mode: str = "hpwl",
               reg_weight: float = 0.0,
               use_wiremask: bool = False,
@@ -103,7 +102,7 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               use_encoder: bool = False,
               encoder_hidden: int = 64,
               encoder_grid: int = 64,
-              # Session building-block opt-ins
+              # Optional encoder/seed opt-ins
               feature_mode: str = "handcrafted",
               encoder_kind: str = "gnn",
               encoder_ckpt: str | None = None,
@@ -111,7 +110,7 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
               seed_mode: str = "heuristic",
               terminal_reward_mode: str = "committed_gain",
               encoder_fine_tune_in_ppo: bool = False) -> dict:
-    """Run one round of Phase 3 + Phase 4 + per-benchmark evaluation.
+    """Run one round of cost-model training + PPO + per-benchmark evaluation.
 
     Canonical writes (so the placer can find the latest checkpoints) go to
     ``cost_ckpt`` and ``policy_ckpt``. When ``output_root`` is provided, each
@@ -119,14 +118,15 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
     plus a per-round JSON record — this is what makes detached Modal runs
     crash-safe and lets you compare rounds after the fact.
 
-    When ``per_benchmark_cache_dir`` is set, Step 1a only **loads** existing
-    ``<name>.pt`` caches (no re-collection). Populate caches via Modal
-    parallel collection or ``train.collect_data`` before calling this.
+    When ``per_benchmark_cache_dir`` is set, the data-loading step only
+    **loads** existing ``<name>.pt`` caches (no re-collection). Populate
+    caches via Modal parallel collection or ``train.collect_data`` before
+    calling this.
     """
     print(f"\n========== Round {round_idx} ==========")
     print(f"  benchmarks = {benchmarks}")
 
-    # ── Step 1: load training data + Phase 3 training ─────────────────────
+    # ── Step 1: load training data + cost-model training ──────────────────
     use_cache = False
     bench_cache_dir = (
         Path(per_benchmark_cache_dir) if per_benchmark_cache_dir else None
@@ -179,10 +179,10 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
                 benchmarks, num_examples_per_benchmark,
                 seed=seed + round_idx,
             )
-        # C.3: prepend the previous round's calibration samples (if any).
+        # Prepend the previous round's calibration samples (if any).
         # Calibration captures (features, true_Δproxy) at inference-time
         # states; mixing them into the next round's training distribution
-        # closes the §5.4 within-round calibration gap.
+        # closes the within-round calibration gap.
         n_calibration_samples = 0
         if enable_calibration and round_idx > 0 and output_root is not None:
             prev_cal = output_root / f"round_{round_idx - 1}_calibration.pt"
@@ -199,8 +199,9 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
                    data_path)
     else:
         # Cached aggregated chain_data.pt; recover the prepend count for the
-        # rank-loss group synthesizer. Falls back to 0 if the cache is older
-        # than Fix B (the rank loss then treats the whole array as main).
+        # rank-loss group synthesizer. Falls back to 0 for older caches that
+        # predate the rank-loss field (the rank loss then treats the whole
+        # array as main).
         n_calibration_samples = int(cached.get("n_calibration_samples", 0))
 
     print(f"\n[Round {round_idx}] Step 1b: train CostApproximator "
@@ -227,7 +228,7 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
     print(f"  CostApproximator -> Pearson={info['pearson']:.3f}  "
           f"Spearman={info['spearman']:.3f}  saved to {cost_ckpt}")
 
-    # ── Step 2: Phase 4 PPO training ──────────────────────────────────────
+    # ── Step 2: PPO policy training ───────────────────────────────────────
     warm_start = policy_ckpt if (round_idx > 0 and policy_ckpt.exists()) else None
     print(f"\n[Round {round_idx}] Step 2: PPO policy ({policy_iterations} iters, "
           f"warm_start={'yes' if warm_start else 'no'})")
@@ -243,7 +244,7 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         output_ckpt=policy_ckpt,
         initial_policy_ckpt=warm_start,
         log_every=max(policy_iterations // 5, 1),
-        # MaskRegulate flags
+        # Regularity / wiremask flags
         gate_mode=gate_mode,
         reg_weight=reg_weight,
         use_wiremask=use_wiremask,
@@ -253,7 +254,7 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
         use_encoder=use_encoder,
         encoder_hidden=encoder_hidden,
         encoder_grid=encoder_grid,
-        # Session building-block flags
+        # Optional encoder/seed flags
         feature_mode=feature_mode,
         encoder_kind=encoder_kind,
         encoder_ckpt=encoder_ckpt,
@@ -275,7 +276,7 @@ def run_round(round_idx: int, *, benchmarks: list[str], num_examples_per_benchma
             use_wiremask=use_wiremask, use_position_mask=use_position_mask,
         )
 
-    # ── Step 4 (C.3): calibration sampling ─────────────────────────────────
+    # ── Step 4: calibration sampling ──────────────────────────────────────
     # Capture (features, true_Δproxy) pairs at the placer's inference-time
     # states so the next round's approximator sees the residual distribution
     # that single-move + cascade-interior sampling alone misses.
@@ -392,17 +393,17 @@ def main():
                         "~12 h Modal run; prefer modal_run.py::iter_ --preset long12h on cloud.")
     p.add_argument("--rounds", type=int, default=2)
     p.add_argument("--examples", type=int, default=400,
-                   help="Per-benchmark example count (Phase 3 data collection).")
+                   help="Per-benchmark example count for data collection.")
     p.add_argument("--cost-epochs", type=int, default=60)
     p.add_argument("--policy-iterations", type=int, default=100)
     p.add_argument("--trajectories-per-iter", type=int, default=4)
     p.add_argument("--eval-time-budget", type=float, default=20.0,
                    help="Seconds per benchmark during the per-round evaluation step.")
     p.add_argument("--seed", type=int, default=42)
-    # D.2 (LKH critique fix): the iterative loop's stated purpose is to
-    # drift training data toward the inference distribution, so re-collect
-    # is the right default. The new flag invalidates per-benchmark caches
-    # too, not just the aggregated cache.
+    # The iterative loop's stated purpose is to drift training data toward
+    # the inference distribution, so re-collect is the right default. The
+    # flag invalidates per-benchmark caches too, not just the aggregated
+    # cache.
     p.add_argument("--force-recollect-each-round",
                    action=argparse.BooleanOptionalAction, default=True,
                    help="Re-collect training data every round. Default: True. "
@@ -429,41 +430,40 @@ def main():
                    help="If a per-benchmark cache is missing, collect it instead "
                         "of failing. Modal runs should leave this off.")
     p.add_argument("--no-calibration", action="store_true",
-                   help="Disable C.3 within-round calibration sampling. "
+                   help="Disable within-round calibration sampling. "
                         "Default: calibration is on.")
     p.add_argument("--calibration-samples-per-bench", type=int, default=50,
-                   help="C.3: per-benchmark calibration samples after each "
+                   help="Per-benchmark calibration samples after each "
                         "round's eval (default 50).")
     p.add_argument("--calibration-time-budget", type=float, default=10.0,
-                   help="C.3: seconds per-benchmark for the calibration "
+                   help="Seconds per-benchmark for the calibration "
                         "placer pass (default 10).")
-    # MaskRegulate flags (Tasks 1-3). Default OFF preserves legacy behavior;
-    # next-gen runs flip them on as a bundle.
+    # Regularity / wiremask flags. Default OFF preserves legacy behavior;
+    # newer runs flip them on as a bundle.
     p.add_argument("--use-reg-feature", action="store_true",
-                   help="Task 1c: 17-d features with regularity Δ.")
+                   help="17-d features with regularity Δ.")
     p.add_argument("--reg-weight", type=float, default=0.0,
-                   help="Task 1b: regularity blend in chain gate + PPO reward.")
+                   help="Regularity blend in chain gate + PPO reward.")
     p.add_argument("--use-wiremask", action="store_true",
-                   help="Task 2: inject analytic HPWL-best cells as candidates.")
+                   help="Inject analytic HPWL-best cells as candidates.")
     p.add_argument("--use-position-mask", action="store_true",
-                   help="Task 3: legality-filter WireMask candidates.")
-    # gate-mode supports MaskRegulate's hpwl/predicted_proxy + session
-    # building-block 'scalar_penalty'.
+                   help="Legality-filter WireMask candidates.")
+    # gate-mode supports hpwl/predicted_proxy + 'scalar_penalty'.
     p.add_argument("--gate-mode",
                    choices=("hpwl", "predicted_proxy", "scalar_penalty"),
                    default="hpwl",
                    help="Third lex coord of the commit gate "
                         "(or scalar score under 'scalar_penalty').")
-    # Step 1 (ranking lever): expose the rank-loss knobs to the iterative
-    # loop so a full-suite rank-weight sweep is a single flag.
+    # Expose the rank-loss knobs to the iterative loop so a full-suite
+    # rank-weight sweep is a single flag.
     p.add_argument("--rank-weight", type=float, default=1.0,
                    help="Weight on the CostApproximator's within-state pairwise "
-                        "rank loss (Fix B). 0.0 = pure regression baseline.")
+                        "rank loss. 0.0 = pure regression baseline.")
     p.add_argument("--rank-margin", type=float, default=0.1,
                    help="Margin for the rank loss (normalized-target units).")
     p.add_argument("--no-rank-loss", action="store_true",
                    help="Disable the pairwise rank loss entirely.")
-    # Step 3 (encoder wiring): co-train the GNN+CNN encoder with the policy.
+    # Co-train the GNN+CNN encoder with the policy.
     p.add_argument("--use-encoder", action="store_true",
                    help="Co-train the GNN+CNN StateEncoder and feed its "
                         "embeddings to the policy (and at inference).")
@@ -471,7 +471,7 @@ def main():
                    help="StateEncoder hidden dim. Default 64.")
     p.add_argument("--encoder-grid", type=int, default=64,
                    help="Per-macro mask raster resolution. Default 64.")
-    # Session building-block flags. Defaults preserve legacy behavior.
+    # Optional encoder/seed flags. Defaults preserve legacy behavior.
     p.add_argument("--feature-mode", choices=["handcrafted", "encoder"],
                    default="handcrafted",
                    help="'encoder' uses GNN encoder features in PPO.")
@@ -505,7 +505,7 @@ def main():
         Path(args.per_benchmark_cache_dir) if args.per_benchmark_cache_dir else None
     )
 
-    print(f"=== Phase 5: iterative training ===")
+    print(f"=== Iterative training ===")
     print(f"  benchmarks={benchmarks}  rounds={args.rounds}")
     print(f"  examples/benchmark={args.examples}  cost_epochs={args.cost_epochs}  "
           f"policy_iters={args.policy_iterations}")
@@ -514,7 +514,7 @@ def main():
 
     history: list[dict] = []
     for r in range(args.rounds):
-        # D.2: round 0 may opt back into cache reuse via --reuse-round-0-data.
+        # Round 0 may opt back into cache reuse via --reuse-round-0-data.
         # Rounds >= 1 always honor --force-recollect-each-round (default True).
         force_recollect_r = args.force_recollect_each_round and not (
             r == 0 and args.reuse_round_0_data
@@ -538,7 +538,7 @@ def main():
             enable_calibration=not args.no_calibration,
             calibration_samples_per_bench=args.calibration_samples_per_bench,
             calibration_time_budget_s=args.calibration_time_budget,
-            # MaskRegulate flags
+            # Regularity / wiremask flags
             gate_mode=args.gate_mode,
             reg_weight=args.reg_weight,
             use_wiremask=args.use_wiremask,
@@ -550,7 +550,7 @@ def main():
             use_encoder=args.use_encoder,
             encoder_hidden=args.encoder_hidden,
             encoder_grid=args.encoder_grid,
-            # Session building-block flags
+            # Optional encoder/seed flags
             feature_mode=args.feature_mode,
             encoder_kind=args.encoder_kind,
             encoder_ckpt=args.encoder_ckpt,
@@ -567,7 +567,7 @@ def main():
                 json.dumps(history, indent=2, default=str)
             )
 
-    print(f"\n=== Phase 5 summary ===")
+    print(f"\n=== Iterative training summary ===")
     print(f"  Approximator quality per round:")
     print(f"    round | Pearson | Spearman")
     for h in history:

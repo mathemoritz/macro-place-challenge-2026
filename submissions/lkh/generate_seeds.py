@@ -1,8 +1,8 @@
 """Placeholder script — documents how to populate ``submissions/lkh/seeds/``.
 
-The poster claims inference is seeded from a state-of-the-art analytical
-placement (RePlAce or DREAMPlace). Neither tool ships in this repo, so
-seeds are produced externally and dropped into ``seeds/<bench>.plc``.
+The placer is seeded from an analytical placement (e.g. RePlAce or
+DREAMPlace). Neither tool ships in this repo, so seeds are produced
+externally and dropped into ``seeds/<bench>.plc``.
 
 Recommended path:
 

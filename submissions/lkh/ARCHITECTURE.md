@@ -14,12 +14,12 @@ it live in the codebase?** If you want the operational guide instead, see
 5. [`LKChain` — the cascade move pattern](#5-lkchain--the-cascade-move-pattern)
 6. [The commit gate — lex `(overlap_pairs, hpwl)`](#6-the-commit-gate--lex-overlap_pairs-hpwl)
 7. [Legalization — spiral search to zero overlaps](#7-legalization--spiral-search-to-zero-overlaps)
-8. [Phase 3 — `CostApproximator`](#8-phase-3--costapproximator)
-9. [Phase 4 — `ChainPolicy` (PPO)](#9-phase-4--chainpolicy-ppo)
-10. [Phase 5 — Iterative training loop](#10-phase-5--iterative-training-loop)
-11. [Phase 6 — Inference (`LKHPlacer.place`)](#11-phase-6--inference-lkhplacerplace)
-12. [Phase 7 — Ablation](#12-phase-7--ablation)
-13. [Phase 2 — GNN + CNN encoder (deferred)](#13-phase-2--gnn--cnn-encoder-deferred)
+8. [`CostApproximator` — MLP cost model](#8-costapproximator--mlp-cost-model)
+9. [`ChainPolicy` — PPO actor-critic](#9-chainpolicy--ppo-actor-critic)
+10. [Iterative training loop](#10-iterative-training-loop)
+11. [Inference (`LKHPlacer.place`)](#11-inference-lkhplacerplace)
+12. [Ablation](#12-ablation)
+13. [State encoder (GNN + CNN)](#13-state-encoder-gnn--cnn)
 14. [Feature schema reference](#14-feature-schema-reference)
 15. [The Modal architecture](#15-the-modal-architecture)
 16. [Design trade-offs FAQ](#16-design-trade-offs-faq)
@@ -85,9 +85,9 @@ chains pick better moves and know when to stop.
 
 Training fills in the two `score with ...` boxes:
 
-- `CostApproximator` (Phase 3) replaces the surrogate with a learned
+- `CostApproximator` replaces the surrogate with a learned
   Δproxy_cost predictor.
-- `ChainPolicy` (Phase 4) replaces argmin-over-candidates with a learned
+- `ChainPolicy` replaces argmin-over-candidates with a learned
   policy that also has a STOP action.
 
 The placer is **always** the same shape; learned models just plug into the
@@ -194,7 +194,7 @@ regions). That's why we need:
 
 - The **commit gate** (next section) to enforce that overlaps don't grow,
   so density doesn't explode.
-- The **CostApproximator** (Phase 3) to learn a closer approximation to
+- The **CostApproximator** to learn a closer approximation to
   the *real* Δproxy_cost.
 
 ---
@@ -360,7 +360,7 @@ just for the log message.
 
 ---
 
-## 8. Phase 3 — `CostApproximator`
+## 8. `CostApproximator` — MLP cost model
 
 **Why?** The HPWL surrogate captures wirelength but misses density and
 congestion. A learned model that takes (state, macro, move) features and
@@ -429,7 +429,7 @@ within 30 epochs.
 
 ---
 
-## 9. Phase 4 — `ChainPolicy` (PPO)
+## 9. `ChainPolicy` — PPO actor-critic
 
 **Why?** A good cost approximator tells you *if* a move is good. A
 policy decides *which* move to make and *when to stop*. The chain has
@@ -525,9 +525,9 @@ If `ent` collapses too early, bump `--ent-coef`.
 
 ---
 
-## 10. Phase 5 — Iterative training loop
+## 10. Iterative training loop
 
-**Why?** Phase 3 and Phase 4 each train one model, but a good policy
+**Why?** The cost approximator and the policy each train one model, but a good policy
 relies on a good approximator, and a good approximator's *useful* data
 distribution depends on what the policy actually does at deployment. We
 break this chicken-and-egg with multiple rounds:
@@ -571,7 +571,7 @@ incrementally to the changing approximator.
 
 ---
 
-## 11. Phase 6 — Inference (`LKHPlacer.place`)
+## 11. Inference (`LKHPlacer.place`)
 
 **Why?** This is the actual function the competition evaluator calls.
 It needs to be wall-clock-bounded, valid, and use whatever checkpoints
@@ -634,7 +634,7 @@ and keeps the search space tractable.
 
 ---
 
-## 12. Phase 7 — Ablation
+## 12. Ablation
 
 **Why?** Compare four placer variants on the same benchmark to see what
 each learned component contributes.
@@ -665,22 +665,18 @@ So the ablation script doesn't need to mutate the filesystem.
 
 ---
 
-## 13. Phase 2 — GNN + CNN encoder (deferred)
+## 13. State encoder (GNN + CNN)
 
-**Why?** The plan's flagship learned representation: a 3-layer
-message-passing GNN over the netlist hypergraph + a CNN over a
-canvas raster. Outputs per-macro embeddings `[N, 128]` and a global
-vector `[256]`. These would replace the hand-crafted 16-dim features.
+**Why?** The learned state representation: a 3-layer message-passing GNN
+over the netlist hypergraph plus a CNN over a canvas raster. Outputs
+per-macro embeddings and a global vector that feed both the cost
+approximator and the policy with topology- and spatial-context-aware
+features the hand-crafted 16-dim vector can't express.
 
-**Why deferred?** Wiring it requires `torch-geometric` and `torch-scatter`,
-which have CUDA-version-pinned binary wheels. The competition judges
-run with `--network none`, so we'd need a custom `Dockerfile`. Also,
-the GNN+CNN forward pass takes ~5 ms vs the hand-crafted features
-taking ~1 ms, so per-step cost grows.
-
-**Where?** `encoder.py`. Implemented in pure PyTorch (no extra deps),
-smoke-tested, but **not** plugged into `train.py` / `train_policy.py` /
-`placer.py`.
+**Where?** `encoder.py` (architecture: `PlacementGNN`, `CanvasCNN`,
+`StateEncoder`) plus the runtime wrappers `encoder_runtime.py` (GNN-only,
+primary path) and `encoder_runtime_gnncnn.py` (GNN+CNN variant) used by
+the placer and trainers.
 
 ### What's in `encoder.py`
 
@@ -694,27 +690,29 @@ class PlacementGNN(nn.Module):
 
 class CanvasCNN(nn.Module):
     # 3 conv layers → adaptive pool → flatten
-    # input: 3-channel canvas raster (occupancy / density / edge-endpoint)
+    # input: 3-channel canvas raster
     # output: [hidden]
 
 class StateEncoder(nn.Module):
-    # combines GNN + CNN; returns (per_node [N, 128], global [256])
+    # combines GNN + CNN; returns (per_node [N, hidden], global [2*hidden])
 ```
 
-### Wiring it would mean
+### How it's wired
 
-1. Bump `CostApproximator(in_dim=...)` from 16 to 16 + 256 + 128 = 400
-2. Bump `ChainPolicy` dims: `GLOBAL_DIM = 256`, `MACRO_DIM = 128`
-3. Replace `_features_for_move`, `compute_global_features`,
-   `compute_macro_features` with calls to `encoder.encode_state(state)`
-4. Cache encoder outputs **per-chain** (compute once at chain init) so
-   inference doesn't pay the 5 ms cost on every step
-5. Retrain everything (encoder + the heads above)
-
-`encoder.py`'s top-level docstring walks through this in more detail. The
-benefit: the encoder provides spatial context (CNN) and topology context
-(GNN) that hand-crafted features can't easily express. Worth doing once
-the simpler version has converged.
+- `LKHPlacer(feature_mode="encoder")` loads `checkpoints/encoder.pt`,
+  builds an encoder cache once per chain, and routes the cost
+  approximator + policy inputs through `[per_node[m]; graph_vec; hand_feats]`.
+- `train_encoder_joint.py` runs the regression pretrain: joint
+  optimizer over encoder + cost approximator parameters, Smooth-L1 on
+  true Δproxy labels.
+- `train_policy.py --use-encoder` (or `--encoder-fine-tune-in-ppo`)
+  continues training the encoder during PPO so the embeddings adapt to
+  the policy's needs.
+- `CostApproximator.in_dim = encoder.embed_dim + 16` (272 for hidden=128).
+- `ChainPolicy(encoder_global_dim=..., encoder_macro_dim=...)` enables
+  the encoder concatenation paths in `move_head`, `stop_head`, `value_head`.
+- The encoder forward runs once per chain (cached in the `ChainEnv`)
+  so candidate scoring stays at thousands of moves per second.
 
 ---
 
@@ -792,7 +790,7 @@ If you wire in the encoder (§13), these go to ~400 and ~280.
 
 ## 15. The Modal architecture
 
-**Why?** Training Phase 3 across 17 IBM benchmarks needs ~15 hours
+**Why?** Cost-approximator training across 17 IBM benchmarks needs ~15 hours
 sequentially. Modal lets us parallelize per-benchmark (one container per
 benchmark), bringing total wall time down to ~3 hours.
 

@@ -1,4 +1,4 @@
-"""Phase 3 trainer for the LK cost approximator.
+"""Trainer for the LK cost approximator.
 
 Workflow
 --------
@@ -117,12 +117,11 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
     The plc object is released when this function returns so the next
     benchmark in a multi-benchmark sweep doesn't accumulate memory.
 
-    C.2 (LKH critique fix): with probability ``p_cascade`` (default 0.5),
-    run a ``[cascade_min, cascade_max]``-step greedy mini-cascade before
-    sampling so the (features, Δproxy) pair sees a cascade-interior state
-    rather than always a near-initial one. This shifts the training
-    distribution toward what the approximator faces at chain inference time
-    and is a prerequisite for unifying the cost signal in Milestone E.
+    With probability ``p_cascade`` (default 0.5), run a
+    ``[cascade_min, cascade_max]``-step greedy mini-cascade before sampling
+    so the (features, Δproxy) pair sees a cascade-interior state rather than
+    always a near-initial one. This shifts the training distribution toward
+    what the approximator faces at chain inference time.
     """
     bench_dir = Path("external/MacroPlacement/Testcases/ICCAD04") / benchmark_name
     benchmark, plc = load_benchmark_from_dir(str(bench_dir))
@@ -153,7 +152,7 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
     movable_list = movable.tolist()
 
     def _do_preliminary_cascade(num_steps: int) -> list[tuple[int, float, float]]:
-        """C.2: greedy mini-cascade. Each step picks a random movable macro,
+        """Greedy mini-cascade. Each step picks a random movable macro,
         applies the lowest-HPWL of 4 candidates. Returns the undo list."""
         saved: list[tuple[int, float, float]] = []
         for _ in range(num_steps):
@@ -182,7 +181,7 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
     last_log = t_collect
     n_cascade_samples = 0
     while len(feats_list) < num_examples:
-        # C.2: optionally pre-roll a 2-4 step cascade so this sampling round
+        # Optionally pre-roll a 2-4 step cascade so this sampling round
         # operates on a cascade-interior state. Reverted at end so the drift
         # mechanic stays on the un-drifted base state.
         cascade_saved: list[tuple[int, float, float]] = []
@@ -207,8 +206,8 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
                 use_reg_feature=use_reg_feature,
             )
 
-            # B.3: incremental apply + revert; the caches stay coherent
-            # so subsequent _features_for_move calls read O(1) HPWL/area.
+            # Incremental apply + revert; the caches stay coherent so
+            # subsequent _features_for_move calls read O(1) HPWL/area.
             state.apply_move(macro_idx, cx, cy)
             new_cost = exact_cost()
             state.apply_move(macro_idx, old_x, old_y)
@@ -225,8 +224,8 @@ def _collect_one_benchmark(benchmark_name: str, num_examples: int, seed: int,
         for (i, ox, oy) in reversed(cascade_saved):
             state.apply_move(i, ox, oy)
 
-        # Maybe drift: commit the best candidate as the new base. After C.2
-        # the candidate's ``new_cost`` may have been measured in the cascade
+        # Maybe drift: commit the best candidate as the new base. The
+        # candidate's ``new_cost`` may have been measured in the cascade
         # interior, so when a cascade ran we recompute the post-commit base
         # explicitly rather than reuse the cascade-interior reading.
         if cand_costs and py_rng.random() < drift_prob:
@@ -264,12 +263,12 @@ def collect_calibration_samples(benchmark_name: str, n_samples: int,
                                  reg_weight: float = 0.0,
                                  gate_mode: str = "hpwl",
                                  ) -> tuple[np.ndarray, np.ndarray]:
-    """C.3 (LKH critique fix): collect (features, true_Δproxy) pairs from
-    states the placer actually visits at inference time. Pre-fix the
-    approximator was trained only on near-initial-placement single moves;
-    by the time the placer commits a few chains the state distribution
-    drifts away from the training distribution, and the approximator's
-    Δproxy predictions silently diverge from the true Δproxy.
+    """Collect (features, true_Δproxy) pairs from states the placer actually
+    visits at inference time. Without this, the approximator is trained only
+    on near-initial-placement single moves; by the time the placer commits a
+    few chains the state distribution drifts away from the training
+    distribution, and the approximator's Δproxy predictions silently
+    diverge from the true Δproxy.
 
     Run the current placer for ``time_budget_s`` to drive the state into
     the inference-time distribution, then sample ``n_samples`` single-move
@@ -389,11 +388,10 @@ def load_per_benchmark_caches(
   Set ``collect_missing=True`` only for local runs that may lack a few
   cache files; never re-collects benchmarks whose cache already exists.
 
-  D.2 (LKH critique fix): set ``force_recollect=True`` to bypass existing
-  per-benchmark caches and re-collect each one. Pre-fix the Phase 5
-  iterative loop had ``--force-recollect-each-round`` only invalidating
-  the *aggregated* cache; per-benchmark caches were still loaded as-is,
-  silently bypassing the user's explicit "re-collect" request.
+  Set ``force_recollect=True`` to bypass existing per-benchmark caches and
+  re-collect each one. Without this flag, an iterative loop that only
+  invalidates the *aggregated* cache would still load per-benchmark caches
+  as-is, silently bypassing an explicit "re-collect" request.
     """
     if not benchmark_names:
         raise ValueError("load_per_benchmark_caches: benchmark_names is empty")
@@ -517,16 +515,16 @@ def _synthesize_group_ids(n: int, n_calibration_samples: int,
                           calibration_group_size: int = 4) -> np.ndarray:
     """Synthesize group_ids for the standard data layout ``[cal | main]``.
 
-    Tier-1 Fix B: existing per-benchmark caches don't store group_ids, but
+    Existing per-benchmark caches don't store group_ids, but
     ``_collect_one_benchmark`` and ``collect_calibration_samples`` both lay
     out their samples in contiguous (macro_idx, base_state) groups — 8
     candidates per main-group, 4 per calibration-group. The pairwise rank
     loss only needs to know which examples are siblings (collected from the
     same parent state), so we reconstruct group_ids from this layout.
 
-    Layout assumption: when calibration data is prepended (``train_iter``
-    Step 1a does this), ``features[:n_calibration_samples]`` is the
-    calibration block and the rest is the main block.
+    Layout assumption: when calibration data is prepended,
+    ``features[:n_calibration_samples]`` is the calibration block and the
+    rest is the main block.
     """
     if n == 0:
         return np.zeros(0, dtype=np.int64)
@@ -545,7 +543,7 @@ def _synthesize_group_ids(n: int, n_calibration_samples: int,
 def _pairwise_rank_loss(pred: torch.Tensor, true: torch.Tensor,
                         pair_left: torch.Tensor, pair_right: torch.Tensor,
                         pair_sign: torch.Tensor, margin: float = 0.1) -> torch.Tensor:
-    """Margin ranking loss over within-group pairs (Fix B).
+    """Margin ranking loss over within-group pairs.
 
     For each pair ``(i, j)`` where ``true[i] - true[j]`` has known sign
     ``s``, penalize predictions that disagree: ``ReLU(margin - s * (pred[i]
@@ -580,17 +578,15 @@ def train_model(features: np.ndarray, targets: np.ndarray, *,
                 patience: int | None = None) -> tuple[nn.Module, dict]:
     """Supervised regression with optional pairwise rank loss.
 
-    Tier-1 Fix A: best checkpoint is selected by **val Spearman ρ**, not
-    val Smooth-L1. The placer uses the model as an argmin-over-candidates
-    scorer, so rank correlation is the relevant metric. Pre-fix Smooth-L1
-    selection preferred amplitude-correct but rank-poor checkpoints; the
-    100-epoch ``long12h`` run showed train_loss → 0.003 with Spearman
-    plateauing at ~0.83, then degrading.
+    The best checkpoint is selected by **val Spearman ρ**, not val
+    Smooth-L1. The placer uses the model as an argmin-over-candidates
+    scorer, so rank correlation is the relevant metric. Smooth-L1
+    selection would prefer amplitude-correct but rank-poor checkpoints.
 
-    Tier-1 Fix B: when ``rank_loss_enabled`` is True (default) and groups
-    can be synthesized from the standard data layout, a pairwise margin
-    ranking loss is added. Within-group pairs are pre-computed once and
-    evaluated as a single tensor op per epoch.
+    When ``rank_loss_enabled`` is True (default) and groups can be
+    synthesized from the standard data layout, a pairwise margin ranking
+    loss is added. Within-group pairs are pre-computed once and evaluated
+    as a single tensor op per epoch.
 
     Early stopping kicks in after ``patience`` epochs without Spearman
     improvement (default ``max(10, epochs // 5)``).
@@ -810,16 +806,15 @@ def main():
     p.add_argument("--force-recollect", action="store_true",
                    help="Re-run data collection even if cached data exists.")
     p.add_argument("--use-reg-feature", action="store_true",
-                   help="MaskRegulate Task 1c: emit a 17th feature "
-                        "(reg_before - reg_after) in _features_for_move. "
-                        "Invalidates existing 16-d checkpoints; saves "
-                        "use_reg_feature=True in the new ckpt for "
-                        "downstream loader compatibility.")
-    # Step 1 (ranking lever): the placer picks moves by argmin over the
-    # approximator's per-candidate scores, so within-state *ranking* — not
-    # amplitude — is what matters. The pairwise margin rank loss (Fix B) is
-    # on by default but its strength was previously hardcoded; expose it so
-    # the rank-weight=0 vs >0 ablation is a one-flag change.
+                   help="Emit a 17th feature (reg_before - reg_after) in "
+                        "_features_for_move. Invalidates existing 16-d "
+                        "checkpoints; saves use_reg_feature=True in the new "
+                        "ckpt for downstream loader compatibility.")
+    # The placer picks moves by argmin over the approximator's per-candidate
+    # scores, so within-state *ranking* — not amplitude — is what matters.
+    # The pairwise margin rank loss is on by default but its strength was
+    # previously hardcoded; expose it so the rank-weight=0 vs >0 ablation
+    # is a one-flag change.
     p.add_argument("--rank-weight", type=float, default=1.0,
                    help="Weight on the within-state pairwise margin rank loss. "
                         "0.0 = pure Smooth-L1 regression (the ablation baseline); "
@@ -837,7 +832,7 @@ def main():
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    print(f"=== Phase 3: Cost Approximator ===")
+    print(f"=== Cost Approximator ===")
     print(f"  benchmarks = {benchmarks}")
     print(f"  examples/benchmark = {args.num_examples}, "
           f"total = {args.num_examples * len(benchmarks)}")
@@ -907,9 +902,8 @@ def main():
         "trained_on": benchmarks,
         "n_train": info["n_train"],
         "n_val": info["n_val"],
-        # Task 1c: schema flag so the placer's loader picks up
-        # use_reg_feature from the ckpt and routes _features_for_move
-        # accordingly.
+        # Schema flag so the placer's loader picks up use_reg_feature
+        # from the ckpt and routes _features_for_move accordingly.
         "use_reg_feature": bool(args.use_reg_feature),
     }
     ckpt_path = Path(args.checkpoint_out)

@@ -1,16 +1,16 @@
 """Neural models for the LK-chain pipeline.
 
-Phase 3 — CostApproximator: predicts Δproxy_cost from a (state, macro, move)
+CostApproximator: predicts Δproxy_cost from a (state, macro, move)
 feature vector. Replaces compute_proxy_cost inside the chain.
 
-Phase 4 — ChainPolicy: actor-critic over chain actions. At each step the
+ChainPolicy: actor-critic over chain actions. At each step the
 state is (global summary, current macro, candidate moves, chain progress);
 the policy emits a categorical over (K candidates + STOP) and a state value.
 
-Phase 2 (GNN+CNN encoder) is skipped — we use hand-crafted features built in
-placer.py and chain_env.py over the same physical signals (HPWL Δ, local
-density, overlap counts, neighbor attraction) so models 1 and 2 share a
-consistent feature schema.
+The GNN+CNN encoder is optional — by default we use hand-crafted features
+built in placer.py and chain_env.py over the same physical signals (HPWL Δ,
+local density, overlap counts, neighbor attraction) so models 1 and 2 share
+a consistent feature schema.
 """
 
 import torch
@@ -38,7 +38,7 @@ class CostApproximator(nn.Module):
         return self.net(x).squeeze(-1)
 
 
-# ── Phase 4: ChainPolicy ────────────────────────────────────────────────────
+# ── ChainPolicy ─────────────────────────────────────────────────────────────
 
 # Per-step inputs to the policy (kept small; matches chain_env feature schemas).
 GLOBAL_DIM = 5    # hpwl_norm, overlap_norm, pos_x_var, pos_y_var, movable_frac
@@ -54,21 +54,21 @@ class ChainPolicy(nn.Module):
     STOP action. ``forward`` returns a length-(K+1) logit vector and a scalar
     state value, both differentiable.
 
-    Task 1c (MaskRegulate): ``cand_dim`` accepts the augmented 17-dim
-    candidate schema. Existing 16-dim policies still load — ``_load_chain_policy``
-    reads ``cand_dim`` from the checkpoint and reconstructs the right shape.
+    ``cand_dim`` accepts the augmented 17-dim candidate schema. Existing
+    16-dim policies still load — ``_load_chain_policy`` reads ``cand_dim``
+    from the checkpoint and reconstructs the right shape.
 
-    Task 4b (MaskRegulate): optional encoder dims. When
-    ``encoder_global_dim > 0`` and/or ``encoder_macro_dim > 0`` the policy
-    accepts those embeddings via ``forward`` and concatenates them with the
-    hand-crafted features. Defaults of 0 preserve the pre-Task-4 shape so
-    existing checkpoints load unchanged.
+    Optional encoder dims: when ``encoder_global_dim > 0`` and/or
+    ``encoder_macro_dim > 0`` the policy accepts those embeddings via
+    ``forward`` and concatenates them with the hand-crafted features.
+    Defaults of 0 preserve the legacy shape so existing checkpoints load
+    unchanged.
 
-    Session building blocks: the four base dims (``global_dim``,
-    ``macro_dim``, ``cand_dim``, ``chain_dim``) are also overridable for
-    cases where the entire feature pipeline is swapped (e.g. encoder-fed
-    features replacing the 5/6/16/3 default schema). Defaults preserve
-    the legacy schema so unchanged checkpoints still load.
+    The four base dims (``global_dim``, ``macro_dim``, ``cand_dim``,
+    ``chain_dim``) are also overridable for cases where the entire feature
+    pipeline is swapped (e.g. encoder-fed features replacing the 5/6/16/3
+    default schema). Defaults preserve the legacy schema so unchanged
+    checkpoints still load.
     """
 
     def __init__(self, hidden: int = 64,
@@ -134,9 +134,9 @@ class ChainPolicy(nn.Module):
         c = chain_feat.unsqueeze(0).expand(K, -1)
         move_parts = [g, m, cand_feats, c]
         sv_parts = [global_feat, chain_feat]
-        # Task 4b: optional encoder dims. Tensors are required when the
-        # corresponding *_dim is > 0; supplying them when *_dim == 0 is an
-        # error (it would silently introduce ghost dims).
+        # Optional encoder dims. Tensors are required when the corresponding
+        # *_dim is > 0; supplying them when *_dim == 0 is an error (it would
+        # silently introduce ghost dims).
         if self.encoder_global_dim > 0:
             if encoder_global is None:
                 raise ValueError(

@@ -1,10 +1,10 @@
-"""Step 1 — rank-loss sweep.
+"""Rank-loss sweep.
 
-Diagnosis from the milestone: the CostApproximator has high Pearson but low
-Spearman (≈0.35), and since the chain picks moves by argmax over per-candidate
-scores, *ranking* — not amplitude — is what actually matters. This sweeps the
-weight on the within-state pairwise margin rank loss and measures whether
-leaning on it improves the validation rank correlation (Spearman ρ).
+The CostApproximator has high Pearson but low Spearman (≈0.35), and since the
+chain picks moves by argmax over per-candidate scores, *ranking* — not
+amplitude — is what actually matters. This sweeps the weight on the
+within-state pairwise margin rank loss and measures whether leaning on it
+improves the validation rank correlation (Spearman ρ).
 
 Reuses an existing cached dataset (``data/chain_data.pt``) so no slow
 compute_proxy_cost re-collection is needed; falls back to collecting ibm01 if
@@ -45,8 +45,8 @@ def main():
     p.add_argument("--margin", type=float, default=0.1)
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--plot", default=str(_HERE.parent.parent / "vis" / "step1_rank_sweep.png"))
-    p.add_argument("--json", default=str(_HERE / "iter_output" / "step1_rank_sweep.json"))
+    p.add_argument("--plot", default=str(_HERE.parent.parent / "vis" / "rank_sweep.png"))
+    p.add_argument("--json", default=str(_HERE / "iter_output" / "rank_sweep.json"))
     args = p.parse_args()
 
     data_path = Path(args.data)
@@ -102,7 +102,7 @@ def main():
     ax.set_xticklabels([str(w) for w in ws])
     ax.set_xlabel("rank-loss weight")
     ax.set_ylabel("validation correlation")
-    ax.set_title(f"Step 1: rank-loss sweep ({source})")
+    ax.set_title(f"rank-loss sweep ({source})")
     ax.axhline(0, color="k", lw=0.5)
     ax.grid(alpha=0.3)
     ax.legend(loc="best", fontsize=9)

@@ -1,15 +1,15 @@
 """Run the LKH training pipeline on Modal cloud.
 
 App definition (one ``modal.App``, one ``modal.Image``, one persistent
-``modal.Volume``) and four entrypoints — one per training phase plus a
+``modal.Volume``) and four entrypoints — one per training stage plus a
 smoke test:
 
     smoke    : confirm image + mounts + benchmark loading work
-    train    : Phase 3 — train CostApproximator
-    policy   : Phase 4 — train ChainPolicy via PPO
-    iter_    : Phase 5 — full iterative loop (Phase 3 + 4 per round)
+    train    : train CostApproximator
+    policy   : train ChainPolicy via PPO
+    iter_    : full iterative loop (cost-approximator + policy per round)
 
-Speed: ``iter_`` runs Phase 3 data collection in parallel via Modal's
+Speed: ``iter_`` runs data collection in parallel via Modal's
 ``.starmap()`` (one container per benchmark, up to 20 concurrent), so the
 slow benchmarks (ibm15-18) no longer dominate. Total wall time becomes
 max(per-benchmark) instead of sum(per-benchmark), giving ~5× speedup on the
@@ -29,11 +29,11 @@ Quickstart:
     # ``--detach`` keeps the *app* alive after ``modal run`` exits so the
     # spawned function actually has time to execute. You need both flags.
 
-    # Phase 3 across all 17 benchmarks (per-benchmark example count = N)
+    # Cost-approximator training across all 17 benchmarks (per-benchmark example count = N)
     uv run modal run --detach submissions/lkh/modal_run.py::train \\
         --benchmark all --num-examples 300 --epochs 80
 
-    # Phase 4 across all 17 benchmarks, real-scale training
+    # Policy training across all 17 benchmarks, real-scale training
     uv run modal run --detach submissions/lkh/modal_run.py::policy \\
         --benchmark all --iterations 3000
 
@@ -46,9 +46,7 @@ persisted to the Modal Volume ``lkh-results``. Download with:
 
     modal volume get lkh-results /iter/checkpoints ./checkpoints
 
-Reference (CS224R Modal Compute Guide, sections 4-5).
-
-Phase 5 presets (``ITER_PRESETS``) and ``iter_ --preset <name>`` for parallel runs
+Iterative presets (``ITER_PRESETS``) and ``iter_ --preset <name>`` for parallel runs
 with different hyperparameters / output trees.
 """
 
@@ -324,7 +322,7 @@ def run_policy(benchmark: str, iterations: int, trajectories_per_iter: int,
 # Wall time becomes max(per-benchmark) instead of sum, which is ~5× faster on
 # the full ICCAD04 sweep (3 h instead of 15 h). Each container writes its
 # benchmark's cache to /output/iter/per_bench/<name>.pt and commits the volume
-# so the next stage (Phase 3 training + PPO) sees a fully populated cache.
+# so the next stage (cost-approximator training + PPO) sees a fully populated cache.
 # ---------------------------------------------------------------------------
 
 @app.function(image=image, volumes={"/output": volume},
@@ -680,13 +678,13 @@ def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
                    calibration_time_budget_s: float,
                    output_tag: str, cache_read_dir: str,
                    skip_collection: bool,
-                   # MaskRegulate opt-ins
+                   # Mask + regularization opt-ins
                    gate_mode: str = "hpwl",
                    reg_weight: float = 0.0,
                    use_wiremask: bool = False,
                    use_position_mask: bool = False,
                    use_reg_feature: bool = False,
-                   # Session building-block opt-ins
+                   # Encoder / seed / reward opt-ins
                    feature_mode: str = "handcrafted",
                    encoder_kind: str = "gnn",
                    encoder_ckpt: str = "",
@@ -750,7 +748,7 @@ def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
         else:
             print(f"[Modal] all {len(benchmarks)} benchmarks already cached.")
 
-    print(f"=== Phase 5 on Modal ({output_tag}) ===")
+    print(f"=== iterative training on Modal ({output_tag}) ===")
     print(f"  benchmarks={benchmarks}  rounds={rounds}  output={output_root}")
     print(f"  examples/bench={examples}  cost_epochs={cost_epochs}  "
           f"policy_iters={policy_iterations}  traj/iter={trajectories_per_iter}")
@@ -775,13 +773,13 @@ def _run_iter_impl(benchmark: str, rounds: int, examples: int, cost_epochs: int,
             per_benchmark_cache_dir=per_benchmark_cache_dir,
             calibration_samples_per_bench=calibration_samples_per_bench,
             calibration_time_budget_s=calibration_time_budget_s,
-            # MaskRegulate
+            # Mask + regularization flags
             gate_mode=gate_mode,
             reg_weight=reg_weight,
             use_wiremask=use_wiremask,
             use_position_mask=use_position_mask,
             use_reg_feature=use_reg_feature,
-            # Session building-block flags
+            # Encoder / seed / reward flags
             feature_mode=feature_mode,
             encoder_kind=encoder_kind,
             encoder_ckpt=encoder_ckpt or None,
@@ -808,13 +806,13 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
              calibration_time_budget_s: float = 10.0,
              output_tag: str = "iter", cache_read_dir: str = "",
              skip_collection: bool = False,
-             # MaskRegulate flags
+             # Mask + regularization flags
              gate_mode: str = "hpwl",
              reg_weight: float = 0.0,
              use_wiremask: bool = False,
              use_position_mask: bool = False,
              use_reg_feature: bool = False,
-             # Session building-block flags
+             # Encoder / seed / reward flags
              feature_mode: str = "handcrafted",
              encoder_kind: str = "gnn",
              encoder_ckpt: str = "",
@@ -826,13 +824,13 @@ def run_iter(benchmark: str, rounds: int, examples: int, cost_epochs: int,
         trajectories_per_iter, eval_time_budget, seed, force_recollect,
         calibration_samples_per_bench, calibration_time_budget_s,
         output_tag, cache_read_dir, skip_collection,
-        # MaskRegulate
+        # Mask + regularization flags
         gate_mode=gate_mode,
         reg_weight=reg_weight,
         use_wiremask=use_wiremask,
         use_position_mask=use_position_mask,
         use_reg_feature=use_reg_feature,
-        # Session building-block flags
+        # Encoder / seed / reward flags
         feature_mode=feature_mode,
         encoder_kind=encoder_kind,
         encoder_ckpt=encoder_ckpt,
@@ -867,7 +865,7 @@ def smoke() -> None:
 # ---------------------------------------------------------------------------
 
 def _spawn_iter(fn: Any, label: str, **kwargs: Any) -> None:
-    """Dispatch a Phase-5 Modal function and print hyperparameters."""
+    """Dispatch an iterative-training Modal function and print hyperparameters."""
     call = fn.spawn(**kwargs)
     _print_spawn_handle(call, label)
     print("\n--- Hyperparameters ---")
@@ -876,7 +874,7 @@ def _spawn_iter(fn: Any, label: str, **kwargs: Any) -> None:
         "trajectories_per_iter", "eval_time_budget", "calibration_samples_per_bench",
         "calibration_time_budget_s", "seed", "force_recollect",
         "output_tag", "cache_read_dir", "skip_collection",
-        # MaskRegulate Tasks 1-3 toggles
+        # Mask + regularization toggles
         "gate_mode", "reg_weight", "use_wiremask", "use_position_mask",
         "use_reg_feature",
     ):
@@ -903,7 +901,7 @@ def _print_spawn_handle(call, label: str) -> None:
 @app.local_entrypoint()
 def train(benchmark: str = "ibm01", num_examples: int = 1500, epochs: int = 60,
           seed: int = 42, force_recollect: bool = False) -> None:
-    """Phase 3 — train CostApproximator on Modal (background spawn).
+    """Train CostApproximator on Modal (background spawn).
 
     Examples:
         modal run modal_run.py::train --benchmark ibm01,ibm02 --num-examples 1500
@@ -920,7 +918,7 @@ def train(benchmark: str = "ibm01", num_examples: int = 1500, epochs: int = 60,
 def policy(benchmark: str = "ibm01", iterations: int = 1000,
            trajectories_per_iter: int = 4, seed: int = 42,
            initial_policy: str = "") -> None:
-    """Phase 4 — train ChainPolicy via PPO on Modal (background spawn).
+    """Train ChainPolicy via PPO on Modal (background spawn).
 
     Examples:
         modal run modal_run.py::policy --benchmark all --iterations 3000
@@ -943,20 +941,20 @@ def iter_(preset: str = "", benchmark: str = "", rounds: int = 0,
           seed: int = 0, force_recollect: bool = False,
           output_tag: str = "", cache_read_dir: str = "",
           skip_collection: bool = False,
-          # MaskRegulate flags
+          # Mask + regularization flags
           gate_mode: str = "hpwl",
           reg_weight: float = 0.0,
           use_wiremask: bool = False,
           use_position_mask: bool = False,
           use_reg_feature: bool = False,
-          # Session building-block flags
+          # Encoder / seed / reward flags
           feature_mode: str = "handcrafted",
           encoder_kind: str = "gnn",
           encoder_ckpt: str = "",
           scalar_lam: float = 0.01,
           seed_mode: str = "heuristic",
           terminal_reward_mode: str = "committed_gain") -> None:
-    """Phase 5 — iterative training (background spawn). All knobs configurable.
+    """Iterative training (background spawn). All knobs configurable.
 
     Presets: ``long12h``, ``medium4h`` (see ``ITER_PRESETS``). Override any CLI
     flag after ``--preset``. Use a distinct ``--output-tag`` per parallel job.
@@ -971,7 +969,7 @@ def iter_(preset: str = "", benchmark: str = "", rounds: int = 0,
             --output-tag iter_custom --skip-collection \\
             --cache-read-dir /output/iter/per_bench
 
-        # Session building-block path (encoder features + scalar gate + post-leg reward)
+        # Encoder features + scalar gate + post-leg reward path
         modal run --detach submissions/lkh/modal_run.py::iter_ \\
             --benchmark all --feature-mode encoder --seed-mode policy \\
             --gate-mode scalar_penalty \\
@@ -989,13 +987,13 @@ def iter_(preset: str = "", benchmark: str = "", rounds: int = 0,
         seed=seed, force_recollect=force_recollect,
         output_tag=output_tag, cache_read_dir=cache_read_dir,
         skip_collection=skip_collection,
-        # Session building-block flags (forwarded through preset resolver)
+        # Encoder / seed / reward flags (forwarded through preset resolver)
         feature_mode=feature_mode, encoder_kind=encoder_kind,
         encoder_ckpt=encoder_ckpt,
         scalar_lam=scalar_lam, seed_mode=seed_mode,
         terminal_reward_mode=terminal_reward_mode,
     )
-    # MaskRegulate Tasks 1-3 toggles pass through unconditionally — they're
+    # Mask + regularization toggles pass through unconditionally — they're
     # not part of the preset bundle (so a preset doesn't accidentally turn
     # them on); flipping them is an explicit per-launch decision.
     params["gate_mode"] = gate_mode
@@ -1020,9 +1018,10 @@ def overfit_inference(benchmark: str = "ibm09", n_seeds: int = 32,
                       ckpt_source: str = "/output/iter_v5_pp_reg/checkpoints") -> None:
     """Multi-seed inference overfit on a single benchmark (background spawn).
 
-    Default config = milestone E (predicted_proxy + policy) + WM + PM + reg,
-    using the v5 round-1 checkpoints, 32 seeds × 300 s on ibm09.
-    Total wall-time ≈ 5-10 min (50 containers in parallel).
+    Default config uses the predicted_proxy + policy milestone with wiremask,
+    position-mask, and regularization enabled, using the v5 round-1
+    checkpoints, 32 seeds × 300 s on ibm09. Total wall-time ≈ 5-10 min
+    (50 containers in parallel).
     """
     call = run_overfit_sweep.spawn(
         benchmark=benchmark, n_seeds=n_seeds, base_seed=base_seed,
@@ -1056,7 +1055,8 @@ def overfit_inference_all(n_seeds: int = 24, base_seed: int = 100,
     Fans out ``17 * n_seeds`` containers in parallel (50 at a time), each
     running ablate.py once on (benchmark, seed). Reports per-bench lex-best.
 
-    Default: 17 benches × 24 seeds × 240s, milestone E + WM + PM + reg.
+    Default: 17 benches × 24 seeds × 240s, predicted_proxy + policy milestone
+    with wiremask, position-mask, and regularization enabled.
     Wall-time ≈ 25-40 min with max_containers=50.
     """
     benches = ["ibm01","ibm02","ibm03","ibm04","ibm06","ibm07","ibm08","ibm09",

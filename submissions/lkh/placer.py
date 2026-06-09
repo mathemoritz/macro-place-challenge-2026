@@ -1,8 +1,7 @@
 """
-LKHPlacer — Phase 1 of the LK-Chain RL plan, non-learned foundation (MVP)
+LKHPlacer — LK-Chain placer for the macro-placement challenge.
 
-Implements the LK cascade move pattern from
-background/mvp_implementation_plan_lkh.md, adapted to this repo's real API:
+Implements an LK cascade move pattern adapted to this repo's API:
 - Positions are CENTERS, not corners.
 - compute_proxy_cost is expensive and requires a PlacementCost; we use a fast
   HPWL surrogate during the chain and only fall back to exact proxy cost for
@@ -10,12 +9,10 @@ background/mvp_implementation_plan_lkh.md, adapted to this repo's real API:
 - Only hard macros [0, num_hard_macros) are placed; soft macros are left at
   their initial-placement positions (matches will_seed pattern).
 
-Deferred to later phases of the plan (need GPU/training infrastructure):
-- Phase 2: GNN+CNN state encoder (torch_geometric)
-- Phase 3: learned cost approximator (replaces _surrogate_delta below)
-- Phase 4: PPO move-picking policy (replaces _greedy_step below)
-- Phase 5: iterative training, drift detection
-- Phase 6: full inference with learned models
+Optional learned components (loaded if checkpoints are present):
+- GNN+CNN state encoder
+- Learned cost approximator (replaces the HPWL surrogate score)
+- PPO move-picking policy (replaces the greedy candidate scorer)
 
 Usage:
     uv run evaluate submissions/lkh/placer.py
@@ -45,14 +42,12 @@ if str(_HERE) not in sys.path:
 class HpwlEdges(NamedTuple):
     """Bundle of edge arrays driving the HPWL surrogate.
 
-    C.1 (LKH critique fix): pre-fix the surrogate had only hard-hard pair
-    edges and weighted them as 1 / (num_hard_owners_on_net - 1), pretending
-    soft macros and IO ports did not exist. Proxy cost includes nets that
-    connect hard macros to those fixed terminals, so the surrogate had a
-    systematic blind spot that grew with soft-macro fan-out. The new
-    surrogate uses the full clique-pair weight 1 / (k - 1) where k = total
+    The surrogate uses the full clique-pair weight 1 / (k - 1) where k = total
     terminals on the net (hard + soft + ports), and adds a parallel
-    hard-to-fixed-anchor edge set.
+    hard-to-fixed-anchor edge set so nets that connect hard macros to soft
+    macros and IO ports contribute correctly. Proxy cost includes these nets,
+    so omitting them creates a systematic blind spot that grows with
+    soft-macro fan-out.
     """
     hh_edges: np.ndarray   # [E_hh, 2] hard-macro-to-hard-macro pairs
     hh_weights: np.ndarray  # [E_hh] per-pair weights
@@ -163,10 +158,9 @@ def _load_plc_if_available(name: str):
 class PlacementState:
     """Mutable hard-macro positions with O(N) overlap checks and HPWL surrogate."""
 
-    # B.1 + B.2 (LKH critique fix): incremental HPWL and overlap caches.
-    # Pre-fix the inner loop recomputed full HPWL (O(E)) and full pairwise
-    # overlap (O(N^2)) per candidate evaluation. With caches, each move is
-    # O(degree) for HPWL and O(N) for overlap (the per-macro row update).
+    # Incremental HPWL and overlap caches. Each move is O(degree) for HPWL
+    # and O(N) for overlap (the per-macro row update), versus O(E) and
+    # O(N^2) from-scratch recomputation per candidate evaluation.
     # The contract: any code path that writes ``state.pos`` directly must
     # call ``rebuild_caches()`` afterward, or the cached totals drift.
     # Set ``state._debug_incremental = True`` to get post-move assertions
@@ -178,8 +172,7 @@ class PlacementState:
                  hf_macros=None, hf_anchors=None, hf_weights=None):
         """Build a placement state.
 
-        Two calling conventions are accepted for back-compat with code paths
-        that pre-date C.1:
+        Two calling conventions are accepted for back-compat:
 
         * ``PlacementState(bench, hpwl_edges)`` — pass the ``HpwlEdges``
           bundle returned by ``_hard_macro_edges``.
@@ -221,14 +214,14 @@ class PlacementState:
         # HPWL surrogate edges (macro-pair, weight).
         self.edges = hh_edges
         self.edge_weights = hh_weights
-        # C.1: parallel hard-to-fixed-anchor edge set.
+        # Parallel hard-to-fixed-anchor edge set.
         self.hf_macros = hf_macros
         self.hf_anchors = hf_anchors
         self.hf_weights = hf_weights
 
         self.neighbors: list[list[int]] = [[] for _ in range(n_hard)]
         # Per-pair weight lookup for connectivity-aware candidate generation
-        # (A.3) and cascade-follow scoring. `neighbor_weight[i].get(j, 0.0)`
+        # and cascade-follow scoring. `neighbor_weight[i].get(j, 0.0)`
         # is O(1) — important because cascade-follow scores every displaced
         # macro per step.
         self.neighbor_weight: list[dict[int, float]] = [{} for _ in range(n_hard)]
@@ -246,7 +239,7 @@ class PlacementState:
         self.macro_edge_indices: list[np.ndarray] = [
             np.array(lst, dtype=np.int64) for lst in macro_inc_hh
         ]
-        # C.1: incident hf-edge index keyed by hard macro.
+        # Incident hf-edge index keyed by hard macro.
         macro_inc_hf: list[list[int]] = [[] for _ in range(n_hard)]
         for k, h in enumerate(hf_macros):
             macro_inc_hf[int(h)].append(k)
@@ -275,8 +268,8 @@ class PlacementState:
         )
 
     # Gap default of 1e-6 = "match the evaluator (strict overlap) up to float
-    # precision". ibm01's initial.plc has ~190 pairs sitting within 0.05 μm
-    # of touching; using gap=0.05 there miscounts those as overlaps and lets
+    # precision". Some benchmarks have many macro pairs sitting within 0.05 μm
+    # of touching; using a larger gap miscounts those as overlaps and lets
     # chains "commit" reductions in the inflated count while real overlaps
     # increase. Callers that want a breathing-room margin must pass gap
     # explicitly.
@@ -304,7 +297,8 @@ class PlacementState:
     def overlap_pairs(self, gap: float = _DEFAULT_GAP) -> int:
         """Count overlapping hard-macro pairs (matches the evaluator semantics).
 
-        O(1) cached read after B.2; pre-fix this was a full O(N^2) AABB.
+        O(1) cached read on the default gap; the fall-through computes a full
+        O(N^2) AABB.
         """
         if gap == self._DEFAULT_GAP:
             return self._total_overlap_pairs
@@ -318,7 +312,7 @@ class PlacementState:
         """Sum of pairwise hard-macro overlap rectangle areas (cached).
 
         Used as the lex-tiebreaker between ``overlap_pairs`` and ``hpwl`` in
-        the chain commit gate (A.2): chains that reduce overlap area without
+        the chain commit gate: chains that reduce overlap area without
         reducing the discrete pair count are rewarded. Drives legalization
         toward a near-no-op as the chain loop progresses.
         """
@@ -327,10 +321,10 @@ class PlacementState:
     # ── HPWL surrogate ────────────────────────────────────────────────────
 
     def hpwl(self) -> float:
-        """Total HPWL surrogate (B.1 cached). Pre-fix this was O(E) per call."""
+        """Total HPWL surrogate (cached). O(1) per call."""
         return self._total_hpwl
 
-    # ── Regularity (MaskRegulate Task 1) ──────────────────────────────────
+    # ── Regularity ────────────────────────────────────────────────────────
     # Distance-to-nearest-edge proxy: low = edge-ward = good. Domain practice
     # is to push macros toward the canvas perimeter so the core stays open
     # for routing. Cheap (O(1) per macro) and analytic, so it gives a
@@ -361,7 +355,7 @@ class PlacementState:
         dy_edge = np.minimum(ys, self.ch - ys)
         return float((dx_edge + dy_edge).sum())
 
-    # ── Incremental cache machinery (B.1 + B.2) ───────────────────────────
+    # ── Incremental cache machinery ───────────────────────────────────────
 
     def rebuild_caches(self) -> None:
         """Recompute HPWL and overlap caches from ``self.pos`` from scratch.
@@ -409,8 +403,8 @@ class PlacementState:
         caller can revert with ``state.apply_move(idx, *prev)``.
 
         Cost: O(degree(idx)) for HPWL + O(N) for the overlap row update.
-        Replaces the pre-B.1 pattern where every candidate evaluation
-        re-summed all E edges and all N^2 pairs.
+        Avoids re-summing all E edges and all N^2 pairs per candidate
+        evaluation.
         """
         old_x = float(self.pos[idx, 0])
         old_y = float(self.pos[idx, 1])
@@ -442,7 +436,7 @@ class PlacementState:
             new_per_edge = self.edge_weights[incident] * (ddx + ddy)
             self.per_edge_hpwl[incident] = new_per_edge
             self._total_hpwl += float(new_per_edge.sum())
-        # 4b. Recompute incident hf-edge HPWL contributions (C.1).
+        # 4b. Recompute incident hf-edge HPWL contributions.
         if len(incident_hf) > 0:
             anchors = self.hf_anchors[incident_hf]
             ddx = np.abs(self.pos[idx, 0] - anchors[:, 0])
@@ -527,7 +521,7 @@ class PlacementState:
             f"overlap_area cache drift: cached={cached_area} true={true_area}"
         )
 
-    # ── PositionMask (MaskRegulate Task 3) ────────────────────────────────
+    # ── PositionMask ──────────────────────────────────────────────────────
     # A boolean grid_size × grid_size mask: True where placing macro ``idx``
     # creates **no** AABB overlap against any other macro. Cell semantics
     # match ``self.sep_x`` / ``self.sep_y``: a center separation strictly
@@ -537,8 +531,8 @@ class PlacementState:
     def regularity_grid(self, idx: int, grid_size: int = 64) -> np.ndarray:
         """Per-cell regularity ``min(x, cw-x) + min(y, ch-y)`` for macro
         ``idx``'s legal box, on a ``[grid_size, grid_size]`` raster. Higher
-        = farther from edge (worse per MaskRegulate). Used as a CNN channel
-        in Task 4's encoder rasterizer.
+        = farther from edge (worse per the regularity objective). Used as a
+        CNN channel in the encoder rasterizer.
         """
         x_lo = float(self.half_w[idx])
         x_hi = float(self.cw - self.half_w[idx])
@@ -560,7 +554,7 @@ class PlacementState:
         Cost: ``O(N × grid_size)`` for N hard macros — the per-cell test is
         vectorized over the grid, but iterated over macros (early-skips on
         macros that lie entirely outside the legal box for ``idx``). For
-        the IBM benchmarks (N=246–537, grid=64) this is microseconds.
+        the IBM benchmarks this is microseconds.
         """
         # Legal placement box for this macro.
         x_lo = float(self.half_w[idx])
@@ -624,7 +618,7 @@ class PlacementState:
                 out.append((cx, cy))
         return out
 
-    # ── WireMask (MaskRegulate Task 2) ────────────────────────────────────
+    # ── WireMask ──────────────────────────────────────────────────────────
     # Analytic HPWL-optimal candidate cells for one macro. The macro's added
     # HPWL contribution at cell (x, y) is sum over incident edges of
     # ``w * (|x - anchor_x| + |y - anchor_y|)``, which is **separable** in
@@ -640,8 +634,8 @@ class PlacementState:
         y_centers[gy])``. Returns ``(empty, empty, empty)`` if the macro
         has no incident edges or the legal box collapses.
 
-        Shared by ``wire_mask_best`` (top-k extraction) and the Task 4
-        encoder rasterizer (full grid as a CNN channel).
+        Shared by ``wire_mask_best`` (top-k extraction) and the encoder
+        rasterizer (full grid as a CNN channel).
         """
         incident_hh = self.macro_edge_indices[idx]
         incident_hf = self.macro_hf_indices[idx]
@@ -751,16 +745,16 @@ class PlacementState:
         """Candidate centers for macro ``idx``: connected centroid + top-K
         connected partners + grid jitter + random jumps.
 
-        A.3 (LKH critique fix): the pre-fix mix was 1 connected centroid +
-        12 grid jitter + 4 random — only 1/16 carried connectivity signal.
-        We now spend 4 of the 16 slots on positions stepping toward each of
-        the macro's top-4 most strongly-connected partners (alpha-nearness
-        analog), keeping 7 grid-jitter and 4 random.
+        The 16 slots are split: 1 connected centroid + 4 connected-partner
+        offsets (positions stepping toward the macro's top-4 most
+        strongly-connected partners; an alpha-nearness analog) + 7
+        grid-jitter + 4 random jumps. The connected-partner offsets carry
+        the connectivity signal that pure grid jitter / random jumps miss.
 
-        Task 2 (MaskRegulate WireMask): when ``use_wiremask=True``, replace
-        the last ``wiremask_k`` random-jump slots with the analytic HPWL-best
-        cells from ``wire_mask_best``. Total slot count is unchanged so
-        downstream policy ``cand_dim`` and per-step compute stay constant.
+        WireMask: when ``use_wiremask=True``, replace the last ``wiremask_k``
+        random-jump slots with the analytic HPWL-best cells from
+        ``wire_mask_best``. Total slot count is unchanged so downstream
+        policy ``cand_dim`` and per-step compute stay constant.
         """
         r = rng or random
         cands: list[tuple[float, float]] = []
@@ -806,10 +800,9 @@ class PlacementState:
                               cur_y + dym * step)
             cands.append((x, y))
 
-        # Random canvas jumps. Task 2: when use_wiremask is on, reserve the
-        # last ``wiremask_k`` slots for the analytic HPWL-optimal cells
-        # instead. The wire_mask_best() call is O(grid * degree); on ibm01
-        # at grid=64, degree~30, that's ~2k ops per macro per chain step.
+        # Random canvas jumps. When use_wiremask is on, reserve the last
+        # ``wiremask_k`` slots for the analytic HPWL-optimal cells instead.
+        # The wire_mask_best() call is O(grid * degree).
         n_random = max(0, 4 - wiremask_k) if use_wiremask else 4
         for _ in range(n_random):
             x, y = self.clamp(idx,
@@ -820,12 +813,12 @@ class PlacementState:
         if use_wiremask:
             wm = self.wire_mask_best(idx, grid_size=wiremask_grid_size,
                                      top_k=wiremask_k)
-            # Task 3: pre-score legality filter. WireMask cells are HPWL-
-            # optimal but ignore overlap — a fully-clustered design can
-            # have its WireMask minima inside other macros. Filtering them
-            # away here is cheaper than letting the chain score and reject
-            # them (the surrogate's per-overlap penalty isn't always large
-            # enough to disqualify them, as Task 2's ibm01 run showed).
+            # Pre-score legality filter. WireMask cells are HPWL-optimal but
+            # ignore overlap — a fully-clustered design can have its WireMask
+            # minima inside other macros. Filtering them away here is cheaper
+            # than letting the chain score and reject them (the surrogate's
+            # per-overlap penalty isn't always large enough to disqualify
+            # them).
             if use_position_mask:
                 wm = self._filter_cells_through_mask(
                     idx, wm, grid_size=position_mask_grid_size,
@@ -835,14 +828,14 @@ class PlacementState:
         return cands[:num_candidates]
 
 
-# ── Feature extraction (for Phase 3 cost approximator) ────────────────────
+# ── Feature extraction (for the cost approximator) ────────────────────────
 
 FEATURE_DIM = 16
-# Task 1c (MaskRegulate): augmented schema with a regularity-Δ feature
-# appended. Kept as a SEPARATE constant so existing 16-dim checkpoints
-# remain loadable without modification — the approximator's ``in_dim`` is
-# read from the checkpoint and ``_features_for_move`` is invoked with
-# ``use_reg_feature`` matching that ``in_dim``.
+# Augmented schema with a regularity-Δ feature appended. Kept as a SEPARATE
+# constant so existing 16-dim checkpoints remain loadable without
+# modification — the approximator's ``in_dim`` is read from the checkpoint
+# and ``_features_for_move`` is invoked with ``use_reg_feature`` matching
+# that ``in_dim``.
 FEATURE_DIM_WITH_REG = 17
 
 
@@ -851,13 +844,13 @@ def _features_for_move(state: "PlacementState", macro_idx: int,
                         use_reg_feature: bool = False) -> np.ndarray:
     """Feature vector for predicting Δproxy_cost of moving ``macro_idx``
     by ``move_delta``. 16-dim by default; 17-dim with ``use_reg_feature=True``
-    (Task 1c — appends signed regularity Δ).
+    (appends signed regularity Δ).
 
     Mirrors the physical signals a GNN+CNN encoder would surface: HPWL
     change, local density at source/target, overlap change, neighbor-
     attraction change, and geometry. The optional 17th feature is
     ``reg_before - reg_after`` (positive = pushed edge-ward = good per
-    MaskRegulate's regularity term).
+    the regularity term).
     """
     old_x = float(state.pos[macro_idx, 0])
     old_y = float(state.pos[macro_idx, 1])
@@ -866,8 +859,7 @@ def _features_for_move(state: "PlacementState", macro_idx: int,
     w = float(state.sizes[macro_idx, 0])
     h = float(state.sizes[macro_idx, 1])
 
-    # HPWL surrogate Δ via incremental apply_move + revert (B.3). Pre-fix
-    # this called full state.hpwl() twice (O(E) each).
+    # HPWL surrogate Δ via incremental apply_move + revert.
     hpwl_before = state.hpwl()
     n_overlap_old = len(state.overlapping_with(macro_idx))
     state.apply_move(macro_idx, new_x, new_y)
@@ -904,7 +896,7 @@ def _features_for_move(state: "PlacementState", macro_idx: int,
         float(deg),                                  # macro degree
     ]
     if use_reg_feature:
-        # Task 1c: regularity Δ. Positive = pushed toward edge.
+        # Regularity Δ. Positive = pushed toward edge.
         reg_before = state.regularity_of(macro_idx, old_x, old_y)
         reg_after = state.regularity_of(macro_idx, new_x, new_y)
         base.append(reg_before - reg_after)
@@ -916,7 +908,7 @@ def _features_for_move(state: "PlacementState", macro_idx: int,
     return feats
 
 
-# ── Legalization (Phase 6 finishing step) ──────────────────────────────────
+# ── Legalization (finishing step) ──────────────────────────────────────────
 
 def _legalize(state: PlacementState, *, gap: float = 0.001,
               max_search_radius: int = 150) -> np.ndarray:
@@ -1000,7 +992,7 @@ def _legalize(state: PlacementState, *, gap: float = 0.001,
     return legal
 
 
-# ── Legalization-time probe (A.4 of LKH critique fix) ─────────────────────
+# ── Legalization-time probe ────────────────────────────────────────────────
 
 def _probe_legalization_cost(state: PlacementState, n_probe: int = 10) -> float:
     """Estimate full ``_legalize`` wall time by replicating the spiral
@@ -1044,7 +1036,7 @@ def _probe_legalization_cost(state: PlacementState, n_probe: int = 10) -> float:
     return elapsed * len(movable_idx) / max(len(sample), 1)
 
 
-# ── Cost approximator loading (Phase 3) ────────────────────────────────────
+# ── Cost approximator loading ──────────────────────────────────────────────
 
 def _load_cost_approximator(ckpt_path: Path):
     """Returns (model, feat_mean, feat_std, target_mean, target_std) or None."""
@@ -1056,9 +1048,9 @@ def _load_cost_approximator(ckpt_path: Path):
         return None
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     feat_dim = int(ckpt.get("feature_dim", FEATURE_DIM))
-    # Task 1c: infer ``use_reg_feature`` from the ckpt. Prefer an explicit
-    # field; otherwise fall back to a dim check so older 16-d checkpoints
-    # still resolve correctly even if they predate the field.
+    # Infer ``use_reg_feature`` from the ckpt. Prefer an explicit field;
+    # otherwise fall back to a dim check so older 16-d checkpoints still
+    # resolve correctly even if they predate the field.
     use_reg_feature = bool(
         ckpt.get("use_reg_feature", feat_dim == FEATURE_DIM_WITH_REG)
     )
@@ -1080,14 +1072,14 @@ def _load_cost_approximator(ckpt_path: Path):
     }
 
 
-# ── Chain policy loading (Phase 4) ─────────────────────────────────────────
+# ── Chain policy loading ───────────────────────────────────────────────────
 
 def _load_chain_policy(ckpt_path: Path):
     """Returns a dict with policy + chain_env helpers, or None if missing.
 
-    Also reconstructs the optional ``SeedSelectionHead`` (Fix 3) if the
-    checkpoint co-stored it under ``seed_head_state_dict``. The head is
-    returned under bundle key ``"seed_head"`` or None.
+    Also reconstructs the optional ``SeedSelectionHead`` if the checkpoint
+    co-stored it under ``seed_head_state_dict``. The head is returned under
+    bundle key ``"seed_head"`` or None.
     """
     if not ckpt_path.exists():
         return None
@@ -1101,9 +1093,9 @@ def _load_chain_policy(ckpt_path: Path):
     env_mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(env_mod)
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    # ChainPolicy may have been trained with MaskRegulate's cand_dim /
-    # encoder dims or the session building-block's base-dim overrides.
-    # Take whichever is present in the checkpoint; default to legacy.
+    # ChainPolicy may have been trained with augmented cand_dim / encoder
+    # dims or base-dim overrides. Take whichever is present in the
+    # checkpoint; default to legacy.
     policy_kwargs = {"hidden": ckpt.get("hidden", 64)}
     for k in ("global_dim", "macro_dim", "cand_dim", "chain_dim",
               "encoder_global_dim", "encoder_macro_dim"):
@@ -1113,8 +1105,8 @@ def _load_chain_policy(ckpt_path: Path):
     policy.load_state_dict(ckpt["state_dict"])
     policy.eval()
 
-    # MaskRegulate Task 4b: if the checkpoint co-stored a StateEncoder,
-    # rebuild it for inference. Legacy checkpoints have no encoder.
+    # If the checkpoint co-stored a StateEncoder, rebuild it for inference.
+    # Legacy checkpoints have no encoder.
     encoder = None
     enc_global_dim = int(ckpt.get("encoder_global_dim", 0))
     enc_state = ckpt.get("encoder_state_dict")
@@ -1136,7 +1128,7 @@ def _load_chain_policy(ckpt_path: Path):
                   f"running policy without encoder")
             encoder = None
 
-    # Session building-block: seed-head co-stored in checkpoint dict.
+    # Optional seed-head co-stored in checkpoint dict.
     seed_head = None
     if "seed_head_state_dict" in ckpt:
         try:
@@ -1161,9 +1153,9 @@ def _load_chain_policy(ckpt_path: Path):
 
 
 def _load_encoder(ckpt_path: Path, kind: str = "gnn"):
-    """Load a GNN encoder runtime (Fix 2). ``kind`` selects which runtime
-    module to use: ``"gnn"`` (primary) or ``"gnncnn"`` (optional extra).
-    Returns the bundle dict from the respective ``load_encoder`` or None.
+    """Load a GNN encoder runtime. ``kind`` selects which runtime module to
+    use: ``"gnn"`` (primary) or ``"gnncnn"`` (optional extra). Returns the
+    bundle dict from the respective ``load_encoder`` or None.
     """
     if not ckpt_path.exists():
         return None
@@ -1197,28 +1189,26 @@ class LKChain:
                  rng: random.Random, approximator: dict | None = None,
                  policy_bundle: dict | None = None,
                  gate_mode: str = "hpwl",
-                 # MaskRegulate opt-ins
+                 # Regularity / WireMask opt-ins
                  reg_weight: float = 0.0,
                  use_wiremask: bool = False,
                  use_position_mask: bool = False,
                  encoder=None,
-                 # Session building-block opt-ins
+                 # Encoder feature pipeline opt-ins
                  feature_mode: str = "handcrafted",
                  encoder_cache: dict | None = None,
                  lam: float = 0.01):
         """``gate_mode`` selects the third lex-coordinate of the commit gate:
 
         * ``"hpwl"`` (default): ``(overlap_pairs, overlap_area, hpwl)``.
-          Milestone-A behavior.
         * ``"predicted_proxy"``: ``(overlap_pairs, overlap_area,
-          cumulative_predicted_Δproxy)``. Requires an approximator. Milestone E
-          (LKH critique fix §3.3 deferred).
-        * ``"scalar_penalty"``: single-scalar commit (session). Score is
+          cumulative_predicted_Δproxy)``. Requires an approximator.
+        * ``"scalar_penalty"``: single-scalar commit. Score is
           ``predicted_Δproxy + lam × n_new_overlap_pairs``. Requires an
           approximator. See ``commit_gate_scalar.py``.
 
-        MaskRegulate Task 1b: ``reg_weight`` (default 0.0 → unchanged) blends
-        an analytic regularity term into the third lex coordinate. When
+        ``reg_weight`` (default 0.0 → unchanged) blends an analytic
+        regularity term into the third lex coordinate. When
         ``reg_weight > 0``, the third coord becomes
         ``base_norm + reg_weight * reg_norm`` where ``base_norm`` is HPWL
         (or predicted Δproxy) divided by ``max(cw, ch)`` and ``reg_norm`` is
@@ -1236,12 +1226,12 @@ class LKChain:
         self.approx = approximator
         self.policy_bundle = policy_bundle
         self.gate_mode = gate_mode
-        # MaskRegulate Task 1b/2/3/4b state
+        # Regularity / WireMask state
         self.reg_weight = float(reg_weight)
         self.use_wiremask = bool(use_wiremask)
         self.use_position_mask = bool(use_position_mask)
         self.encoder = encoder
-        # Session building-block state
+        # Encoder feature pipeline state
         self.feature_mode = feature_mode
         self.encoder_cache = encoder_cache
         self.lam = float(lam)
@@ -1258,8 +1248,8 @@ class LKChain:
         if gate_mode == "predicted_proxy" and approximator is None:
             # Soft fallback: predicted_proxy without an approximator is
             # meaningless, so silently fall back to hpwl. This keeps the
-            # ablation harness from blowing up when the user pairs the new
-            # gate with a pre-Milestone-C checkpoint that's been removed.
+            # ablation harness from blowing up when this gate is paired
+            # with a checkpoint that has been removed.
             self.gate_mode = "hpwl"
         if gate_mode == "scalar_penalty" and approximator is None:
             # Same fallback rationale as predicted_proxy.
@@ -1277,7 +1267,7 @@ class LKChain:
         When ``reg_weight == 0`` (default), returns the original behavior:
         ``st.hpwl()`` under hpwl gate or cumulative predicted Δproxy under
         predicted_proxy gate. When ``reg_weight > 0``, blends the base
-        coord with the canvas-normalized regularity term (Task 1b).
+        coord with the canvas-normalized regularity term.
         """
         if self.gate_mode == "predicted_proxy":
             base = predicted_cumulative
@@ -1321,11 +1311,11 @@ class LKChain:
                 if _d:
                     final_info = info
                 break
-            # Task 4b: forward encoder embeddings to policies that were
-            # trained with them (encoder_global_dim / encoder_macro_dim
-            # > 0). Legacy 16/17-d policies ignore these — they were built
-            # with the dims at 0, so the kwargs default to None and pass
-            # through harmlessly.
+            # Forward encoder embeddings to policies that were trained with
+            # them (encoder_global_dim / encoder_macro_dim > 0). Legacy
+            # 16/17-d policies ignore these — they were built with the dims
+            # at 0, so the kwargs default to None and pass through
+            # harmlessly.
             enc_global = (torch.from_numpy(sp["encoder_global"])
                           if "encoder_global" in sp else None)
             enc_macro = (torch.from_numpy(sp["encoder_macro"])
@@ -1344,8 +1334,8 @@ class LKChain:
             if _d:
                 final_info = info
 
-        # env's _finalize already restored state.pos to the best-prefix snapshot
-        # (A.1) under the lex (overlap_pairs, overlap_area, hpwl) gate (A.2),
+        # env's _finalize already restored state.pos to the best-prefix
+        # snapshot under the lex (overlap_pairs, overlap_area, hpwl) gate,
         # so st.hpwl() / st.overlap_pairs() now reflect the committed state.
         return {
             "chain_gain": float(final_info.get("hpwl_gain", 0.0)),
@@ -1372,10 +1362,10 @@ class LKChain:
         start_overlap_pairs = st.overlap_pairs()
         start_overlap_area = st.overlap_area()
 
-        # Best-prefix tracking (A.1): the canonical Lin-Kernighan gain
-        # criterion commits the lex-best PREFIX of the cascade, not the
-        # endpoint. Lex order on (overlap_pairs, overlap_area, third) is
-        # the gate. Third coordinate depends on gate_mode + reg_weight:
+        # Best-prefix tracking: the canonical Lin-Kernighan gain criterion
+        # commits the lex-best PREFIX of the cascade, not the endpoint.
+        # Lex order on (overlap_pairs, overlap_area, third) is the gate.
+        # Third coordinate depends on gate_mode + reg_weight:
         #   - "hpwl"             -> st.hpwl() [+ reg_weight * reg_norm]
         #   - "predicted_proxy"  -> cumulative Δproxy [+ reg_weight * reg_norm]
         #   - "scalar_penalty"   -> single scalar via ScalarBestTracker
@@ -1401,18 +1391,17 @@ class LKChain:
 
         current = self.seed
         length = 0
-        # A.3: track visited macros so the cascade can't oscillate between
-        # the same two macros under combined-score follow.
+        # Track visited macros so the cascade can't oscillate between the
+        # same two macros under combined-score follow.
         visited: set[int] = {self.seed}
 
         for step in range(max_length):
-            # A.3: candidate_positions returns up to 16 (1 centroid + 4
+            # candidate_positions returns up to 16 (1 centroid + 4
             # connected-partner offsets + 7 grid jitter + 4 random jumps).
-            # Pre-fix the inner loop asked for 12, which deterministically
-            # truncated *all* random jumps because they're appended last —
-            # the chain lost its canvas-jump diversifier. Ask for 16 so the
-            # random jumps are preserved; per-candidate cost is O(degree+N)
-            # so the 33% extra calls is bounded.
+            # Requesting fewer than 16 would deterministically truncate the
+            # random jumps (appended last), losing the chain's canvas-jump
+            # diversifier. Per-candidate cost is O(degree+N) so 16 is
+            # bounded.
             cands = st.candidate_positions(current, num_candidates=16,
                                             rng=self.rng,
                                             use_wiremask=self.use_wiremask,
@@ -1422,7 +1411,7 @@ class LKChain:
 
             # Score each candidate. With a trained approximator: predicted
             # Δproxy_cost (lower is better). Without: HPWL surrogate + per-
-            # candidate overlap penalty (the pre-Phase-3 fallback).
+            # candidate overlap penalty.
             best_pos = None
             best_score = float("inf")
             hpwl_scale = max(st.cw, st.ch)
@@ -1431,8 +1420,8 @@ class LKChain:
 
             best_predicted_delta = 0.0  # used iff gate uses predicted Δproxy
             if self.approx is not None:
-                # Feature schema follows the loaded checkpoint (MaskRegulate
-                # 17-dim vs legacy 16-dim). In session encoder mode we
+                # Feature schema follows the loaded checkpoint (regularity-
+                # augmented 17-dim vs legacy 16-dim). In encoder mode we
                 # further wrap with [macro_emb; global_vec; hand_feats]
                 # using the chain-level encoder cache.
                 use_reg_feat = bool(self.approx.get("use_reg_feature", False))
@@ -1462,7 +1451,7 @@ class LKChain:
 
                 # Safety floor: candidates that would introduce extra hard-
                 # macro overlaps get penalized in the same units as proxy
-                # cost. Use incremental apply_move/revert (B.3).
+                # cost. Use incremental apply_move/revert.
                 for k, (cx, cy) in enumerate(cands):
                     st.apply_move(current, cx, cy)
                     new_ov = len(st.overlapping_with(current))
@@ -1473,9 +1462,9 @@ class LKChain:
                         best_pos = (cx, cy)
                         best_predicted_delta = float(pred_delta[k])
             else:
-                # B.3: per-candidate apply + revert. The HPWL read is O(1)
-                # cached and apply_move is O(degree)+O(N) — pre-fix this
-                # was 12 * (O(E) + O(N^2)) per chain step.
+                # Per-candidate apply + revert via the incremental cache.
+                # The HPWL read is O(1) cached and apply_move is
+                # O(degree)+O(N).
                 for (cx, cy) in cands:
                     st.apply_move(current, cx, cy)
                     new_ov = len(st.overlapping_with(current))
@@ -1488,13 +1477,13 @@ class LKChain:
             if best_pos is None:
                 break
 
-            # Apply best move (B.3: cache-aware).
+            # Apply best move (cache-aware).
             st.apply_move(current, best_pos[0], best_pos[1])
             length += 1
             if self.gate_mode in ("predicted_proxy", "scalar_penalty"):
                 predicted_cumulative += best_predicted_delta
 
-            # Best-prefix snapshot (A.1): the state *after* this move is a
+            # Best-prefix snapshot: the state *after* this move is a
             # candidate commit point.
             if use_scalar_gate:
                 scalar_tracker.update(
@@ -1509,8 +1498,8 @@ class LKChain:
                     best_pos_snapshot = st.pos.copy()
                     best_prefix_index = length
 
-            # Cascade to a displaced macro, if any. A.3: combined score
-            # = manhattan_dist / (connectivity_weight + eps). Lower is
+            # Cascade to a displaced macro, if any. Combined score =
+            # manhattan_dist / (connectivity_weight + eps). Lower is
             # better; we prefer displaced macros that are both close *and*
             # strongly connected, rather than pure-Manhattan (which pulls
             # the chain into geometrically nearby but topologically
@@ -1529,11 +1518,11 @@ class LKChain:
             current = int(displaced[int(np.argmin(scores))])
             visited.add(current)
 
-        # Best-prefix commit (A.1 + A.2): restore the lex-best prefix on
-        # the lex tuple. If no prefix beat start, full revert (worst case =
-        # current behavior). Bulk pos[:]= writes bypass apply_move so we
-        # rebuild_caches() afterward (B.3 contract). chain_gain is reported
-        # in actual HPWL units regardless of gate_mode for monitoring.
+        # Best-prefix commit: restore the lex-best prefix on the lex tuple.
+        # If no prefix beat start, full revert. Bulk pos[:]= writes bypass
+        # apply_move so we rebuild_caches() afterward. chain_gain is
+        # reported in actual HPWL units regardless of gate_mode for
+        # monitoring.
         if use_scalar_gate:
             committed = scalar_tracker.commit_best(st)
             if committed:
@@ -1562,28 +1551,25 @@ class LKChain:
                 "overlap_delta": 0, "best_prefix_index": 0}
 
 
-# ── Analytical warm start (Step 2: warm-start ablation) ────────────────────
+# ── Analytical warm start ──────────────────────────────────────────────────
 
 def _analytical_warmstart(state: PlacementState, *, n_iters: int = 40,
                           anchor_pull: float = 1.0) -> np.ndarray:
     """Pure-numpy quadratic / force-directed global placement.
 
-    Step 2 of the "what's holding us back" plan: the placer currently only
-    *refines* the challenge-provided ``initial.plc``, which already sits near
-    proxy 1.46. Refining a near-optimal placement is a different (and
-    lower-headroom) problem than placing from scratch — so we need a way to
-    seed the chain loop from something other than ``initial.plc`` to tell
-    whether the method has real optimization power or is only polishing.
+    Provides an alternative starting placement for the chain loop when
+    refining ``initial.plc`` is not desired (e.g. to evaluate whether the
+    method has real optimization power or is only polishing a near-optimal
+    seed).
 
-    This is the analytical-warm-start arm (RePlAce/DREAMPlace are external
-    tools that can't run under the judges' ``--network none`` image; this is
-    a self-contained stand-in in their spirit). Each movable hard macro is
-    relaxed (Jacobi sweeps) toward the weighted centroid of (a) its connected
-    hard-macro neighbours and (b) its fixed terminals (soft macros + IO
-    ports), using the same HPWL-surrogate edge weights the chain loop uses.
-    The fixed anchors are the boundary conditions that stop everything from
-    collapsing to a single point — exactly the role of fixed pins in classic
-    quadratic placement.
+    This is a self-contained analytical warm start in the spirit of
+    RePlAce/DREAMPlace (which can't run under the judges' ``--network none``
+    image). Each movable hard macro is relaxed (Jacobi sweeps) toward the
+    weighted centroid of (a) its connected hard-macro neighbours and (b)
+    its fixed terminals (soft macros + IO ports), using the same HPWL-
+    surrogate edge weights the chain loop uses. The fixed anchors are the
+    boundary conditions that stop everything from collapsing to a single
+    point — exactly the role of fixed pins in classic quadratic placement.
 
     Returns a new ``[N, 2]`` position array. The result generally has
     overlaps (analytical placers ignore them); the chain loop's overlap-aware
@@ -1641,9 +1627,9 @@ class LKHPlacer:
 
     Uses the learned ChainPolicy when ``checkpoints/chain_policy.pt`` exists,
     else the learned CostApproximator when ``checkpoints/cost_approximator.pt``
-    exists, else a pure HPWL+overlap surrogate. Phase 6 inference adds a
-    stagnation counter that triggers a random perturbation of K random
-    macros when no chain has improved the best-seen placement in a while.
+    exists, else a pure HPWL+overlap surrogate. A stagnation counter
+    triggers a random perturbation of K macros when no chain has improved
+    the best-seen placement in a while.
     """
 
     def __init__(self, seed: int = 42, time_budget_s: float = 60.0,
@@ -1657,7 +1643,7 @@ class LKHPlacer:
                  legalization_reserve_frac: float = 0.05,
                  seed_refresh_interval: int = 100,
                  gate_mode: str = "hpwl",
-                 # MaskRegulate opt-ins
+                 # Regularity / WireMask opt-ins
                  reg_weight: float = 0.0,
                  use_wiremask: bool = False,
                  use_position_mask: bool = False,
@@ -1670,7 +1656,7 @@ class LKHPlacer:
                  #                  (e.g. external RePlAce/DREAMPlace output).
                  init_mode: str = "initial",
                  seeds_dir: str | None = None,
-                 # Session building-block opt-ins
+                 # Encoder feature pipeline opt-ins
                  feature_mode: str = "handcrafted",
                  encoder_kind: str = "gnn",
                  encoder_path: str | None = None,
@@ -1689,34 +1675,33 @@ class LKHPlacer:
         self.max_chain_length = max_chain_length
         self.stagnation_threshold = stagnation_threshold
         self.perturb_macros = perturb_macros
-        # A.4 (LKH critique fix): explicit legalization budget.
-        # ``legalization_reserve_s=None`` means "probe and choose adaptively"
-        # — the chain loop cuts off early enough for ``_legalize`` to finish
-        # within ``time_budget_s``. An explicit value disables the probe.
+        # Explicit legalization budget. ``legalization_reserve_s=None`` means
+        # "probe and choose adaptively" — the chain loop cuts off early
+        # enough for ``_legalize`` to finish within ``time_budget_s``. An
+        # explicit value disables the probe.
         self.legalization_reserve_s = legalization_reserve_s
         self.legalization_reserve_frac = legalization_reserve_frac
-        # A.5 (LKH critique fix): seed-weight staleness. Pre-fix the weights
-        # were a static snapshot of HPWL contribution at place() entry; the
-        # placement drifts across thousands of chains so the ranking goes
-        # stale. Refresh every ``seed_refresh_interval`` chains and after
-        # every kick.
+        # Seed-weight refresh interval. Static seed weights computed at
+        # place() entry go stale as the placement drifts across thousands
+        # of chains. Refresh every ``seed_refresh_interval`` chains and
+        # after every kick.
         self.seed_refresh_interval = seed_refresh_interval
-        # E.1: commit-gate mode propagated to every LKChain spawned by this
-        # placer. ``"hpwl"`` is the Milestone-A default (no retrain needed);
-        # ``"predicted_proxy"`` and ``"scalar_penalty"`` (Fix 5) require an
+        # Commit-gate mode propagated to every LKChain spawned by this
+        # placer. ``"hpwl"`` is the default (no retrain needed);
+        # ``"predicted_proxy"`` and ``"scalar_penalty"`` require an
         # approximator.
         self.gate_mode = gate_mode
-        # MaskRegulate Task 1b: regularity blend weight (0.0 = unchanged).
+        # Regularity blend weight (0.0 = unchanged).
         self.reg_weight = float(reg_weight)
-        # MaskRegulate Task 2: WireMask candidate injection.
+        # WireMask candidate injection.
         self.use_wiremask = bool(use_wiremask)
-        # MaskRegulate Task 3: legality filter on WireMask candidates.
+        # Legality filter on WireMask candidates.
         self.use_position_mask = bool(use_position_mask)
-        # Task 4b: optional StateEncoder propagated to every LKChain spawn.
+        # Optional StateEncoder propagated to every LKChain spawn.
         # None = legacy path (no encoder branch in the policy forward).
         self.encoder = encoder
 
-        # Fix 2: feature pipeline selection.
+        # Feature pipeline selection.
         if feature_mode not in ("handcrafted", "encoder"):
             raise ValueError(
                 f"unknown feature_mode={feature_mode!r}; expected "
@@ -1730,14 +1715,14 @@ class LKHPlacer:
         self.feature_mode = feature_mode
         self.encoder_kind = encoder_kind
 
-        # Fix 3: who picks the seed macro.
+        # Who picks the seed macro.
         if seed_mode not in ("heuristic", "policy"):
             raise ValueError(
                 f"unknown seed_mode={seed_mode!r}; expected 'heuristic' or 'policy'"
             )
         self.seed_mode = seed_mode
 
-        # Fix 5: scalar-gate overlap weight.
+        # Scalar-gate overlap weight.
         self.lam = float(lam)
 
         approx_ckpt = Path(checkpoint_path) if checkpoint_path else (
@@ -1752,8 +1737,8 @@ class LKHPlacer:
         else:
             print(f"[LKHPlacer] using HPWL surrogate")
 
-        # Fix 2: optionally load the encoder. Only attempted when the user
-        # asks for encoder feature mode — saves load time + memory in default.
+        # Optionally load the encoder. Only attempted when the caller asks
+        # for encoder feature mode — saves load time + memory in default.
         self.encoder_bundle = None
         if self.feature_mode == "encoder":
             enc_ckpt = Path(encoder_path) if encoder_path else (
@@ -1776,7 +1761,7 @@ class LKHPlacer:
                 print(f"[LKHPlacer] chain policy loaded "
                       f"(iters={self.policy_bundle.get('n_iterations')}, "
                       f"trained on {self.policy_bundle.get('trained_on')})")
-                # MaskRegulate: attach co-trained StateEncoder if present.
+                # Attach co-trained StateEncoder if present.
                 if self.encoder is None and self.policy_bundle.get("encoder") is not None:
                     self.encoder = self.policy_bundle["encoder"]
                     print(f"[LKHPlacer] using co-trained StateEncoder")
@@ -1788,11 +1773,11 @@ class LKHPlacer:
     def _perturb(self, state: PlacementState, rng: random.Random,
                  seed_weights: list[float] | None = None,
                  movable_idx: list[int] | None = None) -> None:
-        """Move ``perturb_macros`` movable macros to random positions. A.5
-        (LKH critique fix): bias the picks toward the top-quartile of
-        ``seed_weights`` (the highest current HPWL-contribution macros) so
-        the kick targets stuck/high-cost regions instead of arbitrary ones.
-        Falls back to uniform-random when seed weights aren't supplied."""
+        """Move ``perturb_macros`` movable macros to random positions. Bias
+        the picks toward the top-quartile of ``seed_weights`` (the highest
+        current HPWL-contribution macros) so the kick targets stuck/high-
+        cost regions instead of arbitrary ones. Falls back to uniform-random
+        when seed weights aren't supplied."""
         if movable_idx is None:
             movable_idx = np.where(state.movable)[0].tolist()
         if not movable_idx:
@@ -1808,8 +1793,8 @@ class LKHPlacer:
             i = int(rng.choice(pool))
             x = rng.uniform(state.half_w[i], state.cw - state.half_w[i])
             y = rng.uniform(state.half_h[i], state.ch - state.half_h[i])
-            # B.3: route the random kick through apply_move so the
-            # incremental caches stay consistent across the perturbation.
+            # Route the random kick through apply_move so the incremental
+            # caches stay consistent across the perturbation.
             state.apply_move(i, x, y)
 
     def place(self, benchmark: Benchmark) -> torch.Tensor:
@@ -1825,7 +1810,7 @@ class LKHPlacer:
             return benchmark.macro_positions.clone()
 
         # init_mode controls where the chain loop starts from. Bulk pos
-        # writes bypass apply_move so we rebuild_caches() afterwards (B.3).
+        # writes bypass apply_move so we rebuild_caches() afterwards.
         if self.init_mode == "replace":
             # Load a pre-computed .plc from seeds_dir (e.g. external
             # RePlAce/DREAMPlace output). Falls back loudly if missing.
@@ -1858,8 +1843,8 @@ class LKHPlacer:
         # are sampled more often. Falls back to uniform if no edges.
         seed_weights = self._seed_weights(state, movable_idx)
 
-        # Fix 3: optionally use the learned seed-selection head. Requires
-        # both feature_mode="encoder" (so we have embeddings) and a policy
+        # Optionally use the learned seed-selection head. Requires both
+        # feature_mode="encoder" (so we have embeddings) and a policy
         # bundle that includes a seed head.
         seed_head = None
         if (self.seed_mode == "policy"
@@ -1872,7 +1857,7 @@ class LKHPlacer:
         elif self.seed_mode == "policy":
             print(f"[LKHPlacer] using default seed selection")
 
-        # A.4: reserve wall time for the post-loop _legalize step. If the
+        # Reserve wall time for the post-loop _legalize step. If the
         # caller didn't pin a value, probe the spiral on the 10 largest
         # movable macros and pad by 1.5x. Floor at frac * budget so a
         # mis-estimating probe can't starve legalization.
@@ -1880,17 +1865,13 @@ class LKHPlacer:
             legalization_reserve = float(self.legalization_reserve_s)
         else:
             probe_estimate = _probe_legalization_cost(state, n_probe=10)
-            # Tier-1 Fix D: density-aware scaling. The probe runs a fixed
-            # 3-ring sweep on 10 macros — calibrated for sparse states. On
-            # dense designs (ibm17/18 routinely hit chain-loop end with 50+
-            # overlap pairs) real legalization needs up to 150 rings per
-            # macro, so the 3-ring probe undershoots by ~10x. Without this
-            # scaling, ibm17 wall time hit 127s on a 60s budget — chain
-            # loop ran its 57s, then legalization ran free for ~70s.
+            # Density-aware scaling. The probe runs a fixed 3-ring sweep on
+            # 10 macros — calibrated for sparse states. On dense designs
+            # the real legalization needs up to 150 rings per macro, so the
+            # 3-ring probe undershoots by ~10x.
             #
             # Heuristic: count initial overlap pairs and ramp the reserve
-            # linearly above 20 pairs, capped at 8x. ibm01 typically has
-            # ~70 initial pairs → 3.5x; ibm17 ~150-300 → 7-8x.
+            # linearly above 20 pairs, capped at 8x.
             initial_overlaps = state.overlap_pairs()
             density_multiplier = max(1.0, min(8.0, initial_overlaps / 20.0))
             floor = self.legalization_reserve_frac * self.time_budget_s
@@ -1910,17 +1891,17 @@ class LKHPlacer:
         start = time.time()
         chains = 0
         best_pos = state.pos.copy()
-        # A.2: outer-loop best-tracking must match the chain-internal lex
-        # gate `(overlap_pairs, overlap_area, third)`. With the pre-A.2
-        # 2-tuple, a chain that reduced `overlap_area` at slight HPWL cost
-        # would commit (lex-better in 3-tuple) but the outer would prefer
-        # an earlier higher-area state with lower HPWL — and legalization
-        # would then have to undo a larger overlap, regressing the very
-        # invariant A.2 was designed to protect.
-        # Task 1b: when reg_weight > 0, the outer third blends HPWL with
-        # regularity (canvas-normalized). Independent of gate_mode — the
-        # outer compares across chains and needs a state-level scalar,
-        # not the per-chain cumulative-Δproxy used inside predicted_proxy.
+        # Outer-loop best-tracking must match the chain-internal lex gate
+        # `(overlap_pairs, overlap_area, third)`. A 2-tuple gate would let
+        # a chain that reduces `overlap_area` at slight HPWL cost commit
+        # (lex-better in 3-tuple), but the outer would prefer an earlier
+        # higher-area state with lower HPWL — and legalization would then
+        # have to undo a larger overlap, regressing the very invariant the
+        # 3-tuple protects.
+        # When reg_weight > 0, the outer third blends HPWL with regularity
+        # (canvas-normalized). Independent of gate_mode — the outer compares
+        # across chains and needs a state-level scalar, not the per-chain
+        # cumulative-Δproxy used inside predicted_proxy.
         _hpwl_scale = max(state.cw, state.ch)
         _reg_scale = state.cw + state.ch
         def _outer_third() -> float:
@@ -1932,8 +1913,8 @@ class LKHPlacer:
         stagnation = 0
 
         while chains < self.max_chains and (time.time() - start) < chain_loop_deadline:
-            # Fix 2: refresh encoder cache once per chain. The same per-node
-            # + graph embeddings are reused for the chain's seed selection
+            # Refresh encoder cache once per chain. The same per-node +
+            # graph embeddings are reused for the chain's seed selection
             # and every candidate-scoring decision inside the chain.
             encoder_cache = None
             if self.feature_mode == "encoder" and self.encoder_bundle is not None:
@@ -1946,7 +1927,7 @@ class LKHPlacer:
                     per_node, graph_vec = encode_state_gnncnn(state, encoder, with_grad=False)
                 encoder_cache = {"per_node": per_node, "graph_vec": graph_vec}
 
-            # Fix 3: seed pick. Either heuristic (default) or policy-driven.
+            # Seed pick. Either heuristic (default) or policy-driven.
             if seed_head is not None and encoder_cache is not None:
                 from seed_head import choose_seed_by_policy
                 movable_mask_arr = state.movable
@@ -1984,16 +1965,16 @@ class LKHPlacer:
             else:
                 stagnation += 1
 
-            # A.5: refresh seed weights every ``seed_refresh_interval``
-            # chains so the seed-sampling distribution tracks current
-            # placement, not the stale initial-placement HPWL contributions.
+            # Refresh seed weights every ``seed_refresh_interval`` chains
+            # so the seed-sampling distribution tracks current placement,
+            # not the stale initial-placement HPWL contributions.
             if (self.seed_refresh_interval > 0
                     and chains % self.seed_refresh_interval == 0):
                 seed_weights = self._seed_weights(state, movable_idx)
 
-            # Phase 6.1: kick on stagnation. A.5: bias the kick toward
-            # top-quartile-cost macros, then refresh seed weights so the
-            # post-kick chain loop resumes with a non-stale ranking.
+            # Kick on stagnation: bias the kick toward top-quartile-cost
+            # macros, then refresh seed weights so the post-kick chain
+            # loop resumes with a non-stale ranking.
             if stagnation >= self.stagnation_threshold:
                 self._perturb(state, rng, seed_weights=seed_weights,
                               movable_idx=movable_idx)
@@ -2003,7 +1984,7 @@ class LKHPlacer:
         state.pos[:] = best_pos
         state.rebuild_caches()
 
-        # Phase 6 finishing — legalize residual hard-macro overlaps to zero.
+        # Finishing step — legalize residual hard-macro overlaps to zero.
         # This is the difference between an "invalid" submission (overlap_count
         # > 0, disqualified) and a valid one. The LK commit gate prevents
         # *adding* overlaps but cannot drive them to zero unaided.
@@ -2023,10 +2004,9 @@ class LKHPlacer:
     @staticmethod
     def _seed_weights(state: PlacementState, movable_idx: list[int]) -> list[float]:
         """Higher weight for macros with more / longer connections (likely
-        to benefit most from a move). C.1: also accounts for hard-to-fixed
-        edges so macros connected mainly to soft macros / IO ports are
-        sampled in proportion to their actual HPWL contribution; pre-C.1
-        such a macro had effectively zero seed weight."""
+        to benefit most from a move). Accounts for hard-to-fixed edges so
+        macros connected mainly to soft macros / IO ports are sampled in
+        proportion to their actual HPWL contribution."""
         if len(state.edges) == 0 and len(state.hf_macros) == 0:
             return [1.0] * len(movable_idx)
 

@@ -1,15 +1,14 @@
-"""Building block — scalar commit gate (Fix 5).
+"""Scalar commit gate.
 
-The poster's chain-commit rule scores intermediate states by a single
-scalar: ``wirelength + density + congestion + overlap penalty``. The
-current code uses a strict lex 3-tuple ``(overlap_pairs, overlap_area,
-hpwl)`` that absolutely vetoes any overlap-pair increase, regardless of
-the proxy gain.
+Scores each in-chain prefix by a single scalar
+(``cumulative_predicted_Δproxy + λ × new_overlap_pairs``) instead of the
+strict lex 3-tuple ``(overlap_pairs, overlap_area, hpwl)``. The lex
+variant absolutely vetoes any overlap-pair increase, regardless of the
+proxy gain it would buy.
 
-This module provides the scalar replacement. Used by both
-``LKChain.run_greedy`` (in placer.py) and ``ChainEnv._finalize`` (in
-chain_env.py) when ``gate_mode="scalar_penalty"``. Co-locating the logic
-here keeps the two consumers from drifting out of sync.
+Used by both ``LKChain.run_greedy`` (in placer.py) and
+``ChainEnv._finalize`` (in chain_env.py) when ``gate_mode="scalar_penalty"``.
+Co-locating the logic here keeps the two consumers from drifting.
 
 Score definition:
     score(step) = cumulative_predicted_Δproxy(step)
@@ -17,8 +16,7 @@ Score definition:
 
 The ``max(0, ...)`` term — "new overlap pairs" — penalizes only overlaps
 *introduced* by the chain, not pre-existing ones the chain hasn't yet
-removed. This matches the poster's "overlap penalty" framing: bad chains
-add overlaps, good chains don't have to fix the world's overlaps.
+removed.
 
 The committed prefix is the one with the lowest score; if no step beats
 the start score (0.0 + λ·0 = 0), we revert.
@@ -65,11 +63,11 @@ def new_overlap_pairs(start_overlap_pairs: int, current_overlap_pairs: int
 class ScalarBestTracker:
     """Best-prefix tracker for the scalar commit gate.
 
-    Mirrors the lex-tuple bookkeeping in ``LKChain.run_greedy`` (placer.py
-    lines 922-1066) and ``ChainEnv`` (chain_env.py lines 148-337) but
-    against the single scalar ``scalar_score``. Caller seeds it with the
-    chain's start state, calls ``update`` after each move, and ends with
-    ``commit_best`` to restore the lex-best prefix into the live state.
+    Mirrors the lex-tuple bookkeeping in ``LKChain.run_greedy`` (placer.py)
+    and ``ChainEnv`` (chain_env.py) but against the single scalar
+    ``scalar_score``. Caller seeds it with the chain's start state, calls
+    ``update`` after each move, and ends with ``commit_best`` to restore
+    the lex-best prefix into the live state.
     """
 
     def __init__(self, start_overlap_pairs: int, start_pos_snapshot: np.ndarray,
@@ -105,7 +103,7 @@ class ScalarBestTracker:
         non-trivial prefix was committed (else state was reverted to start).
 
         Bulk pos[:]= writes bypass the incremental cache machinery; we call
-        ``state.rebuild_caches()`` afterward (B.3 contract in placer.py).
+        ``state.rebuild_caches()`` afterward to keep the totals consistent.
         """
         committed = self.best_prefix_index > 0
         state.pos[:] = self.best_pos_snapshot

@@ -1,4 +1,4 @@
-"""Phase 7 — ablation runner.
+"""Ablation runner.
 
 Two modes:
 
@@ -10,23 +10,17 @@ Two modes:
         C. LKHPlacer + CostApproximator
         D. LKHPlacer + CostApproximator + ChainPolicy
 
-2. **Milestone mode (``--milestone {A,B,C,D,E}``)** — added by the LKH
-   critique fix plan §"Validation harness". Selects one configuration
-   matching a fix milestone, runs it across all benchmarks listed in
-   ``--benchmark``, and (optionally) appends a row to a JSON history file
-   so the per-milestone delta against any previous run can be computed
+2. **Milestone mode (``--milestone {A,B,C,D,E}``)** — selects one
+   configuration matching a milestone, runs it across all benchmarks listed
+   in ``--benchmark``, and (optionally) appends a row to a JSON history
+   file so the per-milestone delta against any previous run can be computed
    later::
 
         --milestone A  -> surrogate only, gate_mode=hpwl
-        --milestone B  -> surrogate only, gate_mode=hpwl   (perf-only fix)
+        --milestone B  -> surrogate only, gate_mode=hpwl   (perf-only)
         --milestone C  -> + approximator, gate_mode=hpwl
         --milestone D  -> + approximator + policy, gate_mode=hpwl
         --milestone E  -> + approximator + policy, gate_mode=predicted_proxy
-
-   Baseline (pre-fix code) is intentionally absent: the current codebase
-   no longer carries the pre-A semantics on the inference path. To get a
-   true baseline number, ``git checkout`` the pre-Milestone-A commit and
-   run with ``--milestone A`` against that checkout.
 
 Usage::
 
@@ -86,15 +80,15 @@ _MILESTONE_CONFIG = {
     "C": ("C: Milestone-C +approx", _APPROX_CKPT, None, False, "hpwl", 0.0, False, False),
     "D": ("D: Milestone-D +policy", _APPROX_CKPT, _POLICY_CKPT, True, "hpwl", 0.0, False, False),
     "E": ("E: Milestone-E predproxy", _APPROX_CKPT, _POLICY_CKPT, True, "predicted_proxy", 0.0, False, False),
-    # MaskRegulate Task 1b: regularity blended into the lex gate's third coord.
+    # Regularity blended into the lex gate's third coord.
     "F": ("F: + regularity (reg_weight=0.5)", _APPROX_CKPT, _POLICY_CKPT, True, "hpwl", 0.5, False, False),
-    # MaskRegulate Task 2: WireMask analytic candidates replace 3 random
-    # jumps. Defaults to greedy chain (no policy) so the candidate-set
-    # change is isolated from the learned scorer.
+    # WireMask analytic candidates replace 3 random jumps. Defaults to
+    # greedy chain (no policy) so the candidate-set change is isolated
+    # from the learned scorer.
     "G": ("G: + wiremask (greedy)", _APPROX_CKPT, None, False, "hpwl", 0.0, True, False),
-    # MaskRegulate Task 3: WireMask + legality filter. Without the filter,
-    # WireMask cells can be HPWL-best but heavily clustered → legalization
-    # can't recover (empirically on ibm01, Task 2 alone left 53 overlaps).
+    # WireMask + legality filter. Without the filter, WireMask cells can be
+    # HPWL-best but heavily clustered → legalization can't recover
+    # (empirically on ibm01, wiremask alone left 53 overlaps).
     "H": ("H: + wiremask + posmask", _APPROX_CKPT, None, False, "hpwl", 0.0, True, True),
 }
 
@@ -237,8 +231,8 @@ def _print_milestone_summary(record: dict, history_path: Path | None) -> None:
             history = []
 
     # Compare against the most recent matching-config record (same set of
-    # benchmarks). The plan's success criteria are stated as "delta vs.
-    # previous milestone", so compute that delta if we can find one.
+    # benchmarks): report the delta vs. the previous milestone if one is
+    # available.
     prev = None
     for past in reversed(history):
         if past.get("milestone") == record["milestone"]:
@@ -322,7 +316,7 @@ def run_ablation(benchmark_name: str, *, time_budget_s: float,
 
 
 def _print_table(results: list[dict], benchmark_name: str):
-    print(f"\n=== Phase 7 ablation: {benchmark_name} ===")
+    print(f"\n=== ablation: {benchmark_name} ===")
     print(f"  {'method':<22} {'proxy':>8} {'wl':>7} {'den':>7} {'cong':>7} "
           f"{'overlaps':>8} {'time(s)':>8}")
     print("  " + "-" * 72)
@@ -358,28 +352,27 @@ def main():
                         "Used to compute Δ-vs-previous-milestone in subsequent "
                         "runs. Only consulted in --milestone mode.")
     p.add_argument("--reg-weight", type=float, default=None,
-                   help="MaskRegulate Task 1b: override the milestone's "
-                        "default regularity weight (blend coefficient in the "
-                        "lex gate's third coord). 0 = pure hpwl gate. Only "
-                        "consulted in --milestone mode.")
+                   help="Override the milestone's default regularity weight "
+                        "(blend coefficient in the lex gate's third coord). "
+                        "0 = pure hpwl gate. Only consulted in --milestone "
+                        "mode.")
     p.add_argument("--use-wiremask",
                    action=argparse.BooleanOptionalAction, default=None,
-                   help="MaskRegulate Task 2: override the milestone's "
-                        "default use_wiremask flag. Replaces 3 random-jump "
-                        "candidate slots with analytic HPWL-best cells. "
-                        "Only consulted in --milestone mode.")
+                   help="Override the milestone's default use_wiremask "
+                        "flag. Replaces 3 random-jump candidate slots with "
+                        "analytic HPWL-best cells. Only consulted in "
+                        "--milestone mode.")
     p.add_argument("--use-position-mask",
                    action=argparse.BooleanOptionalAction, default=None,
-                   help="MaskRegulate Task 3: override the milestone's "
-                        "default use_position_mask flag. Filters WireMask "
-                        "candidates to legal cells. Only effective when "
-                        "use_wiremask is also on. Only consulted in "
-                        "--milestone mode.")
+                   help="Override the milestone's default use_position_mask "
+                        "flag. Filters WireMask candidates to legal cells. "
+                        "Only effective when use_wiremask is also on. Only "
+                        "consulted in --milestone mode.")
     args = p.parse_args()
 
     if args.milestone is None:
         # Legacy single-benchmark 4-config sweep.
-        print(f"=== Phase 7 ablation runner ===")
+        print(f"=== ablation runner ===")
         print(f"  benchmark={args.benchmark}  time_budget={args.time_budget}s")
         results = run_ablation(
             args.benchmark,
@@ -392,7 +385,7 @@ def main():
         return
 
     bench_names = [s.strip() for s in args.benchmark.split(",") if s.strip()]
-    print(f"=== Phase 7 milestone ablation runner ===")
+    print(f"=== milestone ablation runner ===")
     print(f"  milestone={args.milestone}  benchmarks={bench_names}  "
           f"time_budget={args.time_budget}s  max_chains={args.max_chains}")
     record = run_milestone(
