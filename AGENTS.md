@@ -21,12 +21,12 @@ HPWL surrogate, cascade follow rule, and outward-spiral legalizer.
 
 ## Upstream vs ours — boundary and invariant
 
-**Boundary commit:** `7d32ac9` ("checkpoint: upstream harness baseline", Danny Hagenlocker,
+**Boundary commit:** `7ccea20` ("checkpoint: upstream harness baseline", Danny Hagenlocker,
 2026-05-20). Everything in that commit and earlier is the upstream
 Partcl/HRT challenge harness. Everything after it is ours.
 
 **Invariant we maintain: zero edits to upstream Python.** Verified by
-`git diff 7d32ac9 HEAD -- macro_place/ scripts/ src/ test/
+`git diff 7ccea20 HEAD -- macro_place/ scripts/ src/ test/
 submissions/examples/ submissions/will_seed/ eval_docker/ benchmarks/
 baselines/ SCORING.md SETUP.md` returning empty.
 
@@ -98,11 +98,11 @@ onto Moritz's fork (`mathemoritz/LKH-macro-placer`). Current layout:
 
 The branch `session-on-mosch` (HEAD) holds our session work on top of
 Moritz's 8 commits. `main` tracks `origin/main` (= mosch's main, 8
-commits ahead of the baseline `1db4642`).
+commits ahead of the baseline `09c7268`).
 
 Future development should push to `origin` (= mosch). Do NOT push to
 `danny` unless explicitly requested — Danny's fork is intentionally
-frozen at the shared baseline `1db4642`.
+frozen at the shared baseline `09c7268`.
 
 ## Non-obvious invariants
 
