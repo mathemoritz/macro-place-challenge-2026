@@ -79,7 +79,23 @@ Shared files we touched (additive only):
 - `.gitignore` — `.cursor/` and `background/`
 - `README.md` (top-level) — prepended LKH docs above the original challenge content (still verbatim below)
 - `CHALLENGE_README.md` — created as the original `README.md` content + a 2-line cross-reference
-- `modal_output/*` — checked-in training-run artifacts (`history.json`, per-round records)
+
+## Remotes
+
+This working tree was originally cloned from Danny's fork
+(`dannyhagenlocker/macro-place-challenge-2026`) but the work has migrated
+onto Moritz's fork (`mathemoritz/LKH-macro-placer`). Current layout:
+
+- `origin` → `git@github.com:mathemoritz/LKH-macro-placer.git` (default for push/fetch)
+- `danny` → `git@github.com:dannyhagenlocker/macro-place-challenge-2026.git` (preserved, read-only in practice)
+
+The branch `session-on-mosch` (HEAD) holds our building-block work on top
+of Moritz's 8 MaskRegulate commits. `main` tracks `origin/main` (= mosch's
+main, 8 commits ahead of the baseline `1db4642`).
+
+Future development should push to `origin` (= mosch). Do NOT push to
+`danny` unless explicitly requested — Danny's fork is intentionally
+frozen at the shared baseline `1db4642`.
 
 ## Non-obvious invariants
 
